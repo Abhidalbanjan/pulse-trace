@@ -1,0 +1,56 @@
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: pulsetrace-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pulsetrace
+      POSTGRES_PASSWORD: pulsetrace_secret
+      POSTGRES_DB: pulsetrace
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Run migrations automatically on first start.
+      - ./log-service/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulsetrace"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Log Service ─────────────────────────────────────────────────────────────
+  log-service:
+    build:
+      context: .
+      dockerfile: log-service/Dockerfile
+    container_name: pulsetrace-log-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
+      PORT: "8081"
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Gateway Service ─────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway-service/Dockerfile
+    container_name: pulsetrace-gateway
+    restart: unless-stopped
+    environment:
+      LOG_SERVICE_URL: http://log-service:8081
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - log-service
+
+volumes:
+  postgres_data:

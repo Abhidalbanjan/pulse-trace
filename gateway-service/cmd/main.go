@@ -36,10 +36,12 @@ func main() {
 	// ── Routes ────────────────────────────────────────────────────────────────
 	logServiceURL := getEnv("LOG_SERVICE_URL", "http://localhost:8081")
 	alertServiceURL := getEnv("ALERT_SERVICE_URL", "http://localhost:8082")
+	correlationServiceURL := getEnv("CORRELATION_SERVICE_URL", "http://localhost:8083")
 
 	routes := []proxy.Route{
 		{Prefix: "/api/v1/logs", Upstream: logServiceURL},
 		{Prefix: "/api/v1/alerts", Upstream: alertServiceURL},
+		{Prefix: "/api/v1/incidents", Upstream: correlationServiceURL},
 	}
 
 	router := proxy.NewRouter(routes)
@@ -65,8 +67,9 @@ func main() {
 
 	go func() {
 		log.Printf("gateway-service listening on :%s", port)
-		log.Printf("routing /api/v1/logs    → %s", logServiceURL)
-		log.Printf("routing /api/v1/alerts  → %s", alertServiceURL)
+		log.Printf("routing /api/v1/logs       → %s", logServiceURL)
+		log.Printf("routing /api/v1/alerts     → %s", alertServiceURL)
+		log.Printf("routing /api/v1/incidents  → %s", correlationServiceURL)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}

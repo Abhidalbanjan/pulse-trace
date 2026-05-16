@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: correlation-service
+  namespace: pulsetrace
+  labels:
+    app: correlation-service
+    app.kubernetes.io/part-of: pulsetrace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: correlation-service
+  template:
+    metadata:
+      labels:
+        app: correlation-service
+    spec:
+      containers:
+        - name: correlation-service
+          image: pulse-trace-correlation-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8083
+          env:
+            - name: PORT
+              value: "8083"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: DATABASE_URL
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: KAFKA_BROKERS
+            - name: KAFKA_GROUP_ID
+              value: "correlation-service"
+            - name: RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: RABBITMQ_URL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8083
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8083
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: correlation-service
+  namespace: pulsetrace
+spec:
+  selector:
+    app: correlation-service
+  ports:
+    - port: 8083
+      targetPort: 8083

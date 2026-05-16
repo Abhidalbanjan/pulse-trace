@@ -12,11 +12,15 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/pulsetrace/alert-service/internal/repository"
+	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/models"
 	"github.com/pulsetrace/shared/telemetry"
 )
 
-const serviceName = "alert-service"
+const (
+	serviceName = "alert-service"
+	alertsTopic = "alerts"
+)
 
 // alertLevels defines which log levels trigger an alert.
 var alertLevels = map[models.LogLevel]bool{
@@ -25,20 +29,19 @@ var alertLevels = map[models.LogLevel]bool{
 }
 
 // LogConsumer processes log events from Kafka and creates alerts for
-// ERROR and FATAL entries.
+// ERROR and FATAL entries, then publishes them to the alerts topic for
+// the correlation engine to consume.
 type LogConsumer struct {
-	repo *repository.AlertRepository
+	repo     *repository.AlertRepository
+	producer *kafka.Producer // may be nil — degrades gracefully
 }
 
-func NewLogConsumer(repo *repository.AlertRepository) *LogConsumer {
-	return &LogConsumer{repo: repo}
+func NewLogConsumer(repo *repository.AlertRepository, producer *kafka.Producer) *LogConsumer {
+	return &LogConsumer{repo: repo, producer: producer}
 }
 
 // Handle is the MessageHandler passed to kafka.ConsumerGroup.
-// It extracts the upstream trace context from Kafka headers so the alert
-// creation span is a child of the log-service publish span.
 func (c *LogConsumer) Handle(msg *sarama.ConsumerMessage) error {
-	// Extract upstream W3C trace context from Kafka message headers.
 	ctx := telemetry.ExtractKafkaContext(context.Background(), msg)
 
 	tracer := otel.Tracer(serviceName)
@@ -58,7 +61,7 @@ func (c *LogConsumer) Handle(msg *sarama.ConsumerMessage) error {
 		log.Printf("log_consumer: failed to unmarshal message at offset %d: %v", msg.Offset, err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "unmarshal failed")
-		return nil // don't retry malformed messages
+		return nil
 	}
 
 	span.SetAttributes(
@@ -68,7 +71,7 @@ func (c *LogConsumer) Handle(msg *sarama.ConsumerMessage) error {
 	)
 
 	if !alertLevels[entry.Level] {
-		return nil // not an alertable level
+		return nil
 	}
 
 	_, dbSpan := tracer.Start(ctx, "db.insert_alert")
@@ -84,5 +87,25 @@ func (c *LogConsumer) Handle(msg *sarama.ConsumerMessage) error {
 	span.SetAttributes(attribute.String("alert.id", alert.ID))
 	log.Printf("log_consumer: alert created id=%s service=%s level=%s trace_id=%s",
 		alert.ID, alert.ServiceName, alert.Level, alert.TraceID)
+
+	// Publish alert to the alerts topic so the correlation engine can group it.
+	if c.producer != nil {
+		go func() {
+			_, kafkaSpan := tracer.Start(ctx, "kafka.publish_alert")
+			defer kafkaSpan.End()
+
+			payload, err := json.Marshal(alert)
+			if err != nil {
+				kafkaSpan.RecordError(err)
+				log.Printf("log_consumer: failed to marshal alert for kafka: %v", err)
+				return
+			}
+			if err := c.producer.PublishWithContext(ctx, alertsTopic, alert.ServiceName, payload); err != nil {
+				kafkaSpan.RecordError(err)
+				log.Printf("log_consumer: failed to publish alert %s to kafka: %v", alert.ID, err)
+			}
+		}()
+	}
+
 	return nil
 }

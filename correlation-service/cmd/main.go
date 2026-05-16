@@ -9,19 +9,20 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pulsetrace/alert-service/internal/consumer"
-	"github.com/pulsetrace/alert-service/internal/handler"
-	"github.com/pulsetrace/alert-service/internal/repository"
+	"github.com/pulsetrace/correlation-service/internal/engine"
+	"github.com/pulsetrace/correlation-service/internal/handler"
+	"github.com/pulsetrace/correlation-service/internal/repository"
 	"github.com/pulsetrace/shared/db"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/middleware"
+	"github.com/pulsetrace/shared/rabbitmq"
 	"github.com/pulsetrace/shared/telemetry"
 )
 
 const (
-	logsTopic   = "logs"
-	groupID     = "alert-service"
-	serviceName = "alert-service"
+	alertsTopic = "alerts"
+	groupID     = "correlation-service"
+	serviceName = "correlation-service"
 )
 
 func main() {
@@ -47,29 +48,29 @@ func main() {
 	}
 	defer pool.Close()
 
-	// ── Kafka producer (for publishing alerts to correlation engine) ───────────
-	producer, err := kafka.NewProducer()
+	// ── RabbitMQ publisher ────────────────────────────────────────────────────
+	publisher, err := rabbitmq.NewPublisher()
 	if err != nil {
-		log.Printf("WARNING: kafka producer unavailable: %v", err)
-		producer = nil
+		log.Printf("WARNING: rabbitmq unavailable, notifications disabled: %v", err)
+		publisher = nil
 	} else {
-		defer producer.Close()
+		defer publisher.Close()
 	}
 
 	// ── Wire up dependencies ──────────────────────────────────────────────────
-	repo := repository.NewAlertRepository(pool)
-	logConsumer := consumer.NewLogConsumer(repo, producer)
-	alertHandler := handler.NewAlertHandler(repo)
+	repo := repository.NewIncidentRepository(pool)
+	correlator := engine.NewCorrelator(repo, publisher)
+	incidentHandler := handler.NewIncidentHandler(repo)
 
-	// ── Kafka consumer (logs topic) ───────────────────────────────────────────
-	cg, err := kafka.NewConsumerGroup(groupID, []string{logsTopic}, logConsumer.Handle)
+	// ── Kafka consumer (alerts topic) ─────────────────────────────────────────
+	cg, err := kafka.NewConsumerGroup(groupID, []string{alertsTopic}, correlator.Handle)
 	if err != nil {
 		log.Fatalf("kafka consumer group failed: %v", err)
 	}
 	defer cg.Close()
 
 	go func() {
-		log.Printf("alert-service: starting kafka consumer group %q on topic %q", groupID, logsTopic)
+		log.Printf("correlation-service: consuming %q as group %q", alertsTopic, groupID)
 		if err := cg.Start(ctx); err != nil {
 			log.Printf("kafka consumer stopped: %v", err)
 		}
@@ -77,13 +78,13 @@ func main() {
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
-	alertHandler.RegisterRoutes(mux)
+	incidentHandler.RegisterRoutes(mux)
 
 	chain := middleware.CORS(middleware.Tracing(serviceName)(middleware.RequestLogger(mux)))
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8082"
+		port = "8083"
 	}
 
 	srv := &http.Server{
@@ -95,7 +96,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("alert-service HTTP listening on :%s", port)
+		log.Printf("correlation-service HTTP listening on :%s", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
@@ -105,7 +106,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("shutting down alert-service...")
+	log.Println("shutting down correlation-service...")
 	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -114,5 +115,5 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("forced shutdown: %v", err)
 	}
-	log.Println("alert-service stopped")
+	log.Println("correlation-service stopped")
 }

@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pulsetrace-config
+  namespace: pulsetrace
+data:
+  # Kafka
+  KAFKA_BROKERS: "kafka:29092"
+  # PostgreSQL (non-secret parts)
+  POSTGRES_DB: "pulsetrace"
+  POSTGRES_USER: "pulsetrace"
+  # OTel
+  OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+  # Service ports
+  LOG_SERVICE_PORT: "8081"
+  ALERT_SERVICE_PORT: "8082"
+  CORRELATION_SERVICE_PORT: "8083"
+  # Service URLs (used by gateway)
+  LOG_SERVICE_URL: "http://log-service:8081"
+  ALERT_SERVICE_URL: "http://alert-service:8082"
+  CORRELATION_SERVICE_URL: "http://correlation-service:8083"

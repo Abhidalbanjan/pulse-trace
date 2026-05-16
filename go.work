@@ -2,7 +2,9 @@ go 1.22
 
 use (
 	./alert-service
+	./correlation-service
 	./gateway-service
 	./log-service
+	./notification-service
 	./shared
 )

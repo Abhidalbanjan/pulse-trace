@@ -1,6 +1,6 @@
 services:
 
-  # ── Zookeeper (required by Kafka) ────────────────────────────────────────────
+  # ── Zookeeper ────────────────────────────────────────────────────────────────
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
     container_name: pulsetrace-zookeeper
@@ -41,7 +41,7 @@ services:
       retries: 10
       start_period: 45s
 
-  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: pulsetrace-postgres
@@ -54,23 +54,43 @@ services:
       - "5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      # Postgres only executes .sql files directly in initdb.d (not subdirs).
       - ./log-service/migrations/001_create_log_entries.sql:/docker-entrypoint-initdb.d/001_create_log_entries.sql
       - ./alert-service/migrations/001_create_alerts.sql:/docker-entrypoint-initdb.d/002_create_alerts.sql
+      - ./correlation-service/migrations/001_create_incidents.sql:/docker-entrypoint-initdb.d/003_create_incidents.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pulsetrace"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  # ── Jaeger (all-in-one) ──────────────────────────────────────────────────────
+  # ── RabbitMQ ─────────────────────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: pulsetrace-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: pulsetrace
+      RABBITMQ_DEFAULT_PASS: pulsetrace_secret
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── Jaeger ───────────────────────────────────────────────────────────────────
   jaeger:
     image: jaegertracing/all-in-one:1.57
     container_name: pulsetrace-jaeger
     restart: unless-stopped
     ports:
-      - "16686:16686"   # Jaeger UI
-      - "14250:14250"   # gRPC (used by OTel Collector → Jaeger)
+      - "16686:16686"
+      - "14250:14250"
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     healthcheck:
@@ -80,7 +100,7 @@ services:
       retries: 10
       start_period: 15s
 
-  # ── OpenTelemetry Collector ──────────────────────────────────────────────────
+  # ── OTel Collector ───────────────────────────────────────────────────────────
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.101.0
     container_name: pulsetrace-otel-collector
@@ -89,9 +109,9 @@ services:
     volumes:
       - ./otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml
     ports:
-      - "4317:4317"   # OTLP gRPC (services → collector)
-      - "4318:4318"   # OTLP HTTP
-      - "8889:8889"   # Prometheus metrics exporter
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
     depends_on:
       jaeger:
         condition: service_healthy
@@ -104,8 +124,6 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
-      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
-      - "--web.console.templates=/usr/share/prometheus/consoles"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus_data:/prometheus
@@ -132,7 +150,7 @@ services:
       - prometheus
       - jaeger
 
-  # ── Log Service ─────────────────────────────────────────────────────────────
+  # ── Log Service ──────────────────────────────────────────────────────────────
   log-service:
     build:
       context: .
@@ -154,7 +172,7 @@ services:
       otel-collector:
         condition: service_started
 
-  # ── Alert Service ────────────────────────────────────────────────────────────
+  # ── Alert Service ─────────────────────────────────────────────────────────────
   alert-service:
     build:
       context: .
@@ -177,7 +195,52 @@ services:
       otel-collector:
         condition: service_started
 
-  # ── Gateway Service ─────────────────────────────────────────────────────────
+  # ── Correlation Service ───────────────────────────────────────────────────────
+  correlation-service:
+    build:
+      context: .
+      dockerfile: correlation-service/Dockerfile
+    container_name: pulsetrace-correlation-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_GROUP_ID: correlation-service
+      RABBITMQ_URL: amqp://pulsetrace:pulsetrace_secret@rabbitmq:5672/
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      PORT: "8083"
+    ports:
+      - "8083:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  # ── Notification Service ──────────────────────────────────────────────────────
+  notification-service:
+    build:
+      context: .
+      dockerfile: notification-service/Dockerfile
+    container_name: pulsetrace-notification-service
+    restart: unless-stopped
+    environment:
+      RABBITMQ_URL: amqp://pulsetrace:pulsetrace_secret@rabbitmq:5672/
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      # Optional: set these to activate real channels
+      # SLACK_WEBHOOK_URL: https://hooks.slack.com/services/...
+      # SMTP_HOST: smtp.example.com
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  # ── Gateway Service ───────────────────────────────────────────────────────────
   gateway:
     build:
       context: .
@@ -187,6 +250,7 @@ services:
     environment:
       LOG_SERVICE_URL: http://log-service:8081
       ALERT_SERVICE_URL: http://alert-service:8082
+      CORRELATION_SERVICE_URL: http://correlation-service:8083
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       PORT: "8080"
     ports:
@@ -194,9 +258,11 @@ services:
     depends_on:
       - log-service
       - alert-service
+      - correlation-service
       - otel-collector
 
 volumes:
   postgres_data:
+  rabbitmq_data:
   prometheus_data:
   grafana_data:

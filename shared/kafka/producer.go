@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
+	"github.com/pulsetrace/shared/telemetry"
 )
 
 // Producer wraps a synchronous Sarama producer.
@@ -29,7 +31,6 @@ func NewProducer() (*Producer, error) {
 	cfg.Producer.Retry.Max = 5
 	cfg.Producer.Retry.Backoff = 200 * time.Millisecond
 
-	// Retry connecting to Kafka on startup — brokers may not be ready yet.
 	const maxRetries = 15
 	var (
 		p   sarama.SyncProducer
@@ -47,14 +48,24 @@ func NewProducer() (*Producer, error) {
 	return nil, fmt.Errorf("could not connect to kafka after %d attempts: %w", maxRetries, err)
 }
 
-// Publish sends a JSON-encoded message to the given topic.
-// The key is used for partition routing (e.g. service name).
+// Publish sends a message to the given topic without trace context.
 func (p *Producer) Publish(topic, key string, value []byte) error {
+	return p.PublishWithContext(context.Background(), topic, key, value)
+}
+
+// PublishWithContext sends a message to the given topic, injecting the W3C
+// trace context from ctx into the Kafka message headers so downstream
+// consumers can continue the distributed trace.
+func (p *Producer) PublishWithContext(ctx context.Context, topic, key string, value []byte) error {
 	msg := &sarama.ProducerMessage{
 		Topic: topic,
 		Key:   sarama.StringEncoder(key),
 		Value: sarama.ByteEncoder(value),
 	}
+
+	// Inject trace context into Kafka headers (W3C traceparent / tracestate).
+	telemetry.InjectKafkaHeaders(ctx, msg)
+
 	partition, offset, err := p.producer.SendMessage(msg)
 	if err != nil {
 		return fmt.Errorf("failed to publish to topic %q: %w", topic, err)

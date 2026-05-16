@@ -14,21 +14,35 @@ import (
 	"github.com/pulsetrace/shared/db"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/middleware"
+	"github.com/pulsetrace/shared/telemetry"
 )
+
+const serviceName = "log-service"
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Connect to PostgreSQL.
+	// ── Telemetry ─────────────────────────────────────────────────────────────
+	_, shutdownTracer, err := telemetry.InitTracer(ctx, serviceName)
+	if err != nil {
+		log.Printf("WARNING: tracing unavailable: %v", err)
+	} else {
+		defer func() {
+			if err := shutdownTracer(context.Background()); err != nil {
+				log.Printf("tracer shutdown error: %v", err)
+			}
+		}()
+	}
+
+	// ── Database ──────────────────────────────────────────────────────────────
 	pool, err := db.NewPostgresPool(ctx)
 	if err != nil {
 		log.Fatalf("database connection failed: %v", err)
 	}
 	defer pool.Close()
 
-	// Connect to Kafka. The service starts even if Kafka is unavailable —
-	// logs are still persisted; publishing degrades gracefully.
+	// ── Kafka producer ────────────────────────────────────────────────────────
 	producer, err := kafka.NewProducer()
 	if err != nil {
 		log.Printf("WARNING: kafka producer unavailable, continuing without event publishing: %v", err)
@@ -37,16 +51,15 @@ func main() {
 		defer producer.Close()
 	}
 
-	// Wire up dependencies.
+	// ── HTTP server ───────────────────────────────────────────────────────────
 	repo := repository.NewLogRepository(pool)
 	logHandler := handler.NewLogHandler(repo, producer)
 
-	// Register routes.
 	mux := http.NewServeMux()
 	logHandler.RegisterRoutes(mux)
 
-	// Apply middleware chain: CORS → request logger → router.
-	chain := middleware.CORS(middleware.RequestLogger(mux))
+	// Middleware chain: CORS → Tracing → RequestLogger → router
+	chain := middleware.CORS(middleware.Tracing(serviceName)(middleware.RequestLogger(mux)))
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -61,7 +74,6 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start server in a goroutine so we can listen for shutdown signals.
 	go func() {
 		log.Printf("log-service listening on :%s", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -69,7 +81,6 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown on SIGINT / SIGTERM.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit

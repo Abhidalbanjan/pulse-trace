@@ -5,9 +5,15 @@ import (
 	"net/http"
 	"strconv"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/pulsetrace/alert-service/internal/repository"
 	"github.com/pulsetrace/shared/models"
 )
+
+const serviceName = "alert-service"
 
 // AlertHandler exposes HTTP endpoints for querying alerts.
 type AlertHandler struct {
@@ -29,6 +35,10 @@ func (h *AlertHandler) RegisterRoutes(mux *http.ServeMux) {
 //
 //	GET /api/v1/alerts?service=payment-service&level=ERROR&page=1&page_size=20
 func (h *AlertHandler) ListAlerts(w http.ResponseWriter, r *http.Request) {
+	tracer := otel.Tracer(serviceName)
+	ctx, span := tracer.Start(r.Context(), "alert.list")
+	defer span.End()
+
 	q := r.URL.Query()
 
 	params := &models.AlertQueryParams{
@@ -45,8 +55,10 @@ func (h *AlertHandler) ListAlerts(w http.ResponseWriter, r *http.Request) {
 		params.PageSize = ps
 	}
 
-	result, err := h.repo.Query(r.Context(), params)
+	result, err := h.repo.Query(ctx, params)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "query failed")
 		writeJSON(w, http.StatusInternalServerError, models.Fail("query failed: "+err.Error()))
 		return
 	}
@@ -65,14 +77,23 @@ func (h *AlertHandler) ListAlerts(w http.ResponseWriter, r *http.Request) {
 //
 //	GET /api/v1/alerts/{id}
 func (h *AlertHandler) GetAlert(w http.ResponseWriter, r *http.Request) {
+	tracer := otel.Tracer(serviceName)
+	ctx, span := tracer.Start(r.Context(), "alert.get")
+	defer span.End()
+
 	id := r.PathValue("id")
 	if id == "" {
+		span.SetStatus(codes.Error, "missing id")
 		writeJSON(w, http.StatusBadRequest, models.Fail("id is required"))
 		return
 	}
 
-	alert, err := h.repo.GetByID(r.Context(), id)
+	span.SetAttributes(attribute.String("alert.id", id))
+
+	alert, err := h.repo.GetByID(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "not found")
 		writeJSON(w, http.StatusNotFound, models.Fail("alert not found"))
 		return
 	}
@@ -84,7 +105,7 @@ func (h *AlertHandler) GetAlert(w http.ResponseWriter, r *http.Request) {
 //
 //	GET /healthz
 func (h *AlertHandler) Health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "alert-service"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": serviceName})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

@@ -6,12 +6,19 @@ import (
 	"net/http"
 	"strconv"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/pulsetrace/log-service/internal/repository"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/models"
 )
 
-const logsTopic = "logs"
+const (
+	logsTopic   = "logs"
+	serviceName = "log-service"
+)
 
 // LogHandler exposes HTTP endpoints for log ingestion and querying.
 type LogHandler struct {
@@ -37,33 +44,56 @@ func (h *LogHandler) RegisterRoutes(mux *http.ServeMux) {
 //
 //	POST /api/v1/logs
 func (h *LogHandler) IngestLog(w http.ResponseWriter, r *http.Request) {
+	tracer := otel.Tracer(serviceName)
+	ctx, span := tracer.Start(r.Context(), "log.ingest")
+	defer span.End()
+
 	var req models.CreateLogRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid request body")
 		writeJSON(w, http.StatusBadRequest, models.Fail("invalid request body: "+err.Error()))
 		return
 	}
 
 	if req.ServiceName == "" || req.Message == "" || req.Level == "" {
+		span.SetStatus(codes.Error, "missing required fields")
 		writeJSON(w, http.StatusBadRequest, models.Fail("service, level, and message are required"))
 		return
 	}
 
-	// Persist to PostgreSQL first — this is the source of truth.
-	entry, err := h.repo.Insert(r.Context(), &req)
+	span.SetAttributes(
+		attribute.String("log.service", req.ServiceName),
+		attribute.String("log.level", string(req.Level)),
+	)
+
+	// Persist to PostgreSQL — source of truth.
+	_, dbSpan := tracer.Start(ctx, "db.insert_log")
+	entry, err := h.repo.Insert(ctx, &req)
+	dbSpan.End()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db insert failed")
 		writeJSON(w, http.StatusInternalServerError, models.Fail("failed to store log: "+err.Error()))
 		return
 	}
 
-	// Publish to Kafka asynchronously so a Kafka hiccup never blocks the HTTP response.
+	span.SetAttributes(attribute.String("log.id", entry.ID))
+
+	// Publish to Kafka with trace context injected into message headers.
 	if h.producer != nil {
 		go func() {
+			_, kafkaSpan := tracer.Start(ctx, "kafka.publish_log")
+			defer kafkaSpan.End()
+
 			payload, err := json.Marshal(entry)
 			if err != nil {
+				kafkaSpan.RecordError(err)
 				log.Printf("failed to marshal log entry for kafka: %v", err)
 				return
 			}
-			if err := h.producer.Publish(logsTopic, entry.ServiceName, payload); err != nil {
+			if err := h.producer.PublishWithContext(ctx, logsTopic, entry.ServiceName, payload); err != nil {
+				kafkaSpan.RecordError(err)
 				log.Printf("failed to publish log entry %s to kafka: %v", entry.ID, err)
 			}
 		}()
@@ -76,6 +106,10 @@ func (h *LogHandler) IngestLog(w http.ResponseWriter, r *http.Request) {
 //
 //	GET /api/v1/logs?service=payment-service&level=ERROR&page=1&page_size=20
 func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
+	tracer := otel.Tracer(serviceName)
+	ctx, span := tracer.Start(r.Context(), "log.list")
+	defer span.End()
+
 	q := r.URL.Query()
 
 	params := &models.LogQueryParams{
@@ -93,8 +127,10 @@ func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 		params.PageSize = ps
 	}
 
-	result, err := h.repo.Query(r.Context(), params)
+	result, err := h.repo.Query(ctx, params)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "query failed")
 		writeJSON(w, http.StatusInternalServerError, models.Fail("query failed: "+err.Error()))
 		return
 	}
@@ -113,14 +149,23 @@ func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 //
 //	GET /api/v1/logs/{id}
 func (h *LogHandler) GetLog(w http.ResponseWriter, r *http.Request) {
+	tracer := otel.Tracer(serviceName)
+	ctx, span := tracer.Start(r.Context(), "log.get")
+	defer span.End()
+
 	id := r.PathValue("id")
 	if id == "" {
+		span.SetStatus(codes.Error, "missing id")
 		writeJSON(w, http.StatusBadRequest, models.Fail("id is required"))
 		return
 	}
 
-	entry, err := h.repo.GetByID(r.Context(), id)
+	span.SetAttributes(attribute.String("log.id", id))
+
+	entry, err := h.repo.GetByID(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "not found")
 		writeJSON(w, http.StatusNotFound, models.Fail("log entry not found"))
 		return
 	}
@@ -132,7 +177,7 @@ func (h *LogHandler) GetLog(w http.ResponseWriter, r *http.Request) {
 //
 //	GET /healthz
 func (h *LogHandler) Health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "log-service"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": serviceName})
 }
 
 // writeJSON serialises v as JSON and writes it with the given status code.

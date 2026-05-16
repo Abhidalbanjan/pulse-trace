@@ -6,6 +6,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // Route maps a path prefix to an upstream service URL.
@@ -24,7 +27,7 @@ func NewRouter(routes []Route) *Router {
 }
 
 // ServeHTTP matches the request path against registered routes and proxies it upstream.
-// Returns 502 if no route matches.
+// It propagates the W3C traceparent header so upstream services continue the trace.
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	for _, route := range r.routes {
 		if strings.HasPrefix(req.URL.Path, route.Prefix) {
@@ -37,15 +40,16 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 			proxy := httputil.NewSingleHostReverseProxy(target)
 
-			// Attach the original host so upstream services can log it.
 			proxy.Director = func(r *http.Request) {
 				r.URL.Scheme = target.Scheme
 				r.URL.Host = target.Host
 				r.Host = target.Host
-				// Preserve the full path — don't strip the prefix.
 				if _, ok := r.Header["User-Agent"]; !ok {
 					r.Header.Set("User-Agent", "PulseTrace-Gateway/1.0")
 				}
+				// Inject the current span context as W3C traceparent so the
+				// upstream service continues the distributed trace.
+				otel.GetTextMapPropagator().Inject(r.Context(), propagation.HeaderCarrier(r.Header))
 			}
 
 			proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {

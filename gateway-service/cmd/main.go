@@ -12,23 +12,38 @@ import (
 
 	"github.com/pulsetrace/gateway-service/internal/proxy"
 	"github.com/pulsetrace/shared/middleware"
+	"github.com/pulsetrace/shared/telemetry"
 )
 
+const serviceName = "gateway-service"
+
 func main() {
-	// Service URLs are configurable via environment variables so they work
-	// both locally and inside Docker Compose / Kubernetes.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// ── Telemetry ─────────────────────────────────────────────────────────────
+	_, shutdownTracer, err := telemetry.InitTracer(ctx, serviceName)
+	if err != nil {
+		log.Printf("WARNING: tracing unavailable: %v", err)
+	} else {
+		defer func() {
+			if err := shutdownTracer(context.Background()); err != nil {
+				log.Printf("tracer shutdown error: %v", err)
+			}
+		}()
+	}
+
+	// ── Routes ────────────────────────────────────────────────────────────────
 	logServiceURL := getEnv("LOG_SERVICE_URL", "http://localhost:8081")
 	alertServiceURL := getEnv("ALERT_SERVICE_URL", "http://localhost:8082")
 
 	routes := []proxy.Route{
 		{Prefix: "/api/v1/logs", Upstream: logServiceURL},
 		{Prefix: "/api/v1/alerts", Upstream: alertServiceURL},
-		// Phase 3: add metrics-service, tracing-service routes here.
 	}
 
 	router := proxy.NewRouter(routes)
 
-	// Health endpoint served directly by the gateway.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -36,7 +51,8 @@ func main() {
 	})
 	mux.Handle("/", router)
 
-	chain := middleware.CORS(middleware.RequestLogger(mux))
+	// Middleware chain: CORS → Tracing → RequestLogger → router
+	chain := middleware.CORS(middleware.Tracing(serviceName)(middleware.RequestLogger(mux)))
 
 	port := getEnv("PORT", "8080")
 	srv := &http.Server{
@@ -61,10 +77,10 @@ func main() {
 	<-quit
 
 	log.Println("shutting down gateway...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("forced shutdown: %v", err)
 	}
 	log.Println("gateway stopped")

@@ -15,30 +15,44 @@ import (
 	"github.com/pulsetrace/shared/db"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/middleware"
+	"github.com/pulsetrace/shared/telemetry"
 )
 
 const (
-	logsTopic = "logs"
-	groupID   = "alert-service"
+	logsTopic        = "logs"
+	groupID          = "alert-service"
+	serviceNameConst = "alert-service"
 )
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Connect to PostgreSQL.
+	// ── Telemetry ─────────────────────────────────────────────────────────────
+	_, shutdownTracer, err := telemetry.InitTracer(ctx, serviceNameConst)
+	if err != nil {
+		log.Printf("WARNING: tracing unavailable: %v", err)
+	} else {
+		defer func() {
+			if err := shutdownTracer(context.Background()); err != nil {
+				log.Printf("tracer shutdown error: %v", err)
+			}
+		}()
+	}
+
+	// ── Database ──────────────────────────────────────────────────────────────
 	pool, err := db.NewPostgresPool(ctx)
 	if err != nil {
 		log.Fatalf("database connection failed: %v", err)
 	}
 	defer pool.Close()
 
-	// Wire up dependencies.
+	// ── Wire up dependencies ──────────────────────────────────────────────────
 	repo := repository.NewAlertRepository(pool)
 	logConsumer := consumer.NewLogConsumer(repo)
 	alertHandler := handler.NewAlertHandler(repo)
 
-	// Start Kafka consumer group in the background.
+	// ── Kafka consumer ────────────────────────────────────────────────────────
 	cg, err := kafka.NewConsumerGroup(groupID, []string{logsTopic}, logConsumer.Handle)
 	if err != nil {
 		log.Fatalf("kafka consumer group failed: %v", err)
@@ -52,11 +66,12 @@ func main() {
 		}
 	}()
 
-	// HTTP server for querying alerts.
+	// ── HTTP server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	alertHandler.RegisterRoutes(mux)
 
-	chain := middleware.CORS(middleware.RequestLogger(mux))
+	// Middleware chain: CORS → Tracing → RequestLogger → router
+	chain := middleware.CORS(middleware.Tracing(serviceNameConst)(middleware.RequestLogger(mux)))
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -78,13 +93,13 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown on SIGINT / SIGTERM.
+	// ── Graceful shutdown ─────────────────────────────────────────────────────
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Println("shutting down alert-service...")
-	cancel() // stop kafka consumer
+	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()

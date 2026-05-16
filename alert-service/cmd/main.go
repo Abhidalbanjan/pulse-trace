@@ -9,11 +9,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pulsetrace/log-service/internal/handler"
-	"github.com/pulsetrace/log-service/internal/repository"
+	"github.com/pulsetrace/alert-service/internal/consumer"
+	"github.com/pulsetrace/alert-service/internal/handler"
+	"github.com/pulsetrace/alert-service/internal/repository"
 	"github.com/pulsetrace/shared/db"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/middleware"
+)
+
+const (
+	logsTopic = "logs"
+	groupID   = "alert-service"
 )
 
 func main() {
@@ -27,30 +33,34 @@ func main() {
 	}
 	defer pool.Close()
 
-	// Connect to Kafka. The service starts even if Kafka is unavailable —
-	// logs are still persisted; publishing degrades gracefully.
-	producer, err := kafka.NewProducer()
-	if err != nil {
-		log.Printf("WARNING: kafka producer unavailable, continuing without event publishing: %v", err)
-		producer = nil
-	} else {
-		defer producer.Close()
-	}
-
 	// Wire up dependencies.
-	repo := repository.NewLogRepository(pool)
-	logHandler := handler.NewLogHandler(repo, producer)
+	repo := repository.NewAlertRepository(pool)
+	logConsumer := consumer.NewLogConsumer(repo)
+	alertHandler := handler.NewAlertHandler(repo)
 
-	// Register routes.
+	// Start Kafka consumer group in the background.
+	cg, err := kafka.NewConsumerGroup(groupID, []string{logsTopic}, logConsumer.Handle)
+	if err != nil {
+		log.Fatalf("kafka consumer group failed: %v", err)
+	}
+	defer cg.Close()
+
+	go func() {
+		log.Printf("alert-service: starting kafka consumer group %q on topic %q", groupID, logsTopic)
+		if err := cg.Start(ctx); err != nil {
+			log.Printf("kafka consumer stopped: %v", err)
+		}
+	}()
+
+	// HTTP server for querying alerts.
 	mux := http.NewServeMux()
-	logHandler.RegisterRoutes(mux)
+	alertHandler.RegisterRoutes(mux)
 
-	// Apply middleware chain: CORS → request logger → router.
 	chain := middleware.CORS(middleware.RequestLogger(mux))
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8081"
+		port = "8082"
 	}
 
 	srv := &http.Server{
@@ -61,9 +71,8 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start server in a goroutine so we can listen for shutdown signals.
 	go func() {
-		log.Printf("log-service listening on :%s", port)
+		log.Printf("alert-service HTTP listening on :%s", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
@@ -74,12 +83,14 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("shutting down log-service...")
+	log.Println("shutting down alert-service...")
+	cancel() // stop kafka consumer
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("forced shutdown: %v", err)
 	}
-	log.Println("log-service stopped")
+	log.Println("alert-service stopped")
 }

@@ -18,10 +18,12 @@ func main() {
 	// Service URLs are configurable via environment variables so they work
 	// both locally and inside Docker Compose / Kubernetes.
 	logServiceURL := getEnv("LOG_SERVICE_URL", "http://localhost:8081")
+	alertServiceURL := getEnv("ALERT_SERVICE_URL", "http://localhost:8082")
 
 	routes := []proxy.Route{
 		{Prefix: "/api/v1/logs", Upstream: logServiceURL},
-		// Phase 2: add metrics-service, tracing-service routes here.
+		{Prefix: "/api/v1/alerts", Upstream: alertServiceURL},
+		// Phase 3: add metrics-service, tracing-service routes here.
 	}
 
 	router := proxy.NewRouter(routes)
@@ -47,7 +49,8 @@ func main() {
 
 	go func() {
 		log.Printf("gateway-service listening on :%s", port)
-		log.Printf("routing /api/v1/logs → %s", logServiceURL)
+		log.Printf("routing /api/v1/logs    → %s", logServiceURL)
+		log.Printf("routing /api/v1/alerts  → %s", alertServiceURL)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}

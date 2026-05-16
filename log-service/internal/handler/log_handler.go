@@ -2,20 +2,27 @@ package handler
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 
 	"github.com/pulsetrace/log-service/internal/repository"
+	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/models"
 )
 
+const logsTopic = "logs"
+
 // LogHandler exposes HTTP endpoints for log ingestion and querying.
 type LogHandler struct {
-	repo *repository.LogRepository
+	repo     *repository.LogRepository
+	producer *kafka.Producer
 }
 
-func NewLogHandler(repo *repository.LogRepository) *LogHandler {
-	return &LogHandler{repo: repo}
+// NewLogHandler creates a handler. producer may be nil — if Kafka is unavailable
+// the service degrades gracefully (logs are still persisted, just not published).
+func NewLogHandler(repo *repository.LogRepository, producer *kafka.Producer) *LogHandler {
+	return &LogHandler{repo: repo, producer: producer}
 }
 
 // RegisterRoutes wires up all log-service routes onto the given mux.
@@ -26,7 +33,7 @@ func (h *LogHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", h.Health)
 }
 
-// IngestLog accepts a structured log entry and persists it.
+// IngestLog accepts a structured log entry, persists it, and publishes it to Kafka.
 //
 //	POST /api/v1/logs
 func (h *LogHandler) IngestLog(w http.ResponseWriter, r *http.Request) {
@@ -41,10 +48,25 @@ func (h *LogHandler) IngestLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Persist to PostgreSQL first — this is the source of truth.
 	entry, err := h.repo.Insert(r.Context(), &req)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, models.Fail("failed to store log: "+err.Error()))
 		return
+	}
+
+	// Publish to Kafka asynchronously so a Kafka hiccup never blocks the HTTP response.
+	if h.producer != nil {
+		go func() {
+			payload, err := json.Marshal(entry)
+			if err != nil {
+				log.Printf("failed to marshal log entry for kafka: %v", err)
+				return
+			}
+			if err := h.producer.Publish(logsTopic, entry.ServiceName, payload); err != nil {
+				log.Printf("failed to publish log entry %s to kafka: %v", entry.ID, err)
+			}
+		}()
 	}
 
 	writeJSON(w, http.StatusCreated, models.OK(entry))

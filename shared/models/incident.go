@@ -14,17 +14,40 @@ const (
 // The correlation engine creates incidents by clustering alerts that share
 // a service dependency graph within a sliding time window.
 type Incident struct {
-	ID           string         `json:"id" db:"id"`
-	Title        string         `json:"title" db:"title"`
-	RootCause    string         `json:"root_cause" db:"root_cause"`
-	Status       IncidentStatus `json:"status" db:"status"`
-	Severity     LogLevel       `json:"severity" db:"severity"` // highest alert level in the group
-	ServiceNames []string       `json:"services" db:"-"`        // populated from incident_alerts join
-	AlertCount   int            `json:"alert_count" db:"alert_count"`
-	StartedAt    time.Time      `json:"started_at" db:"started_at"`
-	ResolvedAt   *time.Time     `json:"resolved_at,omitempty" db:"resolved_at"`
-	CreatedAt    time.Time      `json:"created_at" db:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at" db:"updated_at"`
+	ID           string          `json:"id" db:"id"`
+	Title        string          `json:"title" db:"title"`
+	RootCause    string          `json:"root_cause" db:"root_cause"`
+	Status       IncidentStatus  `json:"status" db:"status"`
+	Severity     LogLevel        `json:"severity" db:"severity"` // highest alert level in the group
+	ServiceNames []string        `json:"services" db:"-"`        // populated from incident_alerts join
+	AlertCount   int             `json:"alert_count" db:"alert_count"`
+	StartedAt    time.Time       `json:"started_at" db:"started_at"`
+	ResolvedAt   *time.Time      `json:"resolved_at,omitempty" db:"resolved_at"`
+	CreatedAt    time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at" db:"updated_at"`
+	Causal       *CausalAnalysis `json:"causal,omitempty" db:"-"` // AI-augmented root-cause inference
+}
+
+// CausalLink represents a single inferred causal edge in the incident graph:
+// the failure in FromService is hypothesized to have caused the failure in
+// ToService. Evidence describes why the link was inferred.
+type CausalLink struct {
+	FromService string    `json:"from_service"`
+	ToService   string    `json:"to_service"`
+	Evidence    string    `json:"evidence"`
+	At          time.Time `json:"at"`
+}
+
+// CausalAnalysis is the structured output of the causal-AI analyzer. It is
+// computed asynchronously after incident upsert and stored on the incident
+// row as JSONB.
+type CausalAnalysis struct {
+	Chain      []CausalLink `json:"chain"`            // ordered causal links, upstream → downstream
+	Narrative  string       `json:"narrative"`        // human-readable causal story
+	RootCause  string       `json:"root_cause"`       // refined hypothesis (supersedes regex inference)
+	Confidence float64      `json:"confidence"`       // 0.0 – 1.0
+	Model      string       `json:"model"`            // analyzer identifier (e.g., "claude-opus-4-7", "rule-based")
+	AnalyzedAt time.Time    `json:"analyzed_at"`
 }
 
 // IncidentAlert is the join record linking an alert to an incident.

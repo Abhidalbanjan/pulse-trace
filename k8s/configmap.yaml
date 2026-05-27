@@ -19,3 +19,5 @@ data:
   LOG_SERVICE_URL: "http://log-service:8081"
   ALERT_SERVICE_URL: "http://alert-service:8082"
   CORRELATION_SERVICE_URL: "http://correlation-service:8083"
+  # Causal AI defaults — see k8s/secret.yaml for ANTHROPIC_API_KEY.
+  CAUSAL_MODEL: "claude-opus-4-7"

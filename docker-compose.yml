@@ -57,6 +57,7 @@ services:
       - ./log-service/migrations/001_create_log_entries.sql:/docker-entrypoint-initdb.d/001_create_log_entries.sql
       - ./alert-service/migrations/001_create_alerts.sql:/docker-entrypoint-initdb.d/002_create_alerts.sql
       - ./correlation-service/migrations/001_create_incidents.sql:/docker-entrypoint-initdb.d/003_create_incidents.sql
+      - ./correlation-service/migrations/002_add_causal_fields.sql:/docker-entrypoint-initdb.d/004_add_causal_fields.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pulsetrace"]
       interval: 5s
@@ -209,6 +210,12 @@ services:
       RABBITMQ_URL: amqp://pulsetrace:pulsetrace_secret@rabbitmq:5672/
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       PORT: "8083"
+      # Causal AI — set ANTHROPIC_API_KEY in a .env file or shell to enable LLM-backed
+      # root-cause analysis. Without it the service falls back to the deterministic
+      # rule-based analyzer (still produces a causal chain, no narrative).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CAUSAL_MODEL: ${CAUSAL_MODEL:-claude-opus-4-7}
+      CAUSAL_DISABLED: ${CAUSAL_DISABLED:-}
     ports:
       - "8083:8083"
     depends_on:

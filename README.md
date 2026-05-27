@@ -238,6 +238,99 @@ Alerts from the same service within a **5-minute sliding window** are grouped in
 
 ---
 
+## Beyond Correlation: Causal AI
+
+Pattern matching tells you *what kind* of error happened. **Causal AI** answers a fundamentally harder question: *what caused what*.
+
+When an incident is created or updated, the correlation service asynchronously:
+
+1. **Builds a deterministic causal chain** by walking the declared service dependency graph in temporal order — for each alert, it finds the earliest preceding alert from a known upstream service and emits a causal edge.
+2. **Hands the chain + alerts + dependency graph to Claude** (via the Anthropic Messages API with prompt caching) to refine the hypothesis, produce a confidence score, and narrate the causal story in plain English.
+3. **Persists the result** to the incident row as JSONB and surfaces it on the incident API + timeline.
+
+If `ANTHROPIC_API_KEY` is not set, the service falls back to the deterministic chain alone (no narrative, no confidence refinement) — **everything keeps working without the LLM**.
+
+### Architecture
+
+```
+Kafka "alerts" topic
+       │
+       ▼
+correlation-service.Handle
+       │
+       ├─→ repo.Upsert(incident, alert)         ← synchronous, fast
+       │
+       └─→ scheduleCausalAnalysis(incident.id)  ← async, deduped per-incident
+                                  │
+                                  ▼
+                    causal.Analyzer.Analyze(evidence)
+                                  │
+                  ┌───────────────┴───────────────┐
+                  ▼                               ▼
+        NoopAnalyzer (default)         ClaudeAnalyzer (if API key)
+        BuildChain from deps           BuildChain + LLM refinement
+                  │                               │
+                  └───────────────┬───────────────┘
+                                  ▼
+                    repo.UpdateCausalAnalysis(jsonb)
+```
+
+### Example output
+
+```json
+GET /api/v1/incidents/{id}
+
+{
+  "id": "e4661798-...",
+  "title": "[ERROR] payment-service degradation detected",
+  "root_cause": "Database or network connectivity issue",
+  "severity": "ERROR",
+  "alert_count": 3,
+  "services": ["payment-service", "postgres", "auth-service"],
+  "causal": {
+    "chain": [
+      {
+        "from_service": "postgres",
+        "to_service": "payment-service",
+        "evidence": "postgres connection pool exhausted at 13:45:38 preceded payment-service timeouts at 13:45:40; declared dependency",
+        "at": "2026-05-16T13:45:38Z"
+      },
+      {
+        "from_service": "payment-service",
+        "to_service": "order-service",
+        "evidence": "payment-service errors at 13:45:41 preceded order-service failures at 13:45:43",
+        "at": "2026-05-16T13:45:41Z"
+      }
+    ],
+    "narrative": "The incident originated in postgres at 13:45:38 with connection pool exhaustion, which caused payment-service to time out on queries starting at 13:45:40. The failure then propagated to order-service, which depends on payment-service, at 13:45:43. Recommend checking postgres connection limits and active query load.",
+    "root_cause": "Postgres connection pool exhaustion — likely runaway query or insufficient pool size for current load.",
+    "confidence": 0.87,
+    "model": "claude-opus-4-7",
+    "analyzed_at": "2026-05-16T13:45:44Z"
+  }
+}
+```
+
+### Why this is interesting
+
+Most "AI for observability" features bolt an LLM onto raw logs and hope for the best. PulseTrace's approach is different and more honest:
+
+- **Deterministic first, LLM second.** The causal chain is computed by graph traversal — no LLM required, no hallucination possible. The LLM only *refines and narrates* a chain it didn't invent.
+- **Grounded in declared dependencies.** The model is given the explicit service dependency graph as cached context, so it can't reference services that don't exist.
+- **Prompt caching.** The static system prompt + dependency graph (~1 KB) is cached via `cache_control: ephemeral`, so each subsequent incident analysis pays ~10% of the first call's input cost.
+- **Confidence is mandatory.** The model must return a 0.0–1.0 score; low-evidence incidents are flagged honestly rather than hidden behind authoritative-sounding prose.
+- **Graceful degradation.** No API key → still produces a causal chain. API call fails → falls back to the rule-based analyzer automatically. The incident pipeline never blocks on the LLM.
+
+### Configuration
+
+| Env var               | Default            | Description                                                  |
+|-----------------------|--------------------|--------------------------------------------------------------|
+| `ANTHROPIC_API_KEY`   | *(unset)*          | If unset, uses the rule-based `NoopAnalyzer`.                |
+| `CAUSAL_MODEL`        | `claude-opus-4-7`  | Anthropic model identifier.                                  |
+| `CAUSAL_DISABLED`     | *(unset)*          | Set to `true` to force the noop analyzer even if a key is set. |
+
+---
+
 ## Distributed Tracing
 
 Every request carries a W3C `traceparent` header through the entire call chain:
@@ -386,6 +479,7 @@ pulsetrace/
 | Notification queue  | RabbitMQ 3.13 (amqp091-go) with DLQ    |
 | Distributed tracing | OpenTelemetry SDK + Jaeger              |
 | Metrics             | Prometheus + Grafana                    |
+| Causal AI           | Anthropic Messages API + prompt caching |
 | Containers          | Docker + Compose                        |
 | Orchestration       | Kubernetes (Deployments, HPA, Ingress)  |
 
@@ -397,3 +491,4 @@ pulsetrace/
 - [x] **Phase 2** — Kafka event pipeline, alert service (event-driven)
 - [x] **Phase 3** — Distributed tracing, OpenTelemetry, Jaeger, Prometheus, Grafana
 - [x] **Phase 4** — Incident correlation engine, RabbitMQ notifications, Kubernetes manifests
+- [x] **Phase 5** — Causal AI: deterministic causal chains + LLM-powered narrative & confidence (Claude / Anthropic API)

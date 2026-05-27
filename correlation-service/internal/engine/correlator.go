@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/IBM/sarama"
@@ -15,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/pulsetrace/correlation-service/internal/repository"
+	"github.com/pulsetrace/shared/causal"
 	"github.com/pulsetrace/shared/models"
 	"github.com/pulsetrace/shared/rabbitmq"
 	"github.com/pulsetrace/shared/telemetry"
@@ -52,15 +54,28 @@ var rootCauseHints = map[string]string{
 	"unavailable": "Upstream service is down or unreachable",
 }
 
+// causalAnalysisTimeout bounds a single async causal-AI call. Claude responses
+// arrive in well under 10s in practice; the extra headroom covers network jitter.
+const causalAnalysisTimeout = 45 * time.Second
+
 // Correlator consumes alerts from Kafka, groups them into incidents, and
-// publishes notification events to RabbitMQ.
+// publishes notification events to RabbitMQ. After every incident upsert, it
+// asynchronously runs causal-AI analysis to produce a refined root-cause
+// hypothesis and narrative; failures here are non-fatal.
 type Correlator struct {
 	repo      *repository.IncidentRepository
 	publisher *rabbitmq.Publisher
+	analyzer  causal.Analyzer
+	// inflight dedupes concurrent analyses for the same incident — a burst of
+	// alerts hitting the same open incident only triggers one in-flight call.
+	inflight sync.Map // map[string]struct{}
 }
 
-func NewCorrelator(repo *repository.IncidentRepository, publisher *rabbitmq.Publisher) *Correlator {
-	return &Correlator{repo: repo, publisher: publisher}
+func NewCorrelator(repo *repository.IncidentRepository, publisher *rabbitmq.Publisher, analyzer causal.Analyzer) *Correlator {
+	if analyzer == nil {
+		analyzer = &causal.NoopAnalyzer{}
+	}
+	return &Correlator{repo: repo, publisher: publisher, analyzer: analyzer}
 }
 
 // Handle is the Kafka MessageHandler for the alerts topic.
@@ -110,7 +125,89 @@ func (c *Correlator) Handle(msg *sarama.ConsumerMessage) error {
 		}
 	}
 
+	// Kick off causal-AI analysis asynchronously. We don't propagate ctx —
+	// the analysis must survive the Kafka message lifecycle.
+	c.scheduleCausalAnalysis(incident.ID)
+
 	return nil
+}
+
+// scheduleCausalAnalysis runs the configured causal Analyzer in the background
+// and persists the result. Concurrent calls for the same incident are deduped
+// via the inflight sync.Map — only one analysis runs per incident at a time.
+func (c *Correlator) scheduleCausalAnalysis(incidentID string) {
+	if _, busy := c.inflight.LoadOrStore(incidentID, struct{}{}); busy {
+		return
+	}
+
+	go func() {
+		defer c.inflight.Delete(incidentID)
+
+		ctx, cancel := context.WithTimeout(context.Background(), causalAnalysisTimeout)
+		defer cancel()
+
+		tracer := otel.Tracer(serviceName)
+		ctx, span := tracer.Start(ctx, "causal.analyze",
+			trace.WithAttributes(
+				attribute.String("incident.id", incidentID),
+				attribute.String("analyzer", c.analyzer.Name()),
+			),
+		)
+		defer span.End()
+
+		inc, err := c.repo.GetByID(ctx, incidentID)
+		if err != nil {
+			span.RecordError(err)
+			log.Printf("causal: lookup incident %s: %v", incidentID, err)
+			return
+		}
+		alerts, err := c.repo.AlertsForIncident(ctx, incidentID)
+		if err != nil {
+			span.RecordError(err)
+			log.Printf("causal: load alerts for %s: %v", incidentID, err)
+			return
+		}
+
+		evidence := buildEvidence(inc, alerts)
+
+		result, err := c.analyzer.Analyze(ctx, evidence)
+		if err != nil {
+			span.RecordError(err)
+			log.Printf("causal: analyzer %s failed for %s: %v — falling back to rule-based",
+				c.analyzer.Name(), incidentID, err)
+			// Fallback to deterministic analyzer so the incident still gets a chain.
+			fallback := &causal.NoopAnalyzer{}
+			result, err = fallback.Analyze(ctx, evidence)
+			if err != nil {
+				log.Printf("causal: fallback also failed for %s: %v", incidentID, err)
+				return
+			}
+		}
+
+		if err := c.repo.UpdateCausalAnalysis(ctx, incidentID, result); err != nil {
+			span.RecordError(err)
+			log.Printf("causal: persist analysis for %s: %v", incidentID, err)
+			return
+		}
+
+		span.SetAttributes(
+			attribute.Float64("causal.confidence", result.Confidence),
+			attribute.Int("causal.chain_length", len(result.Chain)),
+		)
+		log.Printf("causal: incident %s analyzed by %s — confidence=%.2f, chain_links=%d",
+			incidentID, result.Model, result.Confidence, len(result.Chain))
+	}()
+}
+
+// buildEvidence assembles the analyzer input from incident + alerts.
+// Kept as a small helper so the trigger goroutine reads top-to-bottom.
+func buildEvidence(inc *models.Incident, alerts []models.IncidentAlert) *causal.Evidence {
+	return &causal.Evidence{
+		Incident:     inc,
+		Alerts:       alerts,
+		Dependencies: serviceDependencies,
+		Window:       correlationWindow,
+	}
 }
 
 // correlate finds or creates an incident for the given alert.

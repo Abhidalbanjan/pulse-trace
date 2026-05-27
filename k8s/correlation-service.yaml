@@ -47,6 +47,19 @@ spec:
                 configMapKeyRef:
                   name: pulsetrace-config
                   key: OTEL_EXPORTER_OTLP_ENDPOINT
+            # Causal AI — empty ANTHROPIC_API_KEY falls back to rule-based analyzer.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: CAUSAL_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: CAUSAL_MODEL
+                  optional: true
           livenessProbe:
             httpGet:
               path: /healthz

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"time"
@@ -41,7 +42,9 @@ func (r *IncidentRepository) Upsert(ctx context.Context, incident *models.Incide
 		                      ELSE incidents.severity
 		                    END,
 		      updated_at  = NOW()
-		RETURNING id, title, root_cause, status, severity, alert_count, started_at, resolved_at, created_at, updated_at
+		RETURNING id, title, root_cause, status, severity, alert_count,
+		          started_at, resolved_at, created_at, updated_at,
+		          causal, causal_analyzed_at
 	`
 	row := tx.QueryRow(ctx, upsertQ,
 		incident.ID, incident.Title, incident.RootCause,
@@ -50,13 +53,17 @@ func (r *IncidentRepository) Upsert(ctx context.Context, incident *models.Incide
 	)
 
 	result := &models.Incident{}
+	var causalJSON []byte
+	var causalAnalyzedAt *time.Time
 	if err := row.Scan(
 		&result.ID, &result.Title, &result.RootCause, &result.Status,
 		&result.Severity, &result.AlertCount, &result.StartedAt,
 		&result.ResolvedAt, &result.CreatedAt, &result.UpdatedAt,
+		&causalJSON, &causalAnalyzedAt,
 	); err != nil {
 		return nil, fmt.Errorf("upsert incident: %w", err)
 	}
+	result.Causal = decodeCausal(causalJSON)
 
 	// Link the alert to the incident.
 	const linkQ = `
@@ -132,7 +139,9 @@ func (r *IncidentRepository) Query(ctx context.Context, params *models.IncidentQ
 	}
 
 	dataQ := fmt.Sprintf(`
-		SELECT id, title, root_cause, status, severity, alert_count, started_at, resolved_at, created_at, updated_at
+		SELECT id, title, root_cause, status, severity, alert_count,
+		       started_at, resolved_at, created_at, updated_at,
+		       causal, causal_analyzed_at
 		FROM incidents %s
 		ORDER BY started_at DESC
 		LIMIT $%d OFFSET $%d
@@ -148,13 +157,17 @@ func (r *IncidentRepository) Query(ctx context.Context, params *models.IncidentQ
 	var incidents []*models.Incident
 	for rows.Next() {
 		inc := &models.Incident{}
+		var causalJSON []byte
+		var causalAnalyzedAt *time.Time
 		if err := rows.Scan(
 			&inc.ID, &inc.Title, &inc.RootCause, &inc.Status,
 			&inc.Severity, &inc.AlertCount, &inc.StartedAt,
 			&inc.ResolvedAt, &inc.CreatedAt, &inc.UpdatedAt,
+			&causalJSON, &causalAnalyzedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan incident: %w", err)
 		}
+		inc.Causal = decodeCausal(causalJSON)
 		incidents = append(incidents, inc)
 	}
 
@@ -169,18 +182,24 @@ func (r *IncidentRepository) Query(ctx context.Context, params *models.IncidentQ
 // GetByID fetches a single incident with its linked alerts.
 func (r *IncidentRepository) GetByID(ctx context.Context, id string) (*models.Incident, error) {
 	const q = `
-		SELECT id, title, root_cause, status, severity, alert_count, started_at, resolved_at, created_at, updated_at
+		SELECT id, title, root_cause, status, severity, alert_count,
+		       started_at, resolved_at, created_at, updated_at,
+		       causal, causal_analyzed_at
 		FROM incidents WHERE id = $1
 	`
 	inc := &models.Incident{}
+	var causalJSON []byte
+	var causalAnalyzedAt *time.Time
 	err := r.db.QueryRow(ctx, q, id).Scan(
 		&inc.ID, &inc.Title, &inc.RootCause, &inc.Status,
 		&inc.Severity, &inc.AlertCount, &inc.StartedAt,
 		&inc.ResolvedAt, &inc.CreatedAt, &inc.UpdatedAt,
+		&causalJSON, &causalAnalyzedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("incident not found: %w", err)
 	}
+	inc.Causal = decodeCausal(causalJSON)
 	inc.ServiceNames, _ = r.serviceNames(ctx, id)
 	return inc, nil
 }
@@ -229,6 +248,15 @@ func (r *IncidentRepository) Timeline(ctx context.Context, id string) ([]models.
 		})
 	}
 
+	// Causal analysis event (if completed).
+	if inc.Causal != nil && !inc.Causal.AnalyzedAt.IsZero() {
+		events = append(events, models.IncidentTimelineEvent{
+			At:          inc.Causal.AnalyzedAt,
+			EventType:   "causal_analysis",
+			Description: fmt.Sprintf("Causal hypothesis (%s, confidence=%.2f): %s", inc.Causal.Model, inc.Causal.Confidence, inc.Causal.RootCause),
+		})
+	}
+
 	// Resolved event (if applicable).
 	if inc.ResolvedAt != nil {
 		events = append(events, models.IncidentTimelineEvent{
@@ -244,27 +272,116 @@ func (r *IncidentRepository) Timeline(ctx context.Context, id string) ([]models.
 // GetOpenByWindow finds an open incident that started within the correlation
 // window for the given service. Returns nil if none exists.
 func (r *IncidentRepository) GetOpenByWindow(ctx context.Context, serviceName string, windowStart time.Time) (*models.Incident, error) {
+	// Grouping is intentionally dependency-aware so a single incident can accumulate
+	// alerts across a failure propagation chain.
+	//
+	// We do this by matching any open incident that already has at least one alert
+	// from either:
+	//   - the service itself (serviceName)
+	//   - a declared dependency of the service (serviceDependencies[serviceName])
+	//
+	// NOTE: This relies on the correlator's serviceDependencies graph; currently that
+	// graph is defined in the correlation engine package. To avoid an import cycle,
+	// we pass only the serviceName here and use a conservative closure based on
+	// the most common edges. If you want the full graph, move the dependency map to
+	// shared.
+	candidateServices := []string{serviceName}
+
+	// Conservative edges to enable the demo (extend as needed):
+	// payment-service depends on postgres
+	// order-service depends on payment-service and postgres
+	// worker-service depends on kafka and postgres
+	// auth-service depends on postgres
+	// log-service depends on postgres and kafka
+	// alert-service depends on postgres and kafka
+	// gateway-service depends on log-service and alert-service
+	switch serviceName {
+	case "payment-service":
+		candidateServices = append(candidateServices, "postgres", "auth-service", "kafka")
+	case "order-service":
+		candidateServices = append(candidateServices, "payment-service", "postgres", "kafka")
+	case "worker-service":
+		candidateServices = append(candidateServices, "kafka", "postgres")
+	case "auth-service":
+		candidateServices = append(candidateServices, "postgres")
+	case "log-service":
+		candidateServices = append(candidateServices, "postgres", "kafka")
+	case "alert-service":
+		candidateServices = append(candidateServices, "postgres", "kafka")
+	case "gateway-service":
+		candidateServices = append(candidateServices, "log-service", "alert-service")
+	}
+
 	const q = `
 		SELECT i.id, i.title, i.root_cause, i.status, i.severity, i.alert_count,
-		       i.started_at, i.resolved_at, i.created_at, i.updated_at
+		       i.started_at, i.resolved_at, i.created_at, i.updated_at,
+		       i.causal, i.causal_analyzed_at
 		FROM incidents i
 		JOIN incident_alerts ia ON ia.incident_id = i.id
 		WHERE i.status = 'OPEN'
-		  AND ia.service_name = $1
+		  AND ia.service_name = ANY($1)
 		  AND i.started_at >= $2
 		ORDER BY i.started_at DESC
 		LIMIT 1
 	`
 	inc := &models.Incident{}
-	err := r.db.QueryRow(ctx, q, serviceName, windowStart).Scan(
+	var causalJSON []byte
+	var causalAnalyzedAt *time.Time
+	err := r.db.QueryRow(ctx, q, candidateServices, windowStart).Scan(
 		&inc.ID, &inc.Title, &inc.RootCause, &inc.Status,
 		&inc.Severity, &inc.AlertCount, &inc.StartedAt,
 		&inc.ResolvedAt, &inc.CreatedAt, &inc.UpdatedAt,
+		&causalJSON, &causalAnalyzedAt,
 	)
 	if err != nil {
 		return nil, nil // no open incident in window — caller creates a new one
 	}
+	inc.Causal = decodeCausal(causalJSON)
 	return inc, nil
+}
+
+// AlertsForIncident returns all alerts linked to an incident, ordered by
+// triggered_at ascending. Used by the causal analyzer as its evidence set.
+func (r *IncidentRepository) AlertsForIncident(ctx context.Context, incidentID string) ([]models.IncidentAlert, error) {
+	const q = `
+		SELECT incident_id, alert_id, service_name, level, message, triggered_at
+		FROM incident_alerts
+		WHERE incident_id = $1
+		ORDER BY triggered_at ASC
+	`
+	rows, err := r.db.Query(ctx, q, incidentID)
+	if err != nil {
+		return nil, fmt.Errorf("query incident alerts: %w", err)
+	}
+	defer rows.Close()
+
+	var alerts []models.IncidentAlert
+	for rows.Next() {
+		var a models.IncidentAlert
+		if err := rows.Scan(&a.IncidentID, &a.AlertID, &a.ServiceName, &a.Level, &a.Message, &a.TriggeredAt); err != nil {
+			return nil, fmt.Errorf("scan incident alert: %w", err)
+		}
+		alerts = append(alerts, a)
+	}
+	return alerts, nil
+}
+
+// UpdateCausalAnalysis persists the analyzer output to the incident row.
+// Called asynchronously from the correlation pipeline.
+func (r *IncidentRepository) UpdateCausalAnalysis(ctx context.Context, incidentID string, c *models.CausalAnalysis) error {
+	payload, err := json.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshal causal analysis: %w", err)
+	}
+	const q = `
+		UPDATE incidents
+		   SET causal = $2, causal_analyzed_at = $3, updated_at = NOW()
+		 WHERE id = $1
+	`
+	if _, err := r.db.Exec(ctx, q, incidentID, payload, c.AnalyzedAt); err != nil {
+		return fmt.Errorf("update causal analysis: %w", err)
+	}
+	return nil
 }
 
 func (r *IncidentRepository) serviceNames(ctx context.Context, incidentID string) ([]string, error) {
@@ -285,6 +402,19 @@ func (r *IncidentRepository) serviceNames(ctx context.Context, incidentID string
 		}
 	}
 	return names, nil
+}
+
+// decodeCausal parses the JSONB column into a CausalAnalysis struct. Returns
+// nil for a NULL column or on parse failure (the column is best-effort).
+func decodeCausal(raw []byte) *models.CausalAnalysis {
+	if len(raw) == 0 {
+		return nil
+	}
+	var c models.CausalAnalysis
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return nil
+	}
+	return &c
 }
 
 // TotalPages computes the number of pages.

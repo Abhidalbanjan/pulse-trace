@@ -12,6 +12,7 @@ import (
 	"github.com/pulsetrace/correlation-service/internal/engine"
 	"github.com/pulsetrace/correlation-service/internal/handler"
 	"github.com/pulsetrace/correlation-service/internal/repository"
+	"github.com/pulsetrace/shared/causal"
 	"github.com/pulsetrace/shared/db"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/middleware"
@@ -57,9 +58,16 @@ func main() {
 		defer publisher.Close()
 	}
 
+	// ── Causal AI analyzer ────────────────────────────────────────────────────
+	// If ANTHROPIC_API_KEY is set (and CAUSAL_DISABLED is not "true"), use
+	// the LLM-backed analyzer. Otherwise fall back to the deterministic
+	// rule-based analyzer — the service runs identically without an API key.
+	analyzer := selectCausalAnalyzer()
+	log.Printf("causal analyzer: %s", analyzer.Name())
+
 	// ── Wire up dependencies ──────────────────────────────────────────────────
 	repo := repository.NewIncidentRepository(pool)
-	correlator := engine.NewCorrelator(repo, publisher)
+	correlator := engine.NewCorrelator(repo, publisher, analyzer)
 	incidentHandler := handler.NewIncidentHandler(repo)
 
 	// ── Kafka consumer (alerts topic) ─────────────────────────────────────────
@@ -116,4 +124,19 @@ func main() {
 		log.Fatalf("forced shutdown: %v", err)
 	}
 	log.Println("correlation-service stopped")
+}
+
+// selectCausalAnalyzer picks the causal-AI implementation based on env:
+//   - CAUSAL_DISABLED=true       → NoopAnalyzer (no inference, rule-based only)
+//   - ANTHROPIC_API_KEY set      → ClaudeAnalyzer (model from CAUSAL_MODEL, defaults applied)
+//   - otherwise                  → NoopAnalyzer
+func selectCausalAnalyzer() causal.Analyzer {
+	if os.Getenv("CAUSAL_DISABLED") == "true" {
+		return &causal.NoopAnalyzer{}
+	}
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		return &causal.NoopAnalyzer{}
+	}
+	return causal.NewClaudeAnalyzer(apiKey, os.Getenv("CAUSAL_MODEL"))
 }

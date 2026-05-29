@@ -1,6 +1,8 @@
 module github.com/pulsetrace/log-service
 
-go 1.22
+go 1.22.0
+
+toolchain go1.24.1
 
 require (
 	github.com/google/uuid v1.6.0

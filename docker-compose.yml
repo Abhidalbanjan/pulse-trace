@@ -210,11 +210,14 @@ services:
       RABBITMQ_URL: amqp://pulsetrace:pulsetrace_secret@rabbitmq:5672/
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       PORT: "8083"
-      # Causal AI — set ANTHROPIC_API_KEY in a .env file or shell to enable LLM-backed
-      # root-cause analysis. Without it the service falls back to the deterministic
-      # rule-based analyzer (still produces a causal chain, no narrative).
+      # LangChain Go Multi-LLM support config
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_ENDPOINT: ${LLM_ENDPOINT:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      CAUSAL_MODEL: ${CAUSAL_MODEL:-claude-opus-4-7}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      CAUSAL_MODEL: ${CAUSAL_MODEL:-}
       CAUSAL_DISABLED: ${CAUSAL_DISABLED:-}
     ports:
       - "8083:8083"

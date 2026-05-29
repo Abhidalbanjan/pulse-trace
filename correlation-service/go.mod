@@ -1,6 +1,8 @@
 module github.com/pulsetrace/correlation-service
 
-go 1.22
+go 1.22.0
+
+toolchain go1.24.1
 
 require (
 	github.com/IBM/sarama v1.43.2

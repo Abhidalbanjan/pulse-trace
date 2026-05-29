@@ -128,15 +128,34 @@ func main() {
 
 // selectCausalAnalyzer picks the causal-AI implementation based on env:
 //   - CAUSAL_DISABLED=true       → NoopAnalyzer (no inference, rule-based only)
-//   - ANTHROPIC_API_KEY set      → ClaudeAnalyzer (model from CAUSAL_MODEL, defaults applied)
+//   - LLM_PROVIDER is configured → LangChainAnalyzer
+//   - ANTHROPIC_API_KEY set      → LangChainAnalyzer (via backward-compatibility check)
 //   - otherwise                  → NoopAnalyzer
 func selectCausalAnalyzer() causal.Analyzer {
 	if os.Getenv("CAUSAL_DISABLED") == "true" {
 		return &causal.NoopAnalyzer{}
 	}
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
+
+	provider := os.Getenv("LLM_PROVIDER")
+	// Legacy backward-compatibility check
+	if provider == "" && os.Getenv("ANTHROPIC_API_KEY") != "" {
+		provider = "anthropic"
+	}
+
+	if provider == "" {
 		return &causal.NoopAnalyzer{}
 	}
-	return causal.NewClaudeAnalyzer(apiKey, os.Getenv("CAUSAL_MODEL"))
+
+	modelName := os.Getenv("LLM_MODEL")
+	if modelName == "" && provider == "anthropic" {
+		// Use legacy env CAUSAL_MODEL if set
+		modelName = os.Getenv("CAUSAL_MODEL")
+	}
+
+	analyzer, err := causal.NewLangChainAnalyzer(provider, modelName)
+	if err != nil {
+		log.Printf("WARNING: failed to initialize LangChain analyzer: %v. Falling back to NoopAnalyzer.", err)
+		return &causal.NoopAnalyzer{}
+	}
+	return analyzer
 }

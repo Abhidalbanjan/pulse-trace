@@ -41,6 +41,27 @@ services:
       retries: 10
       start_period: 45s
 
+  # ── Neo4j ────────────────────────────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5.19.0
+    container_name: pulsetrace-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/pulsetrace_secret
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
   # ── PostgreSQL ───────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
@@ -58,6 +79,8 @@ services:
       - ./alert-service/migrations/001_create_alerts.sql:/docker-entrypoint-initdb.d/002_create_alerts.sql
       - ./correlation-service/migrations/001_create_incidents.sql:/docker-entrypoint-initdb.d/003_create_incidents.sql
       - ./correlation-service/migrations/002_add_causal_fields.sql:/docker-entrypoint-initdb.d/004_add_causal_fields.sql
+      - ./gateway-service/migrations/001_create_auth_tables.sql:/docker-entrypoint-initdb.d/005_create_auth_tables.sql
+      - ./correlation-service/migrations/003_create_slo_tables.sql:/docker-entrypoint-initdb.d/006_create_slo_tables.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pulsetrace"]
       interval: 5s
@@ -110,8 +133,6 @@ services:
     volumes:
       - ./otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml
     ports:
-      - "4317:4317"
-      - "4318:4318"
       - "8889:8889"
     depends_on:
       jaeger:
@@ -162,6 +183,9 @@ services:
       DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
       KAFKA_BROKERS: kafka:29092
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_USER: pulsetrace
+      CLICKHOUSE_PASSWORD: clickhouse_secret
       PORT: "8081"
     ports:
       - "8081:8081"
@@ -209,6 +233,9 @@ services:
       KAFKA_GROUP_ID: correlation-service
       RABBITMQ_URL: amqp://pulsetrace:pulsetrace_secret@rabbitmq:5672/
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_USER: pulsetrace
+      CLICKHOUSE_PASSWORD: clickhouse_secret
       PORT: "8083"
       # LangChain Go Multi-LLM support config
       LLM_PROVIDER: ${LLM_PROVIDER:-}
@@ -219,6 +246,7 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       CAUSAL_MODEL: ${CAUSAL_MODEL:-}
       CAUSAL_DISABLED: ${CAUSAL_DISABLED:-}
+      TOPOLOGY_SERVICE_URL: http://topology-service:8084
     ports:
       - "8083:8083"
     depends_on:
@@ -227,6 +255,31 @@ services:
       kafka:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  # ── Topology Service ──────────────────────────────────────────────────────────
+  topology-service:
+    build:
+      context: .
+      dockerfile: topology-service/Dockerfile
+    container_name: pulsetrace-topology-service
+    restart: unless-stopped
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USERNAME: neo4j
+      NEO4J_PASSWORD: pulsetrace_secret
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_GROUP_ID: topology-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      PORT: "8084"
+    ports:
+      - "8084:8084"
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      kafka:
         condition: service_healthy
       otel-collector:
         condition: service_started
@@ -261,18 +314,111 @@ services:
       LOG_SERVICE_URL: http://log-service:8081
       ALERT_SERVICE_URL: http://alert-service:8082
       CORRELATION_SERVICE_URL: http://correlation-service:8083
+      DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_COLLECTOR_HTTP_URL: http://otel-collector:4318
       PORT: "8080"
     ports:
       - "8080:8080"
+      - "4317:4317"
     depends_on:
+      - postgres
       - log-service
       - alert-service
       - correlation-service
       - otel-collector
+      - clickhouse
+
+  # ── ClickHouse ───────────────────────────────────────────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: pulsetrace-clickhouse
+    restart: unless-stopped
+    environment:
+      - CLICKHOUSE_USER=pulsetrace
+      - CLICKHOUSE_PASSWORD=clickhouse_secret
+      # AWS S3 (local MinIO emulator)
+      - AWS_S3_ENDPOINT=http://minio:9000/clickhouse-cold/data/
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      # Azure Blob (local Azurite emulator)
+      - AZURE_STORAGE_ACCOUNT_URL=http://azure-blob:10000/devstoreaccount1
+      - AZURE_CONTAINER_NAME=clickhouse-cold
+      - AZURE_ACCOUNT_NAME=devstoreaccount1
+      - AZURE_ACCOUNT_KEY=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
+      - AZURE_BLOB_PATH=data/
+      # Google Cloud Storage (GCP/GCS)
+      - GCP_GCS_ENDPOINT=https://storage.googleapis.com/clickhouse-cold/data/
+      - GCP_ACCESS_KEY_ID=gcs_access_key
+      - GCP_SECRET_ACCESS_KEY=gcs_secret_key
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/storage.xml:/etc/clickhouse-server/config.d/storage.xml
+    depends_on:
+      minio:
+        condition: service_healthy
+      azure-blob:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MinIO (S3 Cold Tier Emulator) ────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: pulsetrace-minio
+    restart: unless-stopped
+    ports:
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MinIO Bucket Creator ─────────────────────────────────────────────────────
+  minio-mc:
+    image: minio/mc:latest
+    container_name: pulsetrace-minio-mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set localminio http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing localminio/clickhouse-cold;
+      exit 0;
+      "
+
+  # ── Azure Blob Storage Emulator (Azurite) ────────────────────────────────────
+  azure-blob:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    container_name: pulsetrace-azurite
+    restart: unless-stopped
+    ports:
+      - "10000:10000"
+    command: azurite-blob --blobHost 0.0.0.0 --blobPort 10000
+    volumes:
+      - azurite_data:/data
 
 volumes:
   postgres_data:
+  neo4j_data:
   rabbitmq_data:
   prometheus_data:
   grafana_data:
+  clickhouse_data:
+  minio_data:
+  azurite_data:
+

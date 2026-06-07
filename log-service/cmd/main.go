@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pulsetrace/log-service/internal/consumer"
 	"github.com/pulsetrace/log-service/internal/handler"
 	"github.com/pulsetrace/log-service/internal/repository"
 	"github.com/pulsetrace/shared/db"
@@ -35,12 +36,17 @@ func main() {
 		}()
 	}
 
-	// ── Database ──────────────────────────────────────────────────────────────
-	pool, err := db.NewPostgresPool(ctx)
+	// ── ClickHouse ────────────────────────────────────────────────────────────
+	chConn, err := db.NewClickHouseConnection()
 	if err != nil {
-		log.Fatalf("database connection failed: %v", err)
+		log.Fatalf("ClickHouse connection failed: %v", err)
 	}
-	defer pool.Close()
+	defer chConn.Close()
+
+	chRepo := repository.NewClickHouseLogRepository(chConn)
+	if err := chRepo.InitializeSchema(ctx); err != nil {
+		log.Fatalf("ClickHouse schema initialization failed: %v", err)
+	}
 
 	// ── Kafka producer ────────────────────────────────────────────────────────
 	producer, err := kafka.NewProducer()
@@ -51,9 +57,25 @@ func main() {
 		defer producer.Close()
 	}
 
+	// ── Kafka consumer (logs topic for ClickHouse batching) ───────────────────
+	chConsumer := consumer.NewClickHouseConsumer(chRepo)
+	defer chConsumer.Close()
+
+	cg, err := kafka.NewConsumerGroup("log-service-clickhouse", []string{"logs"}, chConsumer.Handle)
+	if err != nil {
+		log.Fatalf("failed to create ClickHouse Kafka consumer group: %v", err)
+	}
+	defer cg.Close()
+
+	go func() {
+		log.Println("log-service: starting ClickHouse consumer group on topic \"logs\"")
+		if err := cg.Start(ctx); err != nil {
+			log.Printf("ClickHouse consumer group stopped: %v", err)
+		}
+	}()
+
 	// ── HTTP server ───────────────────────────────────────────────────────────
-	repo := repository.NewLogRepository(pool)
-	logHandler := handler.NewLogHandler(repo, producer)
+	logHandler := handler.NewLogHandler(chRepo, producer)
 
 	mux := http.NewServeMux()
 	logHandler.RegisterRoutes(mux)
@@ -86,11 +108,16 @@ func main() {
 	<-quit
 
 	log.Println("shutting down log-service...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("forced shutdown: %v", err)
+		log.Printf("forced HTTP server shutdown: %v", err)
+	} else {
+		log.Println("HTTP server stopped accepting connections")
 	}
+
+	// Cleanly drain in-memory shock absorber queue and flush remaining logs
+	logHandler.Close()
 	log.Println("log-service stopped")
 }

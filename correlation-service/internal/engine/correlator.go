@@ -17,6 +17,7 @@ import (
 
 	"github.com/pulsetrace/correlation-service/internal/repository"
 	"github.com/pulsetrace/shared/causal"
+	"github.com/pulsetrace/shared/client"
 	"github.com/pulsetrace/shared/models"
 	"github.com/pulsetrace/shared/rabbitmq"
 	"github.com/pulsetrace/shared/telemetry"
@@ -28,19 +29,6 @@ const (
 	// services are grouped into the same incident.
 	correlationWindow = 5 * time.Minute
 )
-
-// serviceDependencies maps a service to the set of services it depends on.
-// Alerts from dependent services within the correlation window are grouped
-// into the same incident, enabling root-cause analysis.
-var serviceDependencies = map[string][]string{
-	"payment-service": {"postgres", "kafka", "auth-service"},
-	"auth-service":    {"postgres", "redis"},
-	"order-service":   {"payment-service", "postgres", "kafka"},
-	"worker-service":  {"kafka", "postgres"},
-	"gateway-service": {"log-service", "alert-service"},
-	"log-service":     {"postgres", "kafka"},
-	"alert-service":   {"postgres", "kafka"},
-}
 
 // rootCauseHints maps common error patterns to probable root causes.
 var rootCauseHints = map[string]string{
@@ -66,16 +54,17 @@ type Correlator struct {
 	repo      *repository.IncidentRepository
 	publisher *rabbitmq.Publisher
 	analyzer  causal.Analyzer
+	topoclient *client.TopologyClient
 	// inflight dedupes concurrent analyses for the same incident — a burst of
 	// alerts hitting the same open incident only triggers one in-flight call.
 	inflight sync.Map // map[string]struct{}
 }
 
-func NewCorrelator(repo *repository.IncidentRepository, publisher *rabbitmq.Publisher, analyzer causal.Analyzer) *Correlator {
+func NewCorrelator(repo *repository.IncidentRepository, publisher *rabbitmq.Publisher, analyzer causal.Analyzer, topoclient *client.TopologyClient) *Correlator {
 	if analyzer == nil {
 		analyzer = &causal.NoopAnalyzer{}
 	}
-	return &Correlator{repo: repo, publisher: publisher, analyzer: analyzer}
+	return &Correlator{repo: repo, publisher: publisher, analyzer: analyzer, topoclient: topoclient}
 }
 
 // Handle is the Kafka MessageHandler for the alerts topic.
@@ -125,6 +114,21 @@ func (c *Correlator) Handle(msg *sarama.ConsumerMessage) error {
 		}
 	}
 
+	// Predictive Engine Logic: flag downstream services as PREDICTIVE_WARNING
+	go func() {
+		downstream, err := c.topoclient.GetDownstreamDependencies(context.Background(), alert.ServiceName)
+		if err != nil {
+			log.Printf("correlator: failed to get downstream for %s: %v", alert.ServiceName, err)
+			return
+		}
+		for _, ds := range downstream {
+			log.Printf("PREDICTIVE ENGINE: Marking %s as PREDICTIVE_WARNING due to %s degradation", ds, alert.ServiceName)
+			if err := c.topoclient.UpdateServiceState(context.Background(), ds, "PREDICTIVE_WARNING"); err != nil {
+				log.Printf("correlator: failed to update predictive state for %s: %v", ds, err)
+			}
+		}
+	}()
+
 	// Kick off causal-AI analysis asynchronously. We don't propagate ctx —
 	// the analysis must survive the Kafka message lifecycle.
 	c.scheduleCausalAnalysis(incident.ID)
@@ -168,7 +172,17 @@ func (c *Correlator) scheduleCausalAnalysis(incidentID string) {
 			return
 		}
 
-		evidence := buildEvidence(inc, alerts)
+		deps := make(map[string][]string)
+		for _, svc := range inc.ServiceNames {
+			upstream, err := c.topoclient.GetUpstreamDependencies(ctx, svc)
+			if err != nil {
+				log.Printf("causal: failed to get upstream for %s: %v", svc, err)
+				continue
+			}
+			deps[svc] = upstream
+		}
+
+		evidence := buildEvidence(inc, alerts, deps)
 
 		result, err := c.analyzer.Analyze(ctx, evidence)
 		if err != nil {
@@ -190,6 +204,12 @@ func (c *Correlator) scheduleCausalAnalysis(incidentID string) {
 			return
 		}
 
+		// Option 3 Integration: push the causal chain path to Neo4j via topology client!
+		log.Printf("causal: pushing causal chain of length %d to Neo4j topology", len(result.Chain))
+		if err := c.topoclient.UpdateCausalPath(ctx, result.Chain); err != nil {
+			log.Printf("causal: failed to push causal path to topology service: %v", err)
+		}
+
 		span.SetAttributes(
 			attribute.Float64("causal.confidence", result.Confidence),
 			attribute.Int("causal.chain_length", len(result.Chain)),
@@ -201,11 +221,11 @@ func (c *Correlator) scheduleCausalAnalysis(incidentID string) {
 
 // buildEvidence assembles the analyzer input from incident + alerts.
 // Kept as a small helper so the trigger goroutine reads top-to-bottom.
-func buildEvidence(inc *models.Incident, alerts []models.IncidentAlert) *causal.Evidence {
+func buildEvidence(inc *models.Incident, alerts []models.IncidentAlert, deps map[string][]string) *causal.Evidence {
 	return &causal.Evidence{
 		Incident:     inc,
 		Alerts:       alerts,
-		Dependencies: serviceDependencies,
+		Dependencies: deps,
 		Window:       correlationWindow,
 	}
 }
@@ -214,9 +234,16 @@ func buildEvidence(inc *models.Incident, alerts []models.IncidentAlert) *causal.
 func (c *Correlator) correlate(ctx context.Context, alert *models.Alert) (*models.Incident, error) {
 	windowStart := alert.TriggeredAt.Add(-correlationWindow)
 
+	// Fetch upstream dependencies to see if this alert cascades from an existing incident.
+	upstream, err := c.topoclient.GetUpstreamDependencies(ctx, alert.ServiceName)
+	if err != nil {
+		log.Printf("correlator: failed to get upstream for %s: %v", alert.ServiceName, err)
+	}
+	candidateServices := append(upstream, alert.ServiceName)
+
 	// Look for an open incident in the correlation window for this service
 	// or any of its dependencies.
-	existing, err := c.repo.GetOpenByWindow(ctx, alert.ServiceName, windowStart)
+	existing, err := c.repo.GetOpenByWindow(ctx, candidateServices, windowStart)
 	if err != nil {
 		return nil, fmt.Errorf("lookup open incident: %w", err)
 	}

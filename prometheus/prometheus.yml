@@ -6,7 +6,7 @@ scrape_configs:
   # Scrape the OTel Collector's Prometheus exporter.
   - job_name: "otel-collector"
     static_configs:
-      - targets: ["otel-collector:8889"]
+      - targets: ["otel-collector:8888"]
 
   # Scrape each service's /metrics endpoint (if you add a Prometheus exporter later).
   - job_name: "log-service"

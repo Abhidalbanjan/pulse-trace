@@ -1,11 +1,16 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -22,14 +27,34 @@ const (
 
 // LogHandler exposes HTTP endpoints for log ingestion and querying.
 type LogHandler struct {
-	repo     *repository.LogRepository
-	producer *kafka.Producer
+	repo          *repository.ClickHouseLogRepository
+	producer      *kafka.Producer
+	logQueue      chan *models.LogEntry
+	batchSize     int
+	flushInterval time.Duration
+	workersWg     sync.WaitGroup
+	closeChan     chan struct{}
 }
 
-// NewLogHandler creates a handler. producer may be nil — if Kafka is unavailable
-// the service degrades gracefully (logs are still persisted, just not published).
-func NewLogHandler(repo *repository.LogRepository, producer *kafka.Producer) *LogHandler {
-	return &LogHandler{repo: repo, producer: producer}
+// NewLogHandler creates a handler with high-performance buffered queue and worker pool.
+func NewLogHandler(repo *repository.ClickHouseLogRepository, producer *kafka.Producer) *LogHandler {
+	h := &LogHandler{
+		repo:          repo,
+		producer:      producer,
+		logQueue:      make(chan *models.LogEntry, 100000), // 100k buffered elements shock absorber
+		batchSize:     2000,                               // bulk pgx/kafka batch threshold
+		flushInterval: 100 * time.Millisecond,             // maximum latency threshold
+		closeChan:     make(chan struct{}),
+	}
+
+	// Spin up 8 concurrent high-throughput ingestion workers
+	for i := 0; i < 8; i++ {
+		h.workersWg.Add(1)
+		go h.worker(i)
+	}
+
+	log.Printf("log-service: initialized high-throughput buffered ingest pipeline (8 workers, batch=%d, latency=%v)", h.batchSize, h.flushInterval)
+	return h
 }
 
 // RegisterRoutes wires up all log-service routes onto the given mux.
@@ -40,12 +65,12 @@ func (h *LogHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", h.Health)
 }
 
-// IngestLog accepts a structured log entry, persists it, and publishes it to Kafka.
+// IngestLog accepts a structured log entry, enqueues it, and responds immediately.
 //
 //	POST /api/v1/logs
 func (h *LogHandler) IngestLog(w http.ResponseWriter, r *http.Request) {
 	tracer := otel.Tracer(serviceName)
-	ctx, span := tracer.Start(r.Context(), "log.ingest")
+	_, span := tracer.Start(r.Context(), "log.ingest")
 	defer span.End()
 
 	var req models.CreateLogRequest
@@ -62,44 +87,128 @@ func (h *LogHandler) IngestLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalize log level to match DB check constraints
+	levelStr := strings.ToUpper(string(req.Level))
+	if levelStr == "WARN" {
+		req.Level = models.LogLevelWarning
+	} else if levelStr == "ERR" {
+		req.Level = models.LogLevelError
+	} else if levelStr == "INF" {
+		req.Level = models.LogLevelInfo
+	} else if levelStr == "DBG" {
+		req.Level = models.LogLevelDebug
+	}
+
 	span.SetAttributes(
 		attribute.String("log.service", req.ServiceName),
 		attribute.String("log.level", string(req.Level)),
 	)
 
-	// Persist to PostgreSQL — source of truth.
-	_, dbSpan := tracer.Start(ctx, "db.insert_log")
-	entry, err := h.repo.Insert(ctx, &req)
-	dbSpan.End()
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "db insert failed")
-		writeJSON(w, http.StatusInternalServerError, models.Fail("failed to store log: "+err.Error()))
-		return
+	// Construct the LogEntry directly
+	entry := &models.LogEntry{
+		ID:          uuid.New().String(),
+		ServiceName: req.ServiceName,
+		Level:       req.Level,
+		Message:     req.Message,
+		TraceID:     req.TraceID,
+		SpanID:      req.SpanID,
+		CreatedAt:   time.Now().UTC(),
+	}
+
+	if req.Timestamp != nil {
+		entry.Timestamp = req.Timestamp.UTC()
+	} else {
+		entry.Timestamp = entry.CreatedAt
+	}
+
+	if len(req.Metadata) > 0 {
+		b, err := json.Marshal(req.Metadata)
+		if err != nil {
+			span.RecordError(err)
+			log.Printf("failed to marshal metadata: %v", err)
+		} else {
+			entry.Metadata = string(b)
+		}
 	}
 
 	span.SetAttributes(attribute.String("log.id", entry.ID))
 
-	// Publish to Kafka with trace context injected into message headers.
-	if h.producer != nil {
-		go func() {
-			_, kafkaSpan := tracer.Start(ctx, "kafka.publish_log")
-			defer kafkaSpan.End()
+	// Enqueue in the high-speed shock-absorber channel
+	select {
+	case h.logQueue <- entry:
+		writeJSON(w, http.StatusCreated, models.OK(entry))
+	default:
+		span.SetStatus(codes.Error, "ingestion queue full")
+		writeJSON(w, http.StatusServiceUnavailable, models.Fail("ingestion queue is temporarily full under extreme peak load"))
+	}
+}
 
-			payload, err := json.Marshal(entry)
-			if err != nil {
-				kafkaSpan.RecordError(err)
-				log.Printf("failed to marshal log entry for kafka: %v", err)
-				return
-			}
-			if err := h.producer.PublishWithContext(ctx, logsTopic, entry.ServiceName, payload); err != nil {
-				kafkaSpan.RecordError(err)
-				log.Printf("failed to publish log entry %s to kafka: %v", entry.ID, err)
-			}
-		}()
+// worker loops continuously, draining the queue and flushing batches.
+func (h *LogHandler) worker(id int) {
+	defer h.workersWg.Done()
+
+	ticker := time.NewTicker(h.flushInterval)
+	defer ticker.Stop()
+
+	var batch []*models.LogEntry
+
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		h.flushBatch(batch)
+		batch = nil
 	}
 
-	writeJSON(w, http.StatusCreated, models.OK(entry))
+	for {
+		select {
+		case entry, ok := <-h.logQueue:
+			if !ok {
+				flush()
+				return
+			}
+			batch = append(batch, entry)
+			if len(batch) >= h.batchSize {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+// flushBatch aggregates DB copy and Kafka publishing.
+func (h *LogHandler) flushBatch(batch []*models.LogEntry) {
+	ctx := context.Background()
+	tracer := otel.Tracer(serviceName)
+	ctx, span := tracer.Start(ctx, "log.flush_batch")
+	defer span.End()
+
+	span.SetAttributes(attribute.Int("batch.size", len(batch)))
+
+	// Ingest path writes solely to Kafka. Telemetry is written asynchronously
+	// to ClickHouse via the Kafka batch consumer group.
+
+	// 2. Publish batch to Kafka in a single TCP operation
+	if h.producer != nil {
+		_, kafkaSpan := tracer.Start(ctx, "kafka.publish_batch")
+		err := h.producer.PublishBatch(ctx, logsTopic, batch)
+		kafkaSpan.End()
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "kafka batch publish failed")
+			log.Printf("ERROR: worker failed to publish %d logs to Kafka: %v", len(batch), err)
+		}
+	}
+}
+
+// Close stops the handler, closes the ingestion queue, and flushes any outstanding logs cleanly.
+func (h *LogHandler) Close() {
+	log.Println("closing log-service log handler queue...")
+	close(h.closeChan)
+	close(h.logQueue)
+	h.workersWg.Wait()
+	log.Println("log-service log handler shutdown complete.")
 }
 
 // ListLogs returns a paginated, filtered list of log entries.

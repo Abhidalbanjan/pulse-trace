@@ -13,6 +13,7 @@ import (
 	"github.com/pulsetrace/correlation-service/internal/handler"
 	"github.com/pulsetrace/correlation-service/internal/repository"
 	"github.com/pulsetrace/shared/causal"
+	"github.com/pulsetrace/shared/client"
 	"github.com/pulsetrace/shared/db"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/middleware"
@@ -65,10 +66,37 @@ func main() {
 	analyzer := selectCausalAnalyzer()
 	log.Printf("causal analyzer: %s", analyzer.Name())
 
+	// ── Topology Client ───────────────────────────────────────────────────────
+	topoURL := os.Getenv("TOPOLOGY_SERVICE_URL")
+	if topoURL == "" {
+		topoURL = "http://localhost:8084"
+	}
+	topoClient := client.NewTopologyClient(topoURL)
+
 	// ── Wire up dependencies ──────────────────────────────────────────────────
 	repo := repository.NewIncidentRepository(pool)
-	correlator := engine.NewCorrelator(repo, publisher, analyzer)
+	correlator := engine.NewCorrelator(repo, publisher, analyzer, topoClient)
 	incidentHandler := handler.NewIncidentHandler(repo)
+
+	// ── SLO subsystem ────────────────────────────────────────────────────────
+	// ── ClickHouse ────────────────────────────────────────────────────────────
+	chConn, err := db.NewClickHouseConnection()
+	var sloRepo *repository.SLORepository
+	if err != nil {
+		log.Printf("WARNING: ClickHouse connection failed: %v. SLI computation will fallback to Postgres.", err)
+		sloRepo = repository.NewSLORepository(pool, nil)
+	} else {
+		defer chConn.Close()
+		log.Println("correlation-service: connected to ClickHouse for SLI queries")
+		sloRepo = repository.NewSLORepository(pool, chConn)
+	}
+	sloHandler := handler.NewSLOHandler(sloRepo)
+	sloWorker := engine.NewSLOWorker(sloRepo, publisher)
+	go sloWorker.Start(ctx)
+
+	// ── Anomaly Detector ──────────────────────────────────────────────────────
+	anomalyDetector := engine.NewAnomalyDetector(topoClient)
+	go anomalyDetector.Start(ctx)
 
 	// ── Kafka consumer (alerts topic) ─────────────────────────────────────────
 	cg, err := kafka.NewConsumerGroup(groupID, []string{alertsTopic}, correlator.Handle)
@@ -87,6 +115,7 @@ func main() {
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	incidentHandler.RegisterRoutes(mux)
+	sloHandler.RegisterRoutes(mux)
 
 	chain := middleware.CORS(middleware.Tracing(serviceName)(middleware.RequestLogger(mux)))
 

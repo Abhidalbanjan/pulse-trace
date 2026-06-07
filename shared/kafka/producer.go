@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
+	"github.com/pulsetrace/shared/models"
 	"github.com/pulsetrace/shared/telemetry"
 )
 
@@ -71,6 +73,35 @@ func (p *Producer) PublishWithContext(ctx context.Context, topic, key string, va
 		return fmt.Errorf("failed to publish to topic %q: %w", topic, err)
 	}
 	log.Printf("kafka: published to %s partition=%d offset=%d key=%s", topic, partition, offset, key)
+	return nil
+}
+
+// PublishBatch sends multiple messages to Kafka in a single optimized request.
+func (p *Producer) PublishBatch(ctx context.Context, topic string, entries []*models.LogEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	msgs := make([]*sarama.ProducerMessage, len(entries))
+	for i, entry := range entries {
+		payload, err := json.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf("failed to marshal entry for Kafka batch: %w", err)
+		}
+
+		msgs[i] = &sarama.ProducerMessage{
+			Topic: topic,
+			Key:   sarama.StringEncoder(entry.ServiceName),
+			Value: sarama.ByteEncoder(payload),
+		}
+
+		// Inject the current span context so downstream consumers can continue the distributed trace
+		telemetry.InjectKafkaHeaders(ctx, msgs[i])
+	}
+
+	if err := p.producer.SendMessages(msgs); err != nil {
+		return fmt.Errorf("failed to publish batch to topic %q: %w", topic, err)
+	}
 	return nil
 }
 

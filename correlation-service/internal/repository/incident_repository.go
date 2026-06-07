@@ -270,47 +270,8 @@ func (r *IncidentRepository) Timeline(ctx context.Context, id string) ([]models.
 }
 
 // GetOpenByWindow finds an open incident that started within the correlation
-// window for the given service. Returns nil if none exists.
-func (r *IncidentRepository) GetOpenByWindow(ctx context.Context, serviceName string, windowStart time.Time) (*models.Incident, error) {
-	// Grouping is intentionally dependency-aware so a single incident can accumulate
-	// alerts across a failure propagation chain.
-	//
-	// We do this by matching any open incident that already has at least one alert
-	// from either:
-	//   - the service itself (serviceName)
-	//   - a declared dependency of the service (serviceDependencies[serviceName])
-	//
-	// NOTE: This relies on the correlator's serviceDependencies graph; currently that
-	// graph is defined in the correlation engine package. To avoid an import cycle,
-	// we pass only the serviceName here and use a conservative closure based on
-	// the most common edges. If you want the full graph, move the dependency map to
-	// shared.
-	candidateServices := []string{serviceName}
-
-	// Conservative edges to enable the demo (extend as needed):
-	// payment-service depends on postgres
-	// order-service depends on payment-service and postgres
-	// worker-service depends on kafka and postgres
-	// auth-service depends on postgres
-	// log-service depends on postgres and kafka
-	// alert-service depends on postgres and kafka
-	// gateway-service depends on log-service and alert-service
-	switch serviceName {
-	case "payment-service":
-		candidateServices = append(candidateServices, "postgres", "auth-service", "kafka")
-	case "order-service":
-		candidateServices = append(candidateServices, "payment-service", "postgres", "kafka")
-	case "worker-service":
-		candidateServices = append(candidateServices, "kafka", "postgres")
-	case "auth-service":
-		candidateServices = append(candidateServices, "postgres")
-	case "log-service":
-		candidateServices = append(candidateServices, "postgres", "kafka")
-	case "alert-service":
-		candidateServices = append(candidateServices, "postgres", "kafka")
-	case "gateway-service":
-		candidateServices = append(candidateServices, "log-service", "alert-service")
-	}
+// window for the given candidate services. Returns nil if none exists.
+func (r *IncidentRepository) GetOpenByWindow(ctx context.Context, candidateServices []string, windowStart time.Time) (*models.Incident, error) {
 
 	const q = `
 		SELECT i.id, i.title, i.root_cause, i.status, i.severity, i.alert_count,

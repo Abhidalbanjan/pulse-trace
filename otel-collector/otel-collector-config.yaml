@@ -18,6 +18,22 @@ processors:
         value: development
         action: upsert
 
+  # Tail-based sampling policy for cost and storage optimization
+  tail_sampling:
+    decision_wait: 5s
+    num_traces: 50000
+    expected_new_traces_per_sec: 2000
+    policies:
+      - name: error-policy
+        type: status_code
+        status_code: { status_codes: [ ERROR ] }
+      - name: latency-policy
+        type: latency
+        latency: { threshold_ms: 500 }
+      - name: normal-sampling-policy
+        type: probabilistic
+        probabilistic: { sampling_percentage: 5.0 }
+
 exporters:
   # Send traces to Jaeger via OTLP gRPC.
   otlp/jaeger:
@@ -37,7 +53,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch, resource]
+      processors: [tail_sampling, batch, resource]
       exporters: [otlp/jaeger, debug]
 
     metrics:

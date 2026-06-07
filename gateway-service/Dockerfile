@@ -1,18 +1,15 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
 # Copy shared module so the replace directive resolves correctly.
 COPY shared/ ../shared/
 
-# Copy the entire gateway-service module (go.sum may not exist if there are
-# no external dependencies, so we copy the whole directory at once).
+# Copy the entire gateway-service module (including vendor/ folder).
 COPY gateway-service/ .
 
-RUN go mod download
-
-RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/gateway-service ./cmd
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -o /bin/gateway-service ./cmd
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM alpine:3.19

@@ -1,0 +1,39 @@
+# IDE and system files
+.idea/
+.vscode/
+.antigravitycli/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+
+# Environment configuration
+.env
+.env.*
+!.env.example
+
+# ClickHouse troubleshooting logs and config exports
+*_error.log
+clickhouse_config.xml
+docker_related_config.xml
+
+# Go binaries and build directories
+/bin/
+*.exe
+*.test
+*.out
+*-service/gateway-service
+*-service/log-service
+*-service/alert-service
+*-service/correlation-service
+*-service/notification-service
+*-service/topology-service
+*-service/vendor/
+/gateway-service/vendor/
+/log-service/vendor/
+/alert-service/vendor/
+/correlation-service/vendor/
+/notification-service/vendor/
+/topology-service/vendor/

@@ -314,6 +314,7 @@ services:
       LOG_SERVICE_URL: http://log-service:8081
       ALERT_SERVICE_URL: http://alert-service:8082
       CORRELATION_SERVICE_URL: http://correlation-service:8083
+      TOPOLOGY_SERVICE_URL: http://topology-service:8084
       DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       OTEL_COLLECTOR_HTTP_URL: http://otel-collector:4318
@@ -326,6 +327,7 @@ services:
       - log-service
       - alert-service
       - correlation-service
+      - topology-service
       - otel-collector
       - clickhouse
 

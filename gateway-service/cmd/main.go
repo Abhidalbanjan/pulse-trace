@@ -46,6 +46,7 @@ func main() {
 	logServiceURL := getEnv("LOG_SERVICE_URL", "http://localhost:8081")
 	alertServiceURL := getEnv("ALERT_SERVICE_URL", "http://localhost:8082")
 	correlationServiceURL := getEnv("CORRELATION_SERVICE_URL", "http://localhost:8083")
+	topologyServiceURL := getEnv("TOPOLOGY_SERVICE_URL", "http://localhost:8084")
 	otelCollectorHTTPURL := getEnv("OTEL_COLLECTOR_HTTP_URL", "http://localhost:4318")
 
 	routes := []proxy.Route{
@@ -53,6 +54,7 @@ func main() {
 		{Prefix: "/api/v1/alerts", Upstream: alertServiceURL},
 		{Prefix: "/api/v1/incidents", Upstream: correlationServiceURL},
 		{Prefix: "/api/v1/slo", Upstream: correlationServiceURL},
+		{Prefix: "/api/v1/topology/agent-config", Upstream: topologyServiceURL},
 		{Prefix: "/v1/traces", Upstream: otelCollectorHTTPURL},
 		{Prefix: "/v1/metrics", Upstream: otelCollectorHTTPURL},
 		{Prefix: "/v1/logs", Upstream: otelCollectorHTTPURL},

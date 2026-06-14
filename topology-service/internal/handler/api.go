@@ -22,6 +22,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/topology/graph", a.handleGetGraph)
 	mux.HandleFunc("GET /api/v1/topology/dependencies/downstream/", a.handleGetDownstream)
 	mux.HandleFunc("GET /api/v1/topology/dependencies/upstream/", a.handleGetUpstream)
+	mux.HandleFunc("GET /api/v1/topology/agent-config/", a.handleGetAgentConfig)
 	mux.HandleFunc("POST /api/v1/topology/state", a.handleUpdateState)
 	mux.HandleFunc("POST /api/v1/topology/causal-path", a.handleUpdateCausalPath)
 }
@@ -68,6 +69,39 @@ func (a *API) handleGetUpstream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(deps)
+}
+
+type AgentConfig struct {
+	LogLevel      string  `json:"log_level"`
+	TraceSampling float64 `json:"trace_sampling"`
+}
+
+func (a *API) handleGetAgentConfig(w http.ResponseWriter, r *http.Request) {
+	serviceName := strings.TrimPrefix(r.URL.Path, "/api/v1/topology/agent-config/")
+	if serviceName == "" {
+		http.Error(w, "missing service name", http.StatusBadRequest)
+		return
+	}
+
+	state, err := a.repo.GetServiceState(r.Context(), serviceName)
+	if err != nil {
+		log.Printf("failed to get service state for %s: %v", serviceName, err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	config := AgentConfig{
+		LogLevel:      "WARN", // default log level
+		TraceSampling: 0.01,   // default 1% tracing
+	}
+
+	if state == "PREDICTIVE_WARNING" || state == "DEGRADED" {
+		config.LogLevel = "DEBUG"
+		config.TraceSampling = 1.0 // 100% trace sampling for debugging
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(config)
 }
 
 type UpdateStateRequest struct {

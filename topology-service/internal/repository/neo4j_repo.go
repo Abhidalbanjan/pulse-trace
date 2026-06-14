@@ -93,6 +93,32 @@ func (r *Neo4jRepository) GetUpstreamDependencies(ctx context.Context, serviceNa
 	return deps, nil
 }
 
+// GetServiceState returns the current state of a given service.
+func (r *Neo4jRepository) GetServiceState(ctx context.Context, serviceName string) (string, error) {
+	query := `
+		MATCH (s:Service {name: $serviceName})
+		RETURN s.state AS state
+	`
+	result, err := neo4j.ExecuteQuery(ctx, r.driver, query, map[string]any{
+		"serviceName": serviceName,
+	}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
+
+	if err != nil {
+		return "", err
+	}
+
+	if len(result.Records) == 0 {
+		return "", nil // Service not found
+	}
+
+	state, _ := result.Records[0].Get("state")
+	if state == nil {
+		return "", nil // No state set
+	}
+
+	return state.(string), nil
+}
+
 type Node struct {
 	Id    string `json:"id"`
 	State string `json:"state"`

@@ -109,7 +109,8 @@ func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Allow login, registration, and OTLP endpoints without token
 		if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/api/v1/auth/register" || r.URL.Path == "/healthz" ||
-			strings.HasPrefix(r.URL.Path, "/v1/traces") || strings.HasPrefix(r.URL.Path, "/v1/metrics") || strings.HasPrefix(r.URL.Path, "/v1/logs") {
+			strings.HasPrefix(r.URL.Path, "/v1/traces") || strings.HasPrefix(r.URL.Path, "/v1/metrics") || strings.HasPrefix(r.URL.Path, "/v1/logs") ||
+			strings.HasPrefix(r.URL.Path, "/api/v1/topology/agent-config") {
 			next.ServeHTTP(w, r)
 			return
 		}

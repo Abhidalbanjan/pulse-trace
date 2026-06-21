@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -12,18 +13,30 @@ import (
 
 // ClickHouseLogRepository handles log operations against ClickHouse.
 type ClickHouseLogRepository struct {
-	conn driver.Conn
+	defaultConn    driver.Conn
+	enterpriseConn driver.Conn
 }
 
 // NewClickHouseLogRepository creates a new ClickHouseLogRepository instance.
-func NewClickHouseLogRepository(conn driver.Conn) *ClickHouseLogRepository {
-	return &ClickHouseLogRepository{conn: conn}
+func NewClickHouseLogRepository(defaultConn driver.Conn, enterpriseConn driver.Conn) *ClickHouseLogRepository {
+	return &ClickHouseLogRepository{
+		defaultConn:    defaultConn,
+		enterpriseConn: enterpriseConn,
+	}
+}
+
+func (r *ClickHouseLogRepository) getConn(tier string) driver.Conn {
+	if strings.ToLower(tier) == "enterprise" && r.enterpriseConn != nil {
+		return r.enterpriseConn
+	}
+	return r.defaultConn
 }
 
 // InitializeSchema sets up the logs table in ClickHouse.
 func (r *ClickHouseLogRepository) InitializeSchema(ctx context.Context) error {
 	const query = `
 	CREATE TABLE IF NOT EXISTS logs (
+		tenant_id LowCardinality(String),
 		id String,
 		service_name LowCardinality(String),
 		level LowCardinality(String),
@@ -35,28 +48,64 @@ func (r *ClickHouseLogRepository) InitializeSchema(ctx context.Context) error {
 		created_at DateTime64(6, 'UTC')
 	) ENGINE = MergeTree()
 	PARTITION BY toYYYYMM(timestamp)
-	ORDER BY (service_name, level, timestamp, id)
+	ORDER BY (tenant_id, service_name, level, timestamp, id)
 	SETTINGS storage_policy = 'tiered';
 	`
-	if err := r.conn.Exec(ctx, query); err != nil {
-		return fmt.Errorf("failed to create logs table: %w", err)
+	if err := r.defaultConn.Exec(ctx, query); err != nil {
+		return fmt.Errorf("failed to create logs table on default connection: %w", err)
+	}
+	if r.enterpriseConn != nil {
+		if err := r.enterpriseConn.Exec(ctx, query); err != nil {
+			return fmt.Errorf("failed to create logs table on enterprise connection: %w", err)
+		}
 	}
 	return nil
 }
 
-// BulkInsert inserts a slice of LogEntry in a single native ClickHouse batch.
+// BulkInsert inserts a slice of LogEntry in native ClickHouse batch(es), routed by tenant tier.
 func (r *ClickHouseLogRepository) BulkInsert(ctx context.Context, entries []*models.LogEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
-	batch, err := r.conn.PrepareBatch(ctx, "INSERT INTO logs (id, service_name, level, message, trace_id, span_id, metadata, timestamp, created_at)")
+	defaultBatch := make([]*models.LogEntry, 0)
+	enterpriseBatch := make([]*models.LogEntry, 0)
+
+	for _, entry := range entries {
+		if strings.ToLower(entry.TenantTier) == "enterprise" && r.enterpriseConn != nil {
+			enterpriseBatch = append(enterpriseBatch, entry)
+		} else {
+			defaultBatch = append(defaultBatch, entry)
+		}
+	}
+
+	if len(defaultBatch) > 0 {
+		if err := r.bulkInsertConn(ctx, r.defaultConn, defaultBatch); err != nil {
+			return fmt.Errorf("default shard bulk insert failed: %w", err)
+		}
+	}
+	if len(enterpriseBatch) > 0 {
+		if err := r.bulkInsertConn(ctx, r.enterpriseConn, enterpriseBatch); err != nil {
+			return fmt.Errorf("enterprise shard bulk insert failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (r *ClickHouseLogRepository) bulkInsertConn(ctx context.Context, conn driver.Conn, entries []*models.LogEntry) error {
+	batch, err := conn.PrepareBatch(ctx, "INSERT INTO logs (tenant_id, id, service_name, level, message, trace_id, span_id, metadata, timestamp, created_at)")
 	if err != nil {
 		return fmt.Errorf("failed to prepare clickhouse batch: %w", err)
 	}
 
 	for _, entry := range entries {
+		tenantID := entry.TenantID
+		if tenantID == "" {
+			tenantID = "default"
+		}
 		err = batch.Append(
+			tenantID,
 			entry.ID,
 			entry.ServiceName,
 			string(entry.Level),
@@ -90,6 +139,8 @@ type QueryResult struct {
 
 // Query fetches matching logs using paging, filtering, and timestamp range constraints.
 func (r *ClickHouseLogRepository) Query(ctx context.Context, params *models.LogQueryParams) (*QueryResult, error) {
+	conn := r.getConn(params.TenantTier)
+
 	page := params.Page
 	if page < 1 {
 		page = 1
@@ -102,6 +153,13 @@ func (r *ClickHouseLogRepository) Query(ctx context.Context, params *models.LogQ
 
 	var args []any
 	where := "WHERE 1=1"
+
+	tenantID := params.TenantID
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	where += " AND tenant_id = ?"
+	args = append(args, tenantID)
 
 	if params.ServiceName != "" {
 		where += " AND service_name = ?"
@@ -132,19 +190,19 @@ func (r *ClickHouseLogRepository) Query(ctx context.Context, params *models.LogQ
 
 	var total uint64
 	countQ := fmt.Sprintf("SELECT count() FROM logs %s", where)
-	if err := r.conn.QueryRow(ctx, countQ, args...).Scan(&total); err != nil {
+	if err := conn.QueryRow(ctx, countQ, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("failed to count clickhouse logs: %w", err)
 	}
 
 	dataQ := fmt.Sprintf(`
-		SELECT id, service_name, level, message, trace_id, span_id, metadata, timestamp, created_at
+		SELECT tenant_id, id, service_name, level, message, trace_id, span_id, metadata, timestamp, created_at
 		FROM logs %s
 		ORDER BY timestamp DESC
 		LIMIT ? OFFSET ?
 	`, where)
 
 	pageArgs := append(args, uint64(pageSize), uint64(offset))
-	rows, err := r.conn.Query(ctx, dataQ, pageArgs...)
+	rows, err := conn.Query(ctx, dataQ, pageArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query clickhouse logs: %w", err)
 	}
@@ -156,7 +214,7 @@ func (r *ClickHouseLogRepository) Query(ctx context.Context, params *models.LogQ
 		var timestamp, createdAt time.Time
 		var levelStr string
 		if err := rows.Scan(
-			&e.ID, &e.ServiceName, &levelStr, &e.Message,
+			&e.TenantID, &e.ID, &e.ServiceName, &levelStr, &e.Message,
 			&e.TraceID, &e.SpanID, &e.Metadata, &timestamp, &createdAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan clickhouse log: %w", err)
@@ -178,16 +236,22 @@ func (r *ClickHouseLogRepository) Query(ctx context.Context, params *models.LogQ
 // GetByID queries a single log by its UUID.
 func (r *ClickHouseLogRepository) GetByID(ctx context.Context, id string) (*models.LogEntry, error) {
 	const query = `
-		SELECT id, service_name, level, message, trace_id, span_id, metadata, timestamp, created_at
+		SELECT tenant_id, id, service_name, level, message, trace_id, span_id, metadata, timestamp, created_at
 		FROM logs WHERE id = ?
 	`
 	e := &models.LogEntry{}
 	var timestamp, createdAt time.Time
 	var levelStr string
-	err := r.conn.QueryRow(ctx, query, id).Scan(
-		&e.ID, &e.ServiceName, &levelStr, &e.Message,
+	err := r.defaultConn.QueryRow(ctx, query, id).Scan(
+		&e.TenantID, &e.ID, &e.ServiceName, &levelStr, &e.Message,
 		&e.TraceID, &e.SpanID, &e.Metadata, &timestamp, &createdAt,
 	)
+	if err != nil && r.enterpriseConn != nil {
+		err = r.enterpriseConn.QueryRow(ctx, query, id).Scan(
+			&e.TenantID, &e.ID, &e.ServiceName, &levelStr, &e.Message,
+			&e.TraceID, &e.SpanID, &e.Metadata, &timestamp, &createdAt,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse log entry not found: %w", err)
 	}

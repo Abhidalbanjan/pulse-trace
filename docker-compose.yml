@@ -81,6 +81,7 @@ services:
       - ./correlation-service/migrations/002_add_causal_fields.sql:/docker-entrypoint-initdb.d/004_add_causal_fields.sql
       - ./gateway-service/migrations/001_create_auth_tables.sql:/docker-entrypoint-initdb.d/005_create_auth_tables.sql
       - ./correlation-service/migrations/003_create_slo_tables.sql:/docker-entrypoint-initdb.d/006_create_slo_tables.sql
+      - ./correlation-service/migrations/004_add_tenant_fields.sql:/docker-entrypoint-initdb.d/007_add_tenant_fields.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pulsetrace"]
       interval: 5s
@@ -186,6 +187,9 @@ services:
       CLICKHOUSE_ADDR: clickhouse:9000
       CLICKHOUSE_USER: pulsetrace
       CLICKHOUSE_PASSWORD: clickhouse_secret
+      CLICKHOUSE_ADDR_ENTERPRISE: clickhouse-enterprise:9000
+      CLICKHOUSE_USER_ENTERPRISE: pulsetrace_enterprise
+      CLICKHOUSE_PASSWORD_ENTERPRISE: enterprise_secret
       PORT: "8081"
     ports:
       - "8081:8081"
@@ -236,6 +240,8 @@ services:
       CLICKHOUSE_ADDR: clickhouse:9000
       CLICKHOUSE_USER: pulsetrace
       CLICKHOUSE_PASSWORD: clickhouse_secret
+      HYBRID_MODE: "true"
+      CONTROL_PLANE_URL: http://gateway:8080/api/v1/control-plane/incidents
       PORT: "8083"
       # LangChain Go Multi-LLM support config
       LLM_PROVIDER: ${LLM_PROVIDER:-}
@@ -330,6 +336,7 @@ services:
       - topology-service
       - otel-collector
       - clickhouse
+      - clickhouse-enterprise
 
   # ── ClickHouse ───────────────────────────────────────────────────────────────
   clickhouse:
@@ -358,6 +365,45 @@ services:
       - "9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/storage.xml:/etc/clickhouse-server/config.d/storage.xml
+    depends_on:
+      minio:
+        condition: service_healthy
+      azure-blob:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── ClickHouse Enterprise Shard ──────────────────────────────────────────────
+  clickhouse-enterprise:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: pulsetrace-clickhouse-enterprise
+    restart: unless-stopped
+    environment:
+      - CLICKHOUSE_USER=pulsetrace_enterprise
+      - CLICKHOUSE_PASSWORD=enterprise_secret
+      # AWS S3 (local MinIO emulator)
+      - AWS_S3_ENDPOINT=http://minio:9000/clickhouse-cold-enterprise/data/
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      # Azure Blob (local Azurite emulator)
+      - AZURE_STORAGE_ACCOUNT_URL=http://azure-blob:10000/devstoreaccount1
+      - AZURE_CONTAINER_NAME=clickhouse-cold-enterprise
+      - AZURE_ACCOUNT_NAME=devstoreaccount1
+      - AZURE_ACCOUNT_KEY=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
+      - AZURE_BLOB_PATH=data/
+      # Google Cloud Storage (GCP/GCS)
+      - GCP_GCS_ENDPOINT=https://storage.googleapis.com/clickhouse-cold-enterprise/data/
+      - GCP_ACCESS_KEY_ID=gcs_access_key
+      - GCP_SECRET_ACCESS_KEY=gcs_secret_key
+    ports:
+      - "8124:8123"
+      - "9002:9000"
+    volumes:
+      - clickhouse_enterprise_data:/var/lib/clickhouse
       - ./clickhouse/storage.xml:/etc/clickhouse-server/config.d/storage.xml
     depends_on:
       minio:
@@ -400,6 +446,7 @@ services:
       /bin/sh -c "
       mc alias set localminio http://minio:9000 minioadmin minioadmin;
       mc mb --ignore-existing localminio/clickhouse-cold;
+      mc mb --ignore-existing localminio/clickhouse-cold-enterprise;
       exit 0;
       "
 
@@ -421,6 +468,7 @@ volumes:
   prometheus_data:
   grafana_data:
   clickhouse_data:
+  clickhouse_enterprise_data:
   minio_data:
   azurite_data:
 

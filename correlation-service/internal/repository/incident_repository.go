@@ -31,8 +31,8 @@ func (r *IncidentRepository) Upsert(ctx context.Context, incident *models.Incide
 
 	// Persist the incident row (INSERT … ON CONFLICT DO UPDATE).
 	const upsertQ = `
-		INSERT INTO incidents (id, title, root_cause, status, severity, alert_count, started_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO incidents (tenant_id, id, title, root_cause, status, severity, alert_count, started_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (id) DO UPDATE
 		  SET alert_count = incidents.alert_count + 1,
 		      severity    = CASE
@@ -42,12 +42,12 @@ func (r *IncidentRepository) Upsert(ctx context.Context, incident *models.Incide
 		                      ELSE incidents.severity
 		                    END,
 		      updated_at  = NOW()
-		RETURNING id, title, root_cause, status, severity, alert_count,
+		RETURNING tenant_id, id, title, root_cause, status, severity, alert_count,
 		          started_at, resolved_at, created_at, updated_at,
 		          causal, causal_analyzed_at
 	`
 	row := tx.QueryRow(ctx, upsertQ,
-		incident.ID, incident.Title, incident.RootCause,
+		incident.TenantID, incident.ID, incident.Title, incident.RootCause,
 		incident.Status, incident.Severity, incident.AlertCount,
 		incident.StartedAt, incident.CreatedAt, incident.UpdatedAt,
 	)
@@ -56,7 +56,7 @@ func (r *IncidentRepository) Upsert(ctx context.Context, incident *models.Incide
 	var causalJSON []byte
 	var causalAnalyzedAt *time.Time
 	if err := row.Scan(
-		&result.ID, &result.Title, &result.RootCause, &result.Status,
+		&result.TenantID, &result.ID, &result.Title, &result.RootCause, &result.Status,
 		&result.Severity, &result.AlertCount, &result.StartedAt,
 		&result.ResolvedAt, &result.CreatedAt, &result.UpdatedAt,
 		&causalJSON, &causalAnalyzedAt,
@@ -108,6 +108,14 @@ func (r *IncidentRepository) Query(ctx context.Context, params *models.IncidentQ
 	where := "WHERE 1=1"
 	idx := 1
 
+	tenantID := params.TenantID
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	where += fmt.Sprintf(" AND tenant_id = $%d", idx)
+	args = append(args, tenantID)
+	idx++
+
 	if params.Status != "" {
 		where += fmt.Sprintf(" AND status = $%d", idx)
 		args = append(args, params.Status)
@@ -139,7 +147,7 @@ func (r *IncidentRepository) Query(ctx context.Context, params *models.IncidentQ
 	}
 
 	dataQ := fmt.Sprintf(`
-		SELECT id, title, root_cause, status, severity, alert_count,
+		SELECT tenant_id, id, title, root_cause, status, severity, alert_count,
 		       started_at, resolved_at, created_at, updated_at,
 		       causal, causal_analyzed_at
 		FROM incidents %s
@@ -160,7 +168,7 @@ func (r *IncidentRepository) Query(ctx context.Context, params *models.IncidentQ
 		var causalJSON []byte
 		var causalAnalyzedAt *time.Time
 		if err := rows.Scan(
-			&inc.ID, &inc.Title, &inc.RootCause, &inc.Status,
+			&inc.TenantID, &inc.ID, &inc.Title, &inc.RootCause, &inc.Status,
 			&inc.Severity, &inc.AlertCount, &inc.StartedAt,
 			&inc.ResolvedAt, &inc.CreatedAt, &inc.UpdatedAt,
 			&causalJSON, &causalAnalyzedAt,
@@ -182,7 +190,7 @@ func (r *IncidentRepository) Query(ctx context.Context, params *models.IncidentQ
 // GetByID fetches a single incident with its linked alerts.
 func (r *IncidentRepository) GetByID(ctx context.Context, id string) (*models.Incident, error) {
 	const q = `
-		SELECT id, title, root_cause, status, severity, alert_count,
+		SELECT tenant_id, id, title, root_cause, status, severity, alert_count,
 		       started_at, resolved_at, created_at, updated_at,
 		       causal, causal_analyzed_at
 		FROM incidents WHERE id = $1
@@ -191,7 +199,7 @@ func (r *IncidentRepository) GetByID(ctx context.Context, id string) (*models.In
 	var causalJSON []byte
 	var causalAnalyzedAt *time.Time
 	err := r.db.QueryRow(ctx, q, id).Scan(
-		&inc.ID, &inc.Title, &inc.RootCause, &inc.Status,
+		&inc.TenantID, &inc.ID, &inc.Title, &inc.RootCause, &inc.Status,
 		&inc.Severity, &inc.AlertCount, &inc.StartedAt,
 		&inc.ResolvedAt, &inc.CreatedAt, &inc.UpdatedAt,
 		&causalJSON, &causalAnalyzedAt,
@@ -274,7 +282,7 @@ func (r *IncidentRepository) Timeline(ctx context.Context, id string) ([]models.
 func (r *IncidentRepository) GetOpenByWindow(ctx context.Context, candidateServices []string, windowStart time.Time) (*models.Incident, error) {
 
 	const q = `
-		SELECT i.id, i.title, i.root_cause, i.status, i.severity, i.alert_count,
+		SELECT i.tenant_id, i.id, i.title, i.root_cause, i.status, i.severity, i.alert_count,
 		       i.started_at, i.resolved_at, i.created_at, i.updated_at,
 		       i.causal, i.causal_analyzed_at
 		FROM incidents i
@@ -289,7 +297,7 @@ func (r *IncidentRepository) GetOpenByWindow(ctx context.Context, candidateServi
 	var causalJSON []byte
 	var causalAnalyzedAt *time.Time
 	err := r.db.QueryRow(ctx, q, candidateServices, windowStart).Scan(
-		&inc.ID, &inc.Title, &inc.RootCause, &inc.Status,
+		&inc.TenantID, &inc.ID, &inc.Title, &inc.RootCause, &inc.Status,
 		&inc.Severity, &inc.AlertCount, &inc.StartedAt,
 		&inc.ResolvedAt, &inc.CreatedAt, &inc.UpdatedAt,
 		&causalJSON, &causalAnalyzedAt,

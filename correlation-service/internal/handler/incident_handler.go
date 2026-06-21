@@ -41,7 +41,13 @@ func (h *IncidentHandler) ListIncidents(w http.ResponseWriter, r *http.Request) 
 	defer span.End()
 
 	q := r.URL.Query()
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
 	params := &models.IncidentQueryParams{
+		TenantID: tenantID,
 		Status:   q.Get("status"),
 		Severity: q.Get("severity"),
 		Service:  q.Get("service"),

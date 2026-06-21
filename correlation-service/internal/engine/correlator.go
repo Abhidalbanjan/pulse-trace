@@ -51,20 +51,24 @@ const causalAnalysisTimeout = 45 * time.Second
 // asynchronously runs causal-AI analysis to produce a refined root-cause
 // hypothesis and narrative; failures here are non-fatal.
 type Correlator struct {
-	repo      *repository.IncidentRepository
-	publisher *rabbitmq.Publisher
-	analyzer  causal.Analyzer
+	repo       *repository.IncidentRepository
+	publisher  *rabbitmq.Publisher
+	analyzer   causal.Analyzer
 	topoclient *client.TopologyClient
+	forwarder  *SaaSForwarder
 	// inflight dedupes concurrent analyses for the same incident — a burst of
 	// alerts hitting the same open incident only triggers one in-flight call.
-	inflight sync.Map // map[string]struct{}
+	inflight   sync.Map // map[string]struct{}
 }
 
-func NewCorrelator(repo *repository.IncidentRepository, publisher *rabbitmq.Publisher, analyzer causal.Analyzer, topoclient *client.TopologyClient) *Correlator {
+func NewCorrelator(repo *repository.IncidentRepository, publisher *rabbitmq.Publisher, analyzer causal.Analyzer, topoclient *client.TopologyClient, forwarder *SaaSForwarder) *Correlator {
 	if analyzer == nil {
 		analyzer = &causal.NoopAnalyzer{}
 	}
-	return &Correlator{repo: repo, publisher: publisher, analyzer: analyzer, topoclient: topoclient}
+	if forwarder == nil {
+		forwarder = NewSaaSForwarder()
+	}
+	return &Correlator{repo: repo, publisher: publisher, analyzer: analyzer, topoclient: topoclient, forwarder: forwarder}
 }
 
 // Handle is the Kafka MessageHandler for the alerts topic.
@@ -204,6 +208,9 @@ func (c *Correlator) scheduleCausalAnalysis(incidentID string) {
 			return
 		}
 
+		// Forward anonymized incident to central SaaS control plane in Zero-Egress mode
+		c.forwarder.ForwardIncident(ctx, inc, alerts)
+
 		// Option 3 Integration: push the causal chain path to Neo4j via topology client!
 		log.Printf("causal: pushing causal chain of length %d to Neo4j topology", len(result.Chain))
 		if err := c.topoclient.UpdateCausalPath(ctx, result.Chain); err != nil {
@@ -255,6 +262,7 @@ func (c *Correlator) correlate(ctx context.Context, alert *models.Alert) (*model
 	} else {
 		// Create a new incident.
 		incident = &models.Incident{
+			TenantID:   alert.TenantID,
 			ID:         uuid.New().String(),
 			Title:      buildTitle(alert),
 			RootCause:  inferRootCause(alert),

@@ -23,6 +23,7 @@ func NewAlertRepository(db *pgxpool.Pool) *AlertRepository {
 // Insert persists a new alert derived from a log entry.
 func (r *AlertRepository) Insert(ctx context.Context, entry *models.LogEntry) (*models.Alert, error) {
 	alert := &models.Alert{
+		TenantID:    entry.TenantID,
 		ID:          uuid.New().String(),
 		LogEntryID:  entry.ID,
 		ServiceName: entry.ServiceName,
@@ -34,11 +35,11 @@ func (r *AlertRepository) Insert(ctx context.Context, entry *models.LogEntry) (*
 	}
 
 	const q = `
-		INSERT INTO alerts (id, log_entry_id, service_name, level, message, trace_id, triggered_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO alerts (tenant_id, id, log_entry_id, service_name, level, message, trace_id, triggered_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
 	_, err := r.db.Exec(ctx, q,
-		alert.ID, alert.LogEntryID, alert.ServiceName, alert.Level,
+		alert.TenantID, alert.ID, alert.LogEntryID, alert.ServiceName, alert.Level,
 		alert.Message, alert.TraceID, alert.TriggeredAt, alert.CreatedAt,
 	)
 	if err != nil {
@@ -71,6 +72,11 @@ func (r *AlertRepository) Query(ctx context.Context, params *models.AlertQueryPa
 	where := "WHERE 1=1"
 	argIdx := 1
 
+	if params.TenantID != "" {
+		where += fmt.Sprintf(" AND tenant_id = $%d", argIdx)
+		args = append(args, params.TenantID)
+		argIdx++
+	}
 	if params.ServiceName != "" {
 		where += fmt.Sprintf(" AND service_name = $%d", argIdx)
 		args = append(args, params.ServiceName)
@@ -105,7 +111,7 @@ func (r *AlertRepository) Query(ctx context.Context, params *models.AlertQueryPa
 	}
 
 	dataQ := fmt.Sprintf(`
-		SELECT id, log_entry_id, service_name, level, message, trace_id, triggered_at, created_at
+		SELECT tenant_id, id, log_entry_id, service_name, level, message, trace_id, triggered_at, created_at
 		FROM alerts %s
 		ORDER BY triggered_at DESC
 		LIMIT $%d OFFSET $%d
@@ -122,7 +128,7 @@ func (r *AlertRepository) Query(ctx context.Context, params *models.AlertQueryPa
 	for rows.Next() {
 		a := &models.Alert{}
 		if err := rows.Scan(
-			&a.ID, &a.LogEntryID, &a.ServiceName, &a.Level,
+			&a.TenantID, &a.ID, &a.LogEntryID, &a.ServiceName, &a.Level,
 			&a.Message, &a.TraceID, &a.TriggeredAt, &a.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan alert: %w", err)
@@ -141,12 +147,12 @@ func (r *AlertRepository) Query(ctx context.Context, params *models.AlertQueryPa
 // GetByID fetches a single alert by its UUID.
 func (r *AlertRepository) GetByID(ctx context.Context, id string) (*models.Alert, error) {
 	const q = `
-		SELECT id, log_entry_id, service_name, level, message, trace_id, triggered_at, created_at
+		SELECT tenant_id, id, log_entry_id, service_name, level, message, trace_id, triggered_at, created_at
 		FROM alerts WHERE id = $1
 	`
 	a := &models.Alert{}
 	err := r.db.QueryRow(ctx, q, id).Scan(
-		&a.ID, &a.LogEntryID, &a.ServiceName, &a.Level,
+		&a.TenantID, &a.ID, &a.LogEntryID, &a.ServiceName, &a.Level,
 		&a.Message, &a.TraceID, &a.TriggeredAt, &a.CreatedAt,
 	)
 	if err != nil {

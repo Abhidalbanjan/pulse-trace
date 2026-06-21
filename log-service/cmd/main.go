@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/pulsetrace/log-service/internal/consumer"
 	"github.com/pulsetrace/log-service/internal/handler"
 	"github.com/pulsetrace/log-service/internal/repository"
@@ -43,7 +44,21 @@ func main() {
 	}
 	defer chConn.Close()
 
-	chRepo := repository.NewClickHouseLogRepository(chConn)
+	var chEnterpriseConn driver.Conn
+	enterpriseAddr := os.Getenv("CLICKHOUSE_ADDR_ENTERPRISE")
+	if enterpriseAddr != "" {
+		enterpriseUser := os.Getenv("CLICKHOUSE_USER_ENTERPRISE")
+		enterprisePassword := os.Getenv("CLICKHOUSE_PASSWORD_ENTERPRISE")
+		chEnterpriseConn, err = db.NewClickHouseConnectionWithAddr(enterpriseAddr, enterpriseUser, enterprisePassword, "default")
+		if err != nil {
+			log.Printf("WARNING: Enterprise ClickHouse connection failed (addr=%s): %v. Proceeding with default cluster only.", enterpriseAddr, err)
+		} else {
+			defer chEnterpriseConn.Close()
+			log.Printf("Connected to Enterprise ClickHouse shard at %s", enterpriseAddr)
+		}
+	}
+
+	chRepo := repository.NewClickHouseLogRepository(chConn, chEnterpriseConn)
 	if err := chRepo.InitializeSchema(ctx); err != nil {
 		log.Fatalf("ClickHouse schema initialization failed: %v", err)
 	}

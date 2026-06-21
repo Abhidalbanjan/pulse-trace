@@ -73,9 +73,12 @@ func main() {
 	}
 	topoClient := client.NewTopologyClient(topoURL)
 
+	// ── SaaS Forwarder ────────────────────────────────────────────────────────
+	forwarder := engine.NewSaaSForwarder()
+
 	// ── Wire up dependencies ──────────────────────────────────────────────────
 	repo := repository.NewIncidentRepository(pool)
-	correlator := engine.NewCorrelator(repo, publisher, analyzer, topoClient)
+	correlator := engine.NewCorrelator(repo, publisher, analyzer, topoClient, forwarder)
 	incidentHandler := handler.NewIncidentHandler(repo)
 
 	// ── SLO subsystem ────────────────────────────────────────────────────────

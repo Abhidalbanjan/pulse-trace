@@ -61,8 +61,8 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var storedHash, role string
-	err := h.db.QueryRow("SELECT password_hash, role FROM users WHERE username = $1", creds.Username).Scan(&storedHash, &role)
+	var storedHash, role, tenantID, tier string
+	err := h.db.QueryRow("SELECT password_hash, role, tenant_id, tier FROM users WHERE username = $1", creds.Username).Scan(&storedHash, &role, &tenantID, &tier)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "Invalid username or password", http.StatusUnauthorized)
@@ -88,10 +88,12 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub":  claims.Subject,
-		"exp":  claims.ExpiresAt,
-		"iat":  claims.IssuedAt,
-		"role": role,
+		"sub":         claims.Subject,
+		"exp":         claims.ExpiresAt,
+		"iat":         claims.IssuedAt,
+		"role":        role,
+		"tenant_id":   tenantID,
+		"tenant_tier": tier,
 	})
 
 	tokenString, err := token.SignedString(jwtSecret)
@@ -107,10 +109,26 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 // AuthMiddleware validates the JWT token
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow login, registration, and OTLP endpoints without token
+		// Allow login, registration, OTLP, control plane, and log ingestion (POST) endpoints without token
+		isLogIngest := r.URL.Path == "/api/v1/logs" && r.Method == http.MethodPost
 		if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/api/v1/auth/register" || r.URL.Path == "/healthz" ||
 			strings.HasPrefix(r.URL.Path, "/v1/traces") || strings.HasPrefix(r.URL.Path, "/v1/metrics") || strings.HasPrefix(r.URL.Path, "/v1/logs") ||
-			strings.HasPrefix(r.URL.Path, "/api/v1/topology/agent-config") {
+			strings.HasPrefix(r.URL.Path, "/api/v1/topology/agent-config") || r.URL.Path == "/api/v1/control-plane/incidents" || isLogIngest {
+			
+			// For unauthenticated telemetry endpoints, propagate tenant headers if provided in request
+			if isLogIngest || strings.HasPrefix(r.URL.Path, "/v1/traces") || strings.HasPrefix(r.URL.Path, "/v1/metrics") || strings.HasPrefix(r.URL.Path, "/v1/logs") {
+				tenantID := r.Header.Get("X-Tenant-ID")
+				if tenantID == "" {
+					tenantID = "default"
+				}
+				tenantTier := r.Header.Get("X-Tenant-Tier")
+				if tenantTier == "" {
+					tenantTier = "standard"
+				}
+				r.Header.Set("X-Tenant-ID", tenantID)
+				r.Header.Set("X-Tenant-Tier", tenantTier)
+			}
+			
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -139,6 +157,16 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		if ok && token.Valid {
 			r.Header.Set("X-User-Role", claims["role"].(string))
 			r.Header.Set("X-User-Subject", claims["sub"].(string))
+			if tenantID, exists := claims["tenant_id"].(string); exists {
+				r.Header.Set("X-Tenant-ID", tenantID)
+			} else {
+				r.Header.Set("X-Tenant-ID", "default")
+			}
+			if tenantTier, exists := claims["tenant_tier"].(string); exists {
+				r.Header.Set("X-Tenant-Tier", tenantTier)
+			} else {
+				r.Header.Set("X-Tenant-Tier", "standard")
+			}
 		}
 
 		next.ServeHTTP(w, r)
@@ -166,6 +194,8 @@ type User struct {
 	ID        string `json:"id"`
 	Username  string `json:"username"`
 	Role      string `json:"role"`
+	TenantID  string `json:"tenant_id"`
+	Tier      string `json:"tier"`
 	CreatedAt string `json:"created_at"`
 }
 
@@ -176,7 +206,7 @@ func (h *AuthHandler) GetUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.db.Query("SELECT id, username, role, created_at FROM users ORDER BY created_at DESC")
+	rows, err := h.db.Query("SELECT id, username, role, tenant_id, tier, created_at FROM users ORDER BY created_at DESC")
 	if err != nil {
 		http.Error(w, "Failed to fetch users", http.StatusInternalServerError)
 		return
@@ -186,7 +216,7 @@ func (h *AuthHandler) GetUsers(w http.ResponseWriter, r *http.Request) {
 	users := []User{}
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.TenantID, &u.Tier, &u.CreatedAt); err != nil {
 			continue
 		}
 		users = append(users, u)
@@ -284,6 +314,8 @@ func (h *AuthHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 		Role     string `json:"role"`
+		TenantID string `json:"tenant_id"`
+		Tier     string `json:"tier"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -300,6 +332,15 @@ func (h *AuthHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tenantID := req.TenantID
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	tier := req.Tier
+	if tier == "" {
+		tier = "standard"
+	}
+
 	// Hash password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -307,7 +348,7 @@ func (h *AuthHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = h.db.Exec("INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3)", req.Username, string(hashedPassword), req.Role)
+	_, err = h.db.Exec("INSERT INTO users (username, password_hash, role, tenant_id, tier) VALUES ($1, $2, $3, $4, $5)", req.Username, string(hashedPassword), req.Role, tenantID, tier)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "duplicate key") {
 			http.Error(w, "Username already exists", http.StatusConflict)
@@ -330,25 +371,39 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var creds Credentials
-	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		TenantID string `json:"tenant_id"`
+		Tier     string `json:"tier"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	if creds.Username == "" || creds.Password == "" {
+	if req.Username == "" || req.Password == "" {
 		http.Error(w, "Username and password required", http.StatusBadRequest)
 		return
 	}
 
+	tenantID := req.TenantID
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	tier := req.Tier
+	if tier == "" {
+		tier = "standard"
+	}
+
 	// Hash password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(creds.Password), bcrypt.DefaultCost)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		http.Error(w, "Failed to hash password", http.StatusInternalServerError)
 		return
 	}
 
-	_, err = h.db.Exec("INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3)", creds.Username, string(hashedPassword), "viewer")
+	_, err = h.db.Exec("INSERT INTO users (username, password_hash, role, tenant_id, tier) VALUES ($1, $2, $3, $4, $5)", req.Username, string(hashedPassword), "viewer", tenantID, tier)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "duplicate key") {
 			http.Error(w, "Username already exists", http.StatusConflict)

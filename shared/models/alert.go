@@ -4,6 +4,7 @@ import "time"
 
 // Alert represents a triggered alert derived from a log event.
 type Alert struct {
+	TenantID    string    `json:"tenant_id,omitempty" db:"tenant_id"`
 	ID          string    `json:"id" db:"id"`
 	LogEntryID  string    `json:"log_entry_id" db:"log_entry_id"`
 	ServiceName string    `json:"service" db:"service_name"`
@@ -16,6 +17,7 @@ type Alert struct {
 
 // AlertQueryParams holds filter/pagination options for querying alerts.
 type AlertQueryParams struct {
+	TenantID    string   `form:"tenant_id"`
 	ServiceName string   `form:"service"`
 	Level       LogLevel `form:"level"`
 	From        string   `form:"from"` // RFC3339

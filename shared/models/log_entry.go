@@ -15,6 +15,8 @@ const (
 
 // LogEntry represents a structured log event emitted by a microservice.
 type LogEntry struct {
+	TenantID    string    `json:"tenant_id,omitempty" db:"tenant_id"`
+	TenantTier  string    `json:"tenant_tier,omitempty" db:"tenant_tier"`
 	ID          string    `json:"id" db:"id"`
 	ServiceName string    `json:"service" db:"service_name"`
 	Level       LogLevel  `json:"level" db:"level"`
@@ -39,6 +41,8 @@ type CreateLogRequest struct {
 
 // LogQueryParams holds filter/pagination options for querying logs.
 type LogQueryParams struct {
+	TenantID    string   `form:"tenant_id"`
+	TenantTier  string   `form:"tenant_tier"`
 	ServiceName string   `form:"service"`
 	Level       LogLevel `form:"level"`
 	TraceID     string   `form:"trace_id"`

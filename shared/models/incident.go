@@ -14,6 +14,7 @@ const (
 // The correlation engine creates incidents by clustering alerts that share
 // a service dependency graph within a sliding time window.
 type Incident struct {
+	TenantID     string          `json:"tenant_id,omitempty" db:"tenant_id"`
 	ID           string          `json:"id" db:"id"`
 	Title        string          `json:"title" db:"title"`
 	RootCause    string          `json:"root_cause" db:"root_cause"`
@@ -71,6 +72,7 @@ type IncidentTimelineEvent struct {
 
 // IncidentQueryParams holds filter/pagination options for querying incidents.
 type IncidentQueryParams struct {
+	TenantID string `form:"tenant_id"`
 	Status   string `form:"status"`
 	Severity string `form:"severity"`
 	Service  string `form:"service"`

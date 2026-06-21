@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pulsetrace/gateway-service/internal/auth"
+	"github.com/pulsetrace/gateway-service/internal/pii"
 	"github.com/pulsetrace/gateway-service/internal/proxy"
 	"github.com/pulsetrace/shared/middleware"
 	"github.com/pulsetrace/shared/telemetry"
@@ -77,11 +78,24 @@ func main() {
 		mux.HandleFunc("PUT /api/v1/admin/users/role", authHandler.UpdateUserRole)
 	}
 
+	// Mock SaaS Control Plane endpoint for Zero-Data-Egress metadata
+	mux.HandleFunc("POST /api/v1/control-plane/incidents", func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		log.Printf("[SAAS CONTROL PLANE] Received zero-egress anonymized incident: %+v", payload)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "received", "action": "stored_in_saas_db"})
+	})
+
 	mux.Handle("/", router)
 
-	// Middleware chain: CORS → Tracing → RequestLogger → Auth → RBAC → router
+	// Middleware chain: CORS → Tracing → RequestLogger → Auth → PII Sanitizer → RBAC → router
 	var chain http.Handler = mux
 	chain = auth.RBACMiddleware(chain)
+	chain = pii.PIISanitizerMiddleware(chain)
 	chain = auth.AuthMiddleware(chain)
 	chain = middleware.RequestLogger(chain)
 	chain = middleware.Tracing(serviceName)(chain)

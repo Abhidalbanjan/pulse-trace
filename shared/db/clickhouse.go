@@ -10,7 +10,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-// NewClickHouseConnection creates a new ClickHouse native client connection.
+// NewClickHouseConnection creates a new ClickHouse native client connection using environment variables.
 func NewClickHouseConnection() (driver.Conn, error) {
 	addr := os.Getenv("CLICKHOUSE_ADDR")
 	if addr == "" {
@@ -29,6 +29,11 @@ func NewClickHouseConnection() (driver.Conn, error) {
 		password = ""
 	}
 
+	return NewClickHouseConnectionWithAddr(addr, user, password, dbName)
+}
+
+// NewClickHouseConnectionWithAddr creates a new ClickHouse native client connection to a specific address.
+func NewClickHouseConnectionWithAddr(addr, user, password, dbName string) (driver.Conn, error) {
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{addr},
 		Auth: clickhouse.Auth{

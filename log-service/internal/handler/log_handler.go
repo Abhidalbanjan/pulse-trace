@@ -104,9 +104,20 @@ func (h *LogHandler) IngestLog(w http.ResponseWriter, r *http.Request) {
 		attribute.String("log.level", string(req.Level)),
 	)
 
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	tenantTier := r.Header.Get("X-Tenant-Tier")
+	if tenantTier == "" {
+		tenantTier = "standard"
+	}
+
 	// Construct the LogEntry directly
 	entry := &models.LogEntry{
 		ID:          uuid.New().String(),
+		TenantID:    tenantID,
+		TenantTier:  tenantTier,
 		ServiceName: req.ServiceName,
 		Level:       req.Level,
 		Message:     req.Message,
@@ -221,7 +232,18 @@ func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	tenantTier := r.Header.Get("X-Tenant-Tier")
+	if tenantTier == "" {
+		tenantTier = "standard"
+	}
+
 	params := &models.LogQueryParams{
+		TenantID:    tenantID,
+		TenantTier:  tenantTier,
 		ServiceName: q.Get("service"),
 		Level:       models.LogLevel(q.Get("level")),
 		TraceID:     q.Get("trace_id"),

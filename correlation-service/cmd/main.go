@@ -76,9 +76,14 @@ func main() {
 	// ── SaaS Forwarder ────────────────────────────────────────────────────────
 	forwarder := engine.NewSaaSForwarder()
 
+	// ── Automation Router ─────────────────────────────────────────────────────
+	playbookSecret := os.Getenv("PLAYBOOK_HMAC_SECRET")
+	agentURL := topoURL + "/api/v1/agent/playbook/execute"
+	autoRouter := engine.NewAutomationRouter(repository.NewIncidentRepository(pool), agentURL, playbookSecret)
+
 	// ── Wire up dependencies ──────────────────────────────────────────────────
 	repo := repository.NewIncidentRepository(pool)
-	correlator := engine.NewCorrelator(repo, publisher, analyzer, topoClient, forwarder)
+	correlator := engine.NewCorrelator(repo, publisher, analyzer, topoClient, forwarder, autoRouter)
 	incidentHandler := handler.NewIncidentHandler(repo)
 
 	// ── SLO subsystem ────────────────────────────────────────────────────────

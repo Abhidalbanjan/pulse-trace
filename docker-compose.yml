@@ -108,6 +108,19 @@ services:
       retries: 10
       start_period: 30s
 
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: pulsetrace-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   # ── Jaeger ───────────────────────────────────────────────────────────────────
   jaeger:
     image: jaegertracing/all-in-one:1.57
@@ -253,6 +266,7 @@ services:
       CAUSAL_MODEL: ${CAUSAL_MODEL:-}
       CAUSAL_DISABLED: ${CAUSAL_DISABLED:-}
       TOPOLOGY_SERVICE_URL: http://topology-service:8084
+      PLAYBOOK_HMAC_SECRET: ${PLAYBOOK_HMAC_SECRET:-pulsetrace_secure_playbook_hmac_secret}
     ports:
       - "8083:8083"
     depends_on:
@@ -264,6 +278,8 @@ services:
         condition: service_healthy
       otel-collector:
         condition: service_started
+      redis:
+        condition: service_healthy
 
   # ── Topology Service ──────────────────────────────────────────────────────────
   topology-service:
@@ -280,6 +296,9 @@ services:
       KAFKA_GROUP_ID: topology-service
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       PORT: "8084"
+      REDIS_ADDR: redis:6379
+      PLAYBOOK_HMAC_SECRET: ${PLAYBOOK_HMAC_SECRET:-pulsetrace_secure_playbook_hmac_secret}
+      DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
     ports:
       - "8084:8084"
     depends_on:
@@ -289,6 +308,10 @@ services:
         condition: service_healthy
       otel-collector:
         condition: service_started
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
 
   # ── Notification Service ──────────────────────────────────────────────────────
   notification-service:

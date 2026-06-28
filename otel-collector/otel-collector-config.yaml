@@ -41,6 +41,11 @@ exporters:
     tls:
       insecure: true
 
+  # Send traces to topology-service via OTLP HTTP JSON
+  otlphttp/topology:
+    endpoint: http://topology-service:8084
+    encoding: json
+
   # Expose Prometheus metrics scraped from the collector itself.
   prometheus:
     endpoint: "0.0.0.0:8889"
@@ -54,7 +59,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [tail_sampling, batch, resource]
-      exporters: [otlp/jaeger, debug]
+      exporters: [otlp/jaeger, debug, otlphttp/topology]
 
     metrics:
       receivers: [otlp]

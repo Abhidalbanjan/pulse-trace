@@ -56,19 +56,20 @@ type Correlator struct {
 	analyzer   causal.Analyzer
 	topoclient *client.TopologyClient
 	forwarder  *SaaSForwarder
+	router     *AutomationRouter
 	// inflight dedupes concurrent analyses for the same incident — a burst of
 	// alerts hitting the same open incident only triggers one in-flight call.
 	inflight   sync.Map // map[string]struct{}
 }
 
-func NewCorrelator(repo *repository.IncidentRepository, publisher *rabbitmq.Publisher, analyzer causal.Analyzer, topoclient *client.TopologyClient, forwarder *SaaSForwarder) *Correlator {
+func NewCorrelator(repo *repository.IncidentRepository, publisher *rabbitmq.Publisher, analyzer causal.Analyzer, topoclient *client.TopologyClient, forwarder *SaaSForwarder, router *AutomationRouter) *Correlator {
 	if analyzer == nil {
 		analyzer = &causal.NoopAnalyzer{}
 	}
 	if forwarder == nil {
 		forwarder = NewSaaSForwarder()
 	}
-	return &Correlator{repo: repo, publisher: publisher, analyzer: analyzer, topoclient: topoclient, forwarder: forwarder}
+	return &Correlator{repo: repo, publisher: publisher, analyzer: analyzer, topoclient: topoclient, forwarder: forwarder, router: router}
 }
 
 // Handle is the Kafka MessageHandler for the alerts topic.
@@ -215,6 +216,19 @@ func (c *Correlator) scheduleCausalAnalysis(incidentID string) {
 		log.Printf("causal: pushing causal chain of length %d to Neo4j topology", len(result.Chain))
 		if err := c.topoclient.UpdateCausalPath(ctx, result.Chain); err != nil {
 			log.Printf("causal: failed to push causal path to topology service: %v", err)
+		}
+
+		// Trigger the Automation Router to execute/suggest recovery playbook
+		if c.router != nil {
+			targetService := ""
+			if len(result.Chain) > 0 {
+				targetService = result.Chain[0].FromService
+			} else if inc != nil && len(inc.ServiceNames) > 0 {
+				targetService = inc.ServiceNames[0]
+			}
+			if targetService != "" {
+				c.router.Route(ctx, incidentID, result, targetService)
+			}
 		}
 
 		span.SetAttributes(

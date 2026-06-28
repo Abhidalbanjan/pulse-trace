@@ -2,24 +2,65 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/redis/go-redis/v9"
 )
 
 type Neo4jRepository struct {
 	driver neo4j.DriverWithContext
+	rdb    *redis.Client
 }
 
-func NewNeo4jRepository(uri, username, password string) (*Neo4jRepository, error) {
+func NewNeo4jRepository(uri, username, password, redisAddr string) (*Neo4jRepository, error) {
 	driver, err := neo4j.NewDriverWithContext(uri, neo4j.BasicAuth(username, password, ""))
 	if err != nil {
 		return nil, err
 	}
-	return &Neo4jRepository{driver: driver}, nil
+
+	var rdb *redis.Client
+	if redisAddr != "" {
+		rdb = redis.NewClient(&redis.Options{
+			Addr: redisAddr,
+		})
+		// Ping redis to check connectivity
+		pingCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := rdb.Ping(pingCtx).Err(); err != nil {
+			log.Printf("WARNING: failed to ping redis at %s: %v. Caching disabled.", redisAddr, err)
+			rdb = nil
+		} else {
+			log.Printf("Connected to Redis for topology cache: %s", redisAddr)
+		}
+	}
+
+	return &Neo4jRepository{driver: driver, rdb: rdb}, nil
 }
 
 func (r *Neo4jRepository) Close(ctx context.Context) error {
+	if r.rdb != nil {
+		r.rdb.Close()
+	}
 	return r.driver.Close(ctx)
+}
+
+// Helper to invalidate cached topology data
+func (r *Neo4jRepository) invalidateCache(ctx context.Context, service string) {
+	if r.rdb == nil {
+		return
+	}
+	keys := []string{
+		"topo:upstream:" + service,
+		"topo:downstream:" + service,
+		"topo:graph",
+	}
+	if err := r.rdb.Del(ctx, keys...).Err(); err != nil {
+		log.Printf("failed to invalidate cache keys for service %s: %v", service, err)
+	}
 }
 
 // UpsertDependencyEdge creates or updates a dependency between two services.
@@ -33,11 +74,26 @@ func (r *Neo4jRepository) UpsertDependencyEdge(ctx context.Context, from, to str
 		"from": from,
 		"to":   to,
 	}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
+	if err == nil {
+		r.invalidateCache(ctx, from)
+		r.invalidateCache(ctx, to)
+	}
 	return err
 }
 
 // GetDownstreamDependencies returns a list of services that depend on the given service.
 func (r *Neo4jRepository) GetDownstreamDependencies(ctx context.Context, serviceName string) ([]string, error) {
+	cacheKey := "topo:downstream:" + serviceName
+	if r.rdb != nil {
+		val, err := r.rdb.Get(ctx, cacheKey).Result()
+		if err == nil {
+			var deps []string
+			if err := json.Unmarshal([]byte(val), &deps); err == nil {
+				return deps, nil
+			}
+		}
+	}
+
 	query := `
 		MATCH (upstream:Service {name: $serviceName})<-[:DEPENDS_ON]-(downstream:Service)
 		RETURN downstream.name AS name
@@ -55,6 +111,13 @@ func (r *Neo4jRepository) GetDownstreamDependencies(ctx context.Context, service
 		name, _ := record.Get("name")
 		deps = append(deps, name.(string))
 	}
+
+	if r.rdb != nil {
+		if val, err := json.Marshal(deps); err == nil {
+			r.rdb.Set(ctx, cacheKey, val, 5*time.Minute)
+		}
+	}
+
 	return deps, nil
 }
 
@@ -68,11 +131,25 @@ func (r *Neo4jRepository) UpdateServiceState(ctx context.Context, serviceName, s
 		"serviceName": serviceName,
 		"state":       state,
 	}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
+	if err == nil {
+		r.invalidateCache(ctx, serviceName)
+	}
 	return err
 }
 
 // GetUpstreamDependencies returns a list of services that this service depends on.
 func (r *Neo4jRepository) GetUpstreamDependencies(ctx context.Context, serviceName string) ([]string, error) {
+	cacheKey := "topo:upstream:" + serviceName
+	if r.rdb != nil {
+		val, err := r.rdb.Get(ctx, cacheKey).Result()
+		if err == nil {
+			var deps []string
+			if err := json.Unmarshal([]byte(val), &deps); err == nil {
+				return deps, nil
+			}
+		}
+	}
+
 	query := `
 		MATCH (downstream:Service {name: $serviceName})-[:DEPENDS_ON]->(upstream:Service)
 		RETURN upstream.name AS name
@@ -90,6 +167,13 @@ func (r *Neo4jRepository) GetUpstreamDependencies(ctx context.Context, serviceNa
 		name, _ := record.Get("name")
 		deps = append(deps, name.(string))
 	}
+
+	if r.rdb != nil {
+		if val, err := json.Marshal(deps); err == nil {
+			r.rdb.Set(ctx, cacheKey, val, 5*time.Minute)
+		}
+	}
+
 	return deps, nil
 }
 
@@ -175,6 +259,17 @@ func (r *Neo4jRepository) UpdateCausalPath(ctx context.Context, links []CausalLi
 
 // GetGraph returns all nodes and edges in the topology.
 func (r *Neo4jRepository) GetGraph(ctx context.Context) (*Graph, error) {
+	cacheKey := "topo:graph"
+	if r.rdb != nil {
+		val, err := r.rdb.Get(ctx, cacheKey).Result()
+		if err == nil {
+			var graph Graph
+			if err := json.Unmarshal([]byte(val), &graph); err == nil {
+				return &graph, nil
+			}
+		}
+	}
+
 	nodesRes, err := neo4j.ExecuteQuery(ctx, r.driver, `MATCH (n:Service) RETURN n.name AS id, n.state AS state`, nil, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 	if err != nil {
 		return nil, err
@@ -219,5 +314,57 @@ func (r *Neo4jRepository) GetGraph(ctx context.Context) (*Graph, error) {
 		})
 	}
 
-	return &Graph{Nodes: nodes, Edges: edges}, nil
+	graph := &Graph{Nodes: nodes, Edges: edges}
+
+	if r.rdb != nil {
+		if val, err := json.Marshal(graph); err == nil {
+			r.rdb.Set(ctx, cacheKey, val, 5*time.Minute)
+		}
+	}
+
+	return graph, nil
+}
+
+// SetSpanService caches a span ID to its service name mapping.
+func (r *Neo4jRepository) SetSpanService(ctx context.Context, key, serviceName string, ttl time.Duration) error {
+	if r.rdb == nil {
+		return nil
+	}
+	return r.rdb.Set(ctx, key, serviceName, ttl).Err()
+}
+
+// GetSpanService retrieves a cached span ID to service name mapping.
+func (r *Neo4jRepository) GetSpanService(ctx context.Context, key string) (string, error) {
+	if r.rdb == nil {
+		return "", fmt.Errorf("redis client not initialized")
+	}
+	return r.rdb.Get(ctx, key).Result()
+}
+
+// AddPendingChild adds a service name to the set of child services waiting for a parent span.
+func (r *Neo4jRepository) AddPendingChild(ctx context.Context, key, childService string, ttl time.Duration) error {
+	if r.rdb == nil {
+		return nil
+	}
+	err := r.rdb.SAdd(ctx, key, childService).Err()
+	if err != nil {
+		return err
+	}
+	return r.rdb.Expire(ctx, key, ttl).Err()
+}
+
+// GetPendingChildren retrieves all child services waiting for a parent span.
+func (r *Neo4jRepository) GetPendingChildren(ctx context.Context, key string) ([]string, error) {
+	if r.rdb == nil {
+		return nil, fmt.Errorf("redis client not initialized")
+	}
+	return r.rdb.SMembers(ctx, key).Result()
+}
+
+// DeleteKey deletes a key from Redis.
+func (r *Neo4jRepository) DeleteKey(ctx context.Context, key string) error {
+	if r.rdb == nil {
+		return nil
+	}
+	return r.rdb.Del(ctx, key).Err()
 }

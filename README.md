@@ -614,5 +614,6 @@ pulsetrace/
 - [x] **Week 1 / Phase 4** — Incident correlation engine, RabbitMQ notifications, Kubernetes manifests
 - [x] **Week 1 / Phase 5** — Causal AI: deterministic causal chains + LLM-powered narrative & confidence (LangChain Go — Claude, OpenAI, Gemini, Ollama)
 - [x] **Week 2 / Phase 6** — ClickHouse analytical storage, Go Kafka batch consumer (≤10k logs / 100ms), multi-cloud cold storage tiering (AWS S3, Azure Blob, GCP GCS), native OTLP gRPC/HTTP proxying, SLO burn rate engine (real-time ClickHouse SLI queries, error budget tracking, multi-threshold alerts)
-- [ ] **Week 3** — Pluggable AI adapters, dynamic log detail leveling, burn rate alerting
-- [ ] **Week 4** — Zero-egress hybrid architecture, ClickHouse cluster sharding, PII sanitizer pipeline
+- [x] **Week 3** — Pluggable AI adapters, dynamic log detail leveling, burn rate alerting
+- [x] **Week 4** — Zero-egress hybrid architecture, ClickHouse cluster sharding, PII sanitizer pipeline
+- [x] **Week 5** — Auto-Topology Discovery (OTLP/HTTP traces receiver), Redis caching, AI self-healing playbooks (HMAC-SHA256 signature verification, Postgres/Kubernetes executions)

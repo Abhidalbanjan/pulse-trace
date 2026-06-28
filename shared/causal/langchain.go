@@ -137,6 +137,17 @@ func (l *LangChainAnalyzer) Analyze(ctx context.Context, e *Evidence) (*models.C
 		chain = deterministicChain
 	}
 
+	var playbook *models.PlaybookAction
+	if parsed.Playbook != nil && parsed.Playbook.Name != "" {
+		playbook = &models.PlaybookAction{
+			Name:        parsed.Playbook.Name,
+			Description: parsed.Playbook.Description,
+			Status:      "SUGGESTED",
+		}
+	} else {
+		playbook = SuggestPlaybook(parsed.RootCause)
+	}
+
 	return &models.CausalAnalysis{
 		Chain:      chain,
 		Narrative:  parsed.Narrative,
@@ -144,6 +155,7 @@ func (l *LangChainAnalyzer) Analyze(ctx context.Context, e *Evidence) (*models.C
 		Confidence: clamp01(parsed.Confidence),
 		Model:      l.Name(),
 		AnalyzedAt: time.Now().UTC(),
+		Playbook:   playbook,
 	}, nil
 }
 
@@ -156,7 +168,7 @@ You are given:
   2. An incident composed of one or more alerts, each with a timestamp, service, level, and message.
   3. A deterministic causal chain pre-computed from the dependency graph.
 
-Your task: refine the chain into a most-likely causal hypothesis and write a concise narrative an on-call SRE can act on.
+Your task: refine the chain into a most-likely causal hypothesis, write a concise narrative an on-call SRE can act on, and suggest a recovery playbook.
 
 Output strict JSON only, no prose outside the JSON, matching exactly this shape:
 {
@@ -165,7 +177,11 @@ Output strict JSON only, no prose outside the JSON, matching exactly this shape:
   ],
   "narrative": "<2-4 sentences explaining the likely causal story>",
   "root_cause": "<single sentence — the hypothesized root cause>",
-  "confidence": <float 0.0 to 1.0>
+  "confidence": <float 0.0 to 1.0>,
+  "playbook": {
+    "name": "<name of recovery playbook, e.g., 'restart_service', 'recycle_db_pool', 'scale_replicas'>",
+    "description": "<brief description of what it does>"
+  }
 }
 
 Rules:
@@ -230,6 +246,10 @@ type modelOutput struct {
 	Narrative  string              `json:"narrative"`
 	RootCause  string              `json:"root_cause"`
 	Confidence float64             `json:"confidence"`
+	Playbook   *struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	} `json:"playbook,omitempty"`
 }
 
 func parseModelJSON(text string) (*modelOutput, error) {

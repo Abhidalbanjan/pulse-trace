@@ -44,7 +44,8 @@ func main() {
 		pass = "pulsetrace_secret"
 	}
 
-	repo, err := repository.NewNeo4jRepository(uri, user, pass)
+	redisAddr := os.Getenv("REDIS_ADDR")
+	repo, err := repository.NewNeo4jRepository(uri, user, pass, redisAddr)
 	if err != nil {
 		log.Fatalf("failed to connect to neo4j: %v", err)
 	}
@@ -54,7 +55,8 @@ func main() {
 	seedEdges(ctx, repo)
 
 	// API Setup
-	api := handler.NewAPI(repo)
+	secret := os.Getenv("PLAYBOOK_HMAC_SECRET")
+	api := handler.NewAPI(repo, secret)
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 

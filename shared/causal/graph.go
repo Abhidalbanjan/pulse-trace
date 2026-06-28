@@ -90,7 +90,38 @@ func (n *NoopAnalyzer) Analyze(_ context.Context, e *Evidence) (*models.CausalAn
 		Confidence: noopConfidence(chain, e.Incident),
 		Model:      n.Name(),
 		AnalyzedAt: time.Now().UTC(),
+		Playbook:   SuggestPlaybook(e.Incident.RootCause),
 	}, nil
+}
+
+func SuggestPlaybook(rootCause string) *models.PlaybookAction {
+	rc := strings.ToLower(rootCause)
+	if strings.Contains(rc, "connection") || strings.Contains(rc, "database") || strings.Contains(rc, "pool") {
+		return &models.PlaybookAction{
+			Name:        "recycle_db_pool",
+			Description: "Recycles database connection pools on the target service to clear stale connections.",
+			Status:      "SUGGESTED",
+		}
+	}
+	if strings.Contains(rc, "memory") || strings.Contains(rc, "oom") || strings.Contains(rc, "leak") || strings.Contains(rc, "crash") {
+		return &models.PlaybookAction{
+			Name:        "restart_service",
+			Description: "Kubernetes rolling restart of the service pods to free memory and restore health.",
+			Status:      "SUGGESTED",
+		}
+	}
+	if strings.Contains(rc, "timeout") || strings.Contains(rc, "latency") || strings.Contains(rc, "exhaustion") {
+		return &models.PlaybookAction{
+			Name:        "scale_replicas",
+			Description: "Scale up service pod replicas by 2 to buffer transaction volume and reduce CPU/latency pressure.",
+			Status:      "SUGGESTED",
+		}
+	}
+	return &models.PlaybookAction{
+		Name:        "restart_service",
+		Description: "Kubernetes rolling restart of the service pods.",
+		Status:      "SUGGESTED",
+	}
 }
 
 // noopConfidence assigns a heuristic confidence:

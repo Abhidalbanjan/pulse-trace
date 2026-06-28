@@ -39,16 +39,25 @@ type CausalLink struct {
 	At          time.Time `json:"at"`
 }
 
+// PlaybookAction represents a suggested or executed recovery action.
+type PlaybookAction struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Status      string `json:"status"` // SUGGESTED, EXECUTING, EXECUTED, FAILED
+	Output      string `json:"output,omitempty"`
+}
+
 // CausalAnalysis is the structured output of the causal-AI analyzer. It is
 // computed asynchronously after incident upsert and stored on the incident
 // row as JSONB.
 type CausalAnalysis struct {
-	Chain      []CausalLink `json:"chain"`            // ordered causal links, upstream → downstream
-	Narrative  string       `json:"narrative"`        // human-readable causal story
-	RootCause  string       `json:"root_cause"`       // refined hypothesis (supersedes regex inference)
-	Confidence float64      `json:"confidence"`       // 0.0 – 1.0
-	Model      string       `json:"model"`            // analyzer identifier (e.g., "claude-opus-4-7", "rule-based")
-	AnalyzedAt time.Time    `json:"analyzed_at"`
+	Chain      []CausalLink    `json:"chain"`            // ordered causal links, upstream → downstream
+	Narrative  string          `json:"narrative"`        // human-readable causal story
+	RootCause  string          `json:"root_cause"`       // refined hypothesis (supersedes regex inference)
+	Confidence float64         `json:"confidence"`       // 0.0 – 1.0
+	Model      string          `json:"model"`            // analyzer identifier (e.g., "claude-opus-4-7", "rule-based")
+	AnalyzedAt time.Time       `json:"analyzed_at"`
+	Playbook   *PlaybookAction `json:"playbook,omitempty"` // suggested recovery playbook
 }
 
 // IncidentAlert is the join record linking an alert to an incident.

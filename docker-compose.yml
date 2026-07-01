@@ -33,6 +33,7 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 10
       KAFKA_LOG_RETENTION_HOURS: 168
     healthcheck:
       test: ["CMD-SHELL", "timeout 5 bash -c 'cat < /dev/null > /dev/tcp/localhost/9092' 2>/dev/null"]
@@ -331,6 +332,18 @@ services:
         condition: service_healthy
       otel-collector:
         condition: service_started
+
+  # ── Vector Agent (Edge Batching) ─────────────────────────────────────────────
+  vector:
+    image: timberio/vector:0.38.0-alpine
+    container_name: pulsetrace-vector
+    restart: unless-stopped
+    ports:
+      - "8383:8383"
+    volumes:
+      - ./vector/vector.toml:/etc/vector/vector.yaml
+    depends_on:
+      - gateway
 
   # ── Gateway Service ───────────────────────────────────────────────────────────
   gateway:

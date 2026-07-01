@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -68,6 +69,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "gateway"})
 	})
+	mux.Handle("/debug/pprof/", http.DefaultServeMux)
 
 	if authHandler != nil {
 		mux.HandleFunc("POST /api/v1/auth/login", authHandler.Login)

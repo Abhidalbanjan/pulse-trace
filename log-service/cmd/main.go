@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -94,6 +95,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	logHandler.RegisterRoutes(mux)
+	mux.Handle("/debug/pprof/", http.DefaultServeMux)
 
 	// Middleware chain: CORS → Tracing → RequestLogger → router
 	chain := middleware.CORS(middleware.Tracing(serviceName)(middleware.RequestLogger(mux)))

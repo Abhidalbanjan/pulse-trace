@@ -94,13 +94,17 @@ func declareTopology(ch *amqp.Channel) error {
 	}
 
 	// Dead-letter queue first (referenced by main queue args).
-	_, err := ch.QueueDeclare(QueueNotificationsDLQ, true, false, false, false, nil)
+	dlqArgs := amqp.Table{
+		"x-queue-type": "quorum",
+	}
+	_, err := ch.QueueDeclare(QueueNotificationsDLQ, true, false, false, false, dlqArgs)
 	if err != nil {
 		return fmt.Errorf("failed to declare DLQ: %w", err)
 	}
 
 	// Main notifications queue with DLQ and per-message TTL (24h).
 	args := amqp.Table{
+		"x-queue-type":              "quorum",
 		"x-dead-letter-exchange":    "",
 		"x-dead-letter-routing-key": QueueNotificationsDLQ,
 		"x-message-ttl":             int32(86400000), // 24h in ms

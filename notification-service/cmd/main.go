@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -29,6 +31,13 @@ func main() {
 			}
 		}()
 	}
+
+	go func() {
+		log.Println("notification-service pprof server listening on :8085")
+		if err := http.ListenAndServe(":8085", nil); err != nil {
+			log.Printf("pprof server error: %v", err)
+		}
+	}()
 
 	// ── RabbitMQ consumer ─────────────────────────────────────────────────────
 	consumer, err := rabbitmq.NewConsumer(rabbitmq.QueueNotifications)

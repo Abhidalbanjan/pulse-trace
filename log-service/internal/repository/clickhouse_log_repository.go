@@ -49,6 +49,7 @@ func (r *ClickHouseLogRepository) InitializeSchema(ctx context.Context) error {
 	) ENGINE = MergeTree()
 	PARTITION BY toYYYYMM(timestamp)
 	ORDER BY (tenant_id, service_name, level, timestamp, id)
+	TTL toDateTime(timestamp) + INTERVAL 1 HOUR TO VOLUME 'cold'
 	SETTINGS storage_policy = 'tiered';
 	`
 	if err := r.defaultConn.Exec(ctx, query); err != nil {

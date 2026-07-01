@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 
 	"github.com/pulsetrace/alert-service/internal/repository"
+	"github.com/pulsetrace/shared/jsonpool"
 	"github.com/pulsetrace/shared/models"
 )
 
@@ -111,5 +112,9 @@ func (h *AlertHandler) Health(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	buf := jsonpool.GetBuffer()
+	defer jsonpool.PutBuffer(buf)
+	if err := json.NewEncoder(buf).Encode(v); err == nil {
+		w.Write(buf.Bytes())
+	}
 }

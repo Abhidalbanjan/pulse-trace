@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pulsetrace/shared/db"
+	"github.com/pulsetrace/shared/jsonpool"
 	"github.com/pulsetrace/topology-service/internal/repository"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -61,12 +62,11 @@ func (a *API) handleGetDownstream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
 	if len(deps) == 0 {
-		w.Write([]byte("[]"))
+		writeJSON(w, http.StatusOK, []string{})
 		return
 	}
-	json.NewEncoder(w).Encode(deps)
+	writeJSON(w, http.StatusOK, deps)
 }
 
 func (a *API) handleGetUpstream(w http.ResponseWriter, r *http.Request) {
@@ -83,12 +83,11 @@ func (a *API) handleGetUpstream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
 	if len(deps) == 0 {
-		w.Write([]byte("[]"))
+		writeJSON(w, http.StatusOK, []string{})
 		return
 	}
-	json.NewEncoder(w).Encode(deps)
+	writeJSON(w, http.StatusOK, deps)
 }
 
 type AgentConfig struct {
@@ -120,8 +119,7 @@ func (a *API) handleGetAgentConfig(w http.ResponseWriter, r *http.Request) {
 		config.TraceSampling = 1.0 // 100% trace sampling for debugging
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(config)
+	writeJSON(w, http.StatusOK, config)
 }
 
 type UpdateStateRequest struct {
@@ -177,8 +175,7 @@ func (a *API) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(graph)
+	writeJSON(w, http.StatusOK, graph)
 }
 
 func (a *API) handleReceiveTraces(w http.ResponseWriter, r *http.Request) {
@@ -405,7 +402,15 @@ func (a *API) handleExecutePlaybook(w http.ResponseWriter, r *http.Request) {
 		"status": status,
 		"output": output,
 	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	w.WriteHeader(status)
+	buf := jsonpool.GetBuffer()
+	defer jsonpool.PutBuffer(buf)
+	if err := json.NewEncoder(buf).Encode(v); err == nil {
+		w.Write(buf.Bytes())
+	}
 }

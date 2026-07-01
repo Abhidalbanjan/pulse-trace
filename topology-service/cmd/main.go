@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -59,6 +60,7 @@ func main() {
 	api := handler.NewAPI(repo, secret)
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
+	mux.Handle("/debug/pprof/", http.DefaultServeMux)
 
 	port := os.Getenv("PORT")
 	if port == "" {

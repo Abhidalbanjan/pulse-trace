@@ -1,0 +1,21 @@
+[sources.in]
+  type = "http_server"
+  address = "0.0.0.0:8383"
+  encoding = "json"
+
+[transforms.enrich]
+  type = "remap"
+  inputs = ["in"]
+  source = '''
+    # Optionally extract and clean up fields here
+    # We'll just pass it through directly for now
+  '''
+
+[sinks.out]
+  type = "http"
+  inputs = ["enrich"]
+  uri = "http://gateway:8080/api/v1/logs"
+  encoding.codec = "json"
+  batch.max_events = 5000
+  batch.timeout_secs = 2
+  compression = "gzip"

@@ -137,6 +137,24 @@ func (r *Neo4jRepository) UpdateServiceState(ctx context.Context, serviceName, s
 	return err
 }
 
+// UpsertServiceCatalog creates or updates catalog metadata for a service.
+func (r *Neo4jRepository) UpsertServiceCatalog(ctx context.Context, serviceName, team, repo, slack string) error {
+	query := `
+		MERGE (s:Service {name: $serviceName})
+		SET s.team = $team, s.repo = $repo, s.slack = $slack
+	`
+	_, err := neo4j.ExecuteQuery(ctx, r.driver, query, map[string]any{
+		"serviceName": serviceName,
+		"team":        team,
+		"repo":        repo,
+		"slack":       slack,
+	}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
+	if err == nil {
+		r.invalidateCache(ctx, serviceName)
+	}
+	return err
+}
+
 // GetUpstreamDependencies returns a list of services that this service depends on.
 func (r *Neo4jRepository) GetUpstreamDependencies(ctx context.Context, serviceName string) ([]string, error) {
 	cacheKey := "topo:upstream:" + serviceName
@@ -206,6 +224,9 @@ func (r *Neo4jRepository) GetServiceState(ctx context.Context, serviceName strin
 type Node struct {
 	Id    string `json:"id"`
 	State string `json:"state"`
+	Team  string `json:"team"`
+	Repo  string `json:"repo"`
+	Slack string `json:"slack"`
 }
 
 type Edge struct {
@@ -270,7 +291,7 @@ func (r *Neo4jRepository) GetGraph(ctx context.Context) (*Graph, error) {
 		}
 	}
 
-	nodesRes, err := neo4j.ExecuteQuery(ctx, r.driver, `MATCH (n:Service) RETURN n.name AS id, n.state AS state`, nil, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
+	nodesRes, err := neo4j.ExecuteQuery(ctx, r.driver, `MATCH (n:Service) RETURN n.name AS id, n.state AS state, n.team AS team, n.repo AS repo, n.slack AS slack`, nil, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 	if err != nil {
 		return nil, err
 	}
@@ -278,13 +299,35 @@ func (r *Neo4jRepository) GetGraph(ctx context.Context) (*Graph, error) {
 	for _, record := range nodesRes.Records {
 		id, _ := record.Get("id")
 		state, _ := record.Get("state")
-		s := ""
-		if state != nil {
+		team, _ := record.Get("team")
+		repo, _ := record.Get("repo")
+		slack, _ := record.Get("slack")
+
+		s := "HEALTHY"
+		if state != nil && state.(string) != "" {
 			s = state.(string)
-		} else {
-			s = "HEALTHY"
 		}
-		nodes = append(nodes, Node{Id: id.(string), State: s})
+		
+		t := ""
+		if team != nil && team.(string) != "" {
+			t = team.(string)
+		}
+		rStr := ""
+		if repo != nil && repo.(string) != "" {
+			rStr = repo.(string)
+		}
+		sl := ""
+		if slack != nil && slack.(string) != "" {
+			sl = slack.(string)
+		}
+
+		nodes = append(nodes, Node{
+			Id:    id.(string),
+			State: s,
+			Team:  t,
+			Repo:  rStr,
+			Slack: sl,
+		})
 	}
 
 	edgesRes, err := neo4j.ExecuteQuery(ctx, r.driver, `MATCH (s:Service)-[r:DEPENDS_ON]->(t:Service) RETURN s.name AS source, t.name AS target, r.is_causal AS is_causal, r.reason AS reason`, nil, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))

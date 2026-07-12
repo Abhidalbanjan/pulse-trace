@@ -1,0 +1,33 @@
+version: 0.8
+source_id: kafka-logs-source
+source_type: kafka
+params:
+  topic: logs
+  client_id: quickwit-consumer
+  bootstrap_servers:
+    - kafka:29092
+  enable.auto.commit: true
+transform:
+  # Use Vector Remap Language (VRL) to parse both JSON and unstructured Syslog via Grok
+  vrl: |
+    # By default, Kafka payloads arrive in a 'message' field in Quickwit VRL.
+    if starts_with(string!(.message), "{") {
+      # It's JSON from our log-service.
+      parsed, err = parse_json(.message)
+      if err == null {
+        . = merge(., parsed)
+      }
+    } else {
+      # It's an unstructured syslog message, parse with grok
+      # e.g., "Oct 11 22:14:15 mymachine su: 'su root' failed for lonvick on /dev/pts/8"
+      grok_pattern = "%{SYSLOGTIMESTAMP:timestamp} %{SYSLOGHOST:service_name} %{DATA:level} %{GREEDYDATA:message}"
+      parsed, err = parse_grok(.message, grok_pattern)
+      if err == null {
+        . = merge(., parsed)
+      }
+    }
+    
+    # Ensure timestamp is a valid datetime for the timestamp_field
+    if exists(.timestamp) == false {
+       .timestamp = now()
+    }

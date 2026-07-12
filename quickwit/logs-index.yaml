@@ -1,0 +1,28 @@
+version: 0.8
+index_id: pulsetrace-logs
+doc_mapping:
+  mode: dynamic
+  field_mappings:
+    - name: timestamp
+      type: datetime
+      fast: true
+    - name: service_name
+      type: text
+      tokenizer: raw
+      fast: true
+    - name: level
+      type: text
+      tokenizer: raw
+      fast: true
+    - name: message
+      type: text
+      tokenizer: default
+    - name: trace_id
+      type: text
+      tokenizer: raw
+      fast: true
+    - name: tenant_id
+      type: text
+      tokenizer: raw
+      fast: true
+  timestamp_field: timestamp

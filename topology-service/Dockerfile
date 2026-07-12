@@ -10,6 +10,7 @@ COPY topology-service ./topology-service
 
 # Build the topology-service
 WORKDIR /app/topology-service
+RUN apk add --no-cache git
 RUN go mod download
 RUN CGO_ENABLED=0 GOOS=linux go build -o /topology-service ./cmd/main.go
 

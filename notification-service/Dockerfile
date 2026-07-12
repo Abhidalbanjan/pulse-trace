@@ -6,6 +6,7 @@ WORKDIR /app
 COPY shared/ ../shared/
 COPY notification-service/ .
 
+RUN apk add --no-cache git
 RUN go mod download
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/notification-service ./cmd
 

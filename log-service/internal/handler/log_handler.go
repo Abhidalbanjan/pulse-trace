@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,7 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
-	"github.com/pulsetrace/log-service/internal/repository"
+
 	"github.com/pulsetrace/shared/jsonpool"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/models"
@@ -28,7 +27,7 @@ const (
 
 // LogHandler exposes HTTP endpoints for log ingestion and querying.
 type LogHandler struct {
-	repo          *repository.ClickHouseLogRepository
+
 	producer      *kafka.Producer
 	logQueue      chan *models.LogEntry
 	batchSize     int
@@ -38,9 +37,8 @@ type LogHandler struct {
 }
 
 // NewLogHandler creates a handler with high-performance buffered queue and worker pool.
-func NewLogHandler(repo *repository.ClickHouseLogRepository, producer *kafka.Producer) *LogHandler {
+func NewLogHandler(producer *kafka.Producer) *LogHandler {
 	h := &LogHandler{
-		repo:          repo,
 		producer:      producer,
 		logQueue:      make(chan *models.LogEntry, 100000), // 100k buffered elements shock absorber
 		batchSize:     2000,                               // bulk pgx/kafka batch threshold
@@ -198,8 +196,8 @@ func (h *LogHandler) flushBatch(batch []*models.LogEntry) {
 
 	span.SetAttributes(attribute.Int("batch.size", len(batch)))
 
-	// Ingest path writes solely to Kafka. Telemetry is written asynchronously
-	// to ClickHouse via the Kafka batch consumer group.
+	// Ingest path writes solely to Kafka. Telemetry is indexed asynchronously
+	// by Quickwit via its native Kafka source.
 
 	// 2. Publish batch to Kafka in a single TCP operation
 	if h.producer != nil {
@@ -223,86 +221,12 @@ func (h *LogHandler) Close() {
 	log.Println("log-service log handler shutdown complete.")
 }
 
-// ListLogs returns a paginated, filtered list of log entries.
-//
-//	GET /api/v1/logs?service=payment-service&level=ERROR&page=1&page_size=20
 func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
-	tracer := otel.Tracer(serviceName)
-	ctx, span := tracer.Start(r.Context(), "log.list")
-	defer span.End()
-
-	q := r.URL.Query()
-
-	tenantID := r.Header.Get("X-Tenant-ID")
-	if tenantID == "" {
-		tenantID = "default"
-	}
-	tenantTier := r.Header.Get("X-Tenant-Tier")
-	if tenantTier == "" {
-		tenantTier = "standard"
-	}
-
-	params := &models.LogQueryParams{
-		TenantID:    tenantID,
-		TenantTier:  tenantTier,
-		ServiceName: q.Get("service"),
-		Level:       models.LogLevel(q.Get("level")),
-		TraceID:     q.Get("trace_id"),
-		From:        q.Get("from"),
-		To:          q.Get("to"),
-	}
-
-	if p, err := strconv.Atoi(q.Get("page")); err == nil {
-		params.Page = p
-	}
-	if ps, err := strconv.Atoi(q.Get("page_size")); err == nil {
-		params.PageSize = ps
-	}
-
-	result, err := h.repo.Query(ctx, params)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "query failed")
-		writeJSON(w, http.StatusInternalServerError, models.Fail("query failed: "+err.Error()))
-		return
-	}
-
-	meta := &models.PaginationMeta{
-		Page:       result.Page,
-		PageSize:   result.PageSize,
-		Total:      result.Total,
-		TotalPages: repository.TotalPages(result.Total, result.PageSize),
-	}
-
-	writeJSON(w, http.StatusOK, models.OKPaginated(result.Entries, meta))
+	writeJSON(w, http.StatusNotImplemented, models.Fail("Log search is now powered natively by Quickwit. Please query the Quickwit search API directly."))
 }
 
-// GetLog fetches a single log entry by ID.
-//
-//	GET /api/v1/logs/{id}
 func (h *LogHandler) GetLog(w http.ResponseWriter, r *http.Request) {
-	tracer := otel.Tracer(serviceName)
-	ctx, span := tracer.Start(r.Context(), "log.get")
-	defer span.End()
-
-	id := r.PathValue("id")
-	if id == "" {
-		span.SetStatus(codes.Error, "missing id")
-		writeJSON(w, http.StatusBadRequest, models.Fail("id is required"))
-		return
-	}
-
-	span.SetAttributes(attribute.String("log.id", id))
-
-	entry, err := h.repo.GetByID(ctx, id)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "not found")
-		writeJSON(w, http.StatusNotFound, models.Fail("log entry not found"))
-		return
-	}
-
-	writeJSON(w, http.StatusOK, models.OK(entry))
+	writeJSON(w, http.StatusNotImplemented, models.Fail("Log search is now powered natively by Quickwit. Please query the Quickwit search API directly."))
 }
 
 // Health is a simple liveness probe.

@@ -63,6 +63,24 @@ services:
       retries: 10
       start_period: 30s
 
+  # ── ClickHouse (High-Performance Trace Analytics) ───────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: pulsetrace-clickhouse
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+    environment:
+      CLICKHOUSE_DB: pulsetrace
+      CLICKHOUSE_USER: pulsetrace
+      CLICKHOUSE_PASSWORD: pulsetrace_secret
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   # ── PostgreSQL ───────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
@@ -149,6 +167,8 @@ services:
       - ./otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml
     ports:
       - "8889:8889"
+      - "8126:8126" # Datadog receiver
+      - "8088:8088" # Splunk HEC receiver
     depends_on:
       jaeger:
         condition: service_healthy
@@ -198,12 +218,7 @@ services:
       DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
       KAFKA_BROKERS: kafka:29092
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
-      CLICKHOUSE_ADDR: clickhouse:9000
-      CLICKHOUSE_USER: pulsetrace
-      CLICKHOUSE_PASSWORD: clickhouse_secret
-      CLICKHOUSE_ADDR_ENTERPRISE: clickhouse-enterprise:9000
-      CLICKHOUSE_USER_ENTERPRISE: pulsetrace_enterprise
-      CLICKHOUSE_PASSWORD_ENTERPRISE: enterprise_secret
+      QUICKWIT_URL: http://quickwit:7280
       PORT: "8081"
     ports:
       - "8081:8081"
@@ -251,9 +266,7 @@ services:
       KAFKA_GROUP_ID: correlation-service
       RABBITMQ_URL: amqp://pulsetrace:pulsetrace_secret@rabbitmq:5672/
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
-      CLICKHOUSE_ADDR: clickhouse:9000
-      CLICKHOUSE_USER: pulsetrace
-      CLICKHOUSE_PASSWORD: clickhouse_secret
+      QUICKWIT_URL: http://quickwit:7280
       HYBRID_MODE: "true"
       CONTROL_PLANE_URL: http://gateway:8080/api/v1/control-plane/incidents
       PORT: "8083"
@@ -341,7 +354,7 @@ services:
     ports:
       - "8383:8383"
     volumes:
-      - ./vector/vector.toml:/etc/vector/vector.yaml
+      - ./vector/vector.toml:/etc/vector/vector.toml
     depends_on:
       - gateway
 
@@ -371,86 +384,7 @@ services:
       - correlation-service
       - topology-service
       - otel-collector
-      - clickhouse
-      - clickhouse-enterprise
 
-  # ── ClickHouse ───────────────────────────────────────────────────────────────
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.3-alpine
-    container_name: pulsetrace-clickhouse
-    restart: unless-stopped
-    environment:
-      - CLICKHOUSE_USER=pulsetrace
-      - CLICKHOUSE_PASSWORD=clickhouse_secret
-      # AWS S3 (local MinIO emulator)
-      - AWS_S3_ENDPOINT=http://minio:9000/clickhouse-cold/data/
-      - AWS_ACCESS_KEY_ID=minioadmin
-      - AWS_SECRET_ACCESS_KEY=minioadmin
-      # Azure Blob (local Azurite emulator)
-      - AZURE_STORAGE_ACCOUNT_URL=http://azure-blob:10000/devstoreaccount1
-      - AZURE_CONTAINER_NAME=clickhouse-cold
-      - AZURE_ACCOUNT_NAME=devstoreaccount1
-      - AZURE_ACCOUNT_KEY=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
-      - AZURE_BLOB_PATH=data/
-      # Google Cloud Storage (GCP/GCS)
-      - GCP_GCS_ENDPOINT=https://storage.googleapis.com/clickhouse-cold/data/
-      - GCP_ACCESS_KEY_ID=gcs_access_key
-      - GCP_SECRET_ACCESS_KEY=gcs_secret_key
-    ports:
-      - "8123:8123"
-      - "9000:9000"
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-      - ./clickhouse/storage.xml:/etc/clickhouse-server/config.d/storage.xml
-    depends_on:
-      minio:
-        condition: service_healthy
-      azure-blob:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "http://localhost:8123/ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ── ClickHouse Enterprise Shard ──────────────────────────────────────────────
-  clickhouse-enterprise:
-    image: clickhouse/clickhouse-server:24.3-alpine
-    container_name: pulsetrace-clickhouse-enterprise
-    restart: unless-stopped
-    environment:
-      - CLICKHOUSE_USER=pulsetrace_enterprise
-      - CLICKHOUSE_PASSWORD=enterprise_secret
-      # AWS S3 (local MinIO emulator)
-      - AWS_S3_ENDPOINT=http://minio:9000/clickhouse-cold-enterprise/data/
-      - AWS_ACCESS_KEY_ID=minioadmin
-      - AWS_SECRET_ACCESS_KEY=minioadmin
-      # Azure Blob (local Azurite emulator)
-      - AZURE_STORAGE_ACCOUNT_URL=http://azure-blob:10000/devstoreaccount1
-      - AZURE_CONTAINER_NAME=clickhouse-cold-enterprise
-      - AZURE_ACCOUNT_NAME=devstoreaccount1
-      - AZURE_ACCOUNT_KEY=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
-      - AZURE_BLOB_PATH=data/
-      # Google Cloud Storage (GCP/GCS)
-      - GCP_GCS_ENDPOINT=https://storage.googleapis.com/clickhouse-cold-enterprise/data/
-      - GCP_ACCESS_KEY_ID=gcs_access_key
-      - GCP_SECRET_ACCESS_KEY=gcs_secret_key
-    ports:
-      - "8124:8123"
-      - "9002:9000"
-    volumes:
-      - clickhouse_enterprise_data:/var/lib/clickhouse
-      - ./clickhouse/storage.xml:/etc/clickhouse-server/config.d/storage.xml
-    depends_on:
-      minio:
-        condition: service_healthy
-      azure-blob:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "http://localhost:8123/ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   # ── MinIO (S3 Cold Tier Emulator) ────────────────────────────────────────────
   minio:
@@ -481,8 +415,7 @@ services:
     entrypoint: >
       /bin/sh -c "
       mc alias set localminio http://minio:9000 minioadmin minioadmin;
-      mc mb --ignore-existing localminio/clickhouse-cold;
-      mc mb --ignore-existing localminio/clickhouse-cold-enterprise;
+      mc mb --ignore-existing localminio/quickwit-indexes;
       exit 0;
       "
 
@@ -497,14 +430,86 @@ services:
     volumes:
       - azurite_data:/data
 
+  # ── Quickwit (S3-Native Log & Trace Indexing) ───────────────────────────────
+  quickwit:
+    image: quickwit/quickwit:0.8.1
+    container_name: pulsetrace-quickwit
+    restart: unless-stopped
+    command: run
+    environment:
+      QW_METASTORE_URI: s3://quickwit-indexes/metastore
+      QW_DEFAULT_INDEX_ROOT_URI: s3://quickwit-indexes/indexes
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ENDPOINT: http://minio:9000
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_REGION: us-east-1
+      QW_S3_ENDPOINT: http://minio:9000
+      # Required for MinIO (path-style access)
+      QW_S3_FORCE_PATH_STYLE_ACCESS: "true"
+    ports:
+      - "7280:7280"   # REST API
+      - "7281:7281"   # gRPC
+    volumes:
+      - quickwit_data:/quickwit/qwdata
+    depends_on:
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:7280/health/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── Quickwit Index & Source Bootstrap ────────────────────────────────────────
+  quickwit-setup:
+    image: quickwit/quickwit:0.8.1
+    container_name: pulsetrace-quickwit-setup
+    environment:
+      QW_CLUSTER_ENDPOINT: http://quickwit:7280
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ENDPOINT: http://minio:9000
+      AWS_REGION: us-east-1
+      QW_S3_FORCE_PATH_STYLE_ACCESS: "true"
+    volumes:
+      - ./quickwit:/config
+    depends_on:
+      quickwit:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Creating Quickwit indexes...';
+      quickwit index create --index-config /config/logs-index.yaml --endpoint http://quickwit:7280 || true;
+      quickwit index create --index-config /config/traces-index.yaml --endpoint http://quickwit:7280 || true;
+      echo 'Attaching Kafka source for logs...';
+      quickwit source create --index pulsetrace-logs --source-config /config/kafka-source.yaml --endpoint http://quickwit:7280 || true;
+      echo 'Quickwit setup complete.';
+      "
+
+  # ── Pyroscope (Continuous Profiling) ─────────────────────────────────────────
+  pyroscope:
+    image: grafana/pyroscope:latest
+    container_name: pulsetrace-pyroscope
+    restart: unless-stopped
+    ports:
+      - "4040:4040"
+    environment:
+      PYROSCOPE_LOG_LEVEL: info
+    volumes:
+      - pyroscope_data:/var/lib/pyroscope
+
 volumes:
   postgres_data:
   neo4j_data:
   rabbitmq_data:
   prometheus_data:
   grafana_data:
-  clickhouse_data:
-  clickhouse_enterprise_data:
+  quickwit_data:
   minio_data:
   azurite_data:
+  pyroscope_data:
 

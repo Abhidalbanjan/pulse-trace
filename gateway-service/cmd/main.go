@@ -14,10 +14,12 @@ import (
 	"time"
 
 	"github.com/pulsetrace/gateway-service/internal/auth"
+	"github.com/pulsetrace/gateway-service/internal/handler"
 	"github.com/pulsetrace/gateway-service/internal/pii"
 	"github.com/pulsetrace/gateway-service/internal/proxy"
 	"github.com/pulsetrace/shared/middleware"
 	"github.com/pulsetrace/shared/telemetry"
+	"github.com/grafana/pyroscope-go"
 )
 
 const serviceName = "gateway-service"
@@ -38,11 +40,33 @@ func main() {
 		}()
 	}
 
+	// ── Continuous Profiling (Pyroscope) ──────────────────────────────────────
+	pyroscopeURL := getEnv("PYROSCOPE_URL", "http://pyroscope:4040")
+	pyroscope.Start(pyroscope.Config{
+		ApplicationName: serviceName,
+		ServerAddress:   pyroscopeURL,
+		Logger:          pyroscope.StandardLogger,
+		ProfileTypes: []pyroscope.ProfileType{
+			pyroscope.ProfileCPU,
+			pyroscope.ProfileAllocObjects,
+			pyroscope.ProfileAllocSpace,
+			pyroscope.ProfileInuseObjects,
+			pyroscope.ProfileInuseSpace,
+		},
+	})
+
 	// ── Auth Handler ──────────────────────────────────────────────────────────
+	clickhouseURL := getEnv("CLICKHOUSE_URL", "http://clickhouse:8123")
+
+	// Initialize handlers
 	authHandler, err := auth.NewAuthHandler()
 	if err != nil {
 		log.Printf("gateway-service: auth database connection failed: %v", err)
 	}
+	analyticsHandler := handler.NewAnalyticsHandler(clickhouseURL)
+	rumHandler := handler.NewRUMHandler(clickhouseURL)
+	syntheticsHandler := handler.NewSyntheticsHandler(clickhouseURL, authHandler.GetDB())
+	syntheticsHandler.StartWorker()
 
 	// ── Routes ────────────────────────────────────────────────────────────────
 	logServiceURL := getEnv("LOG_SERVICE_URL", "http://localhost:8081")
@@ -51,12 +75,19 @@ func main() {
 	topologyServiceURL := getEnv("TOPOLOGY_SERVICE_URL", "http://localhost:8084")
 	otelCollectorHTTPURL := getEnv("OTEL_COLLECTOR_HTTP_URL", "http://localhost:4318")
 
+	quickwitURL := getEnv("QUICKWIT_URL", "http://pulsetrace-quickwit:7280")
+	jaegerURL := getEnv("JAEGER_URL", "http://pulsetrace-jaeger:16686")
+
 	routes := []proxy.Route{
 		{Prefix: "/api/v1/logs", Upstream: logServiceURL},
 		{Prefix: "/api/v1/alerts", Upstream: alertServiceURL},
 		{Prefix: "/api/v1/incidents", Upstream: correlationServiceURL},
 		{Prefix: "/api/v1/slo", Upstream: correlationServiceURL},
-		{Prefix: "/api/v1/topology/agent-config", Upstream: topologyServiceURL},
+		{Prefix: "/api/v1/topology/", Upstream: topologyServiceURL},
+		{Prefix: "/api/v1/profiler/", Upstream: pyroscopeURL},
+		{Prefix: "/api/v1/search/", Upstream: quickwitURL},
+		{Prefix: "/api/traces", Upstream: jaegerURL},
+		{Prefix: "/api/services", Upstream: jaegerURL},
 		{Prefix: "/v1/traces", Upstream: otelCollectorHTTPURL},
 		{Prefix: "/v1/metrics", Upstream: otelCollectorHTTPURL},
 		{Prefix: "/v1/logs", Upstream: otelCollectorHTTPURL},
@@ -74,11 +105,26 @@ func main() {
 	if authHandler != nil {
 		mux.HandleFunc("POST /api/v1/auth/login", authHandler.Login)
 		mux.HandleFunc("POST /api/v1/auth/register", authHandler.Register)
+		mux.HandleFunc("GET /api/v1/auth/sso/login", authHandler.SSOLogin)
+		mux.HandleFunc("GET /api/v1/auth/sso/config", authHandler.GetSSOConfig)
+		mux.HandleFunc("GET /api/v1/auth/sso/callback", authHandler.SSOCallback)
 		mux.HandleFunc("GET /api/v1/admin/users", authHandler.GetUsers)
 		mux.HandleFunc("POST /api/v1/admin/users", authHandler.CreateUser)
 		mux.HandleFunc("DELETE /api/v1/admin/users", authHandler.DeleteUser)
 		mux.HandleFunc("PUT /api/v1/admin/users/role", authHandler.UpdateUserRole)
 	}
+
+	// Analytics APIs (powered by ClickHouse)
+	mux.HandleFunc("GET /api/v1/analytics/traces", analyticsHandler.GetTraceAnalytics)
+
+	// RUM APIs (powered by ClickHouse)
+	mux.HandleFunc("POST /api/v1/rum/ingest", rumHandler.Ingest)
+	mux.HandleFunc("GET /api/v1/rum/analytics", rumHandler.GetAnalytics)
+	mux.HandleFunc("GET /api/v1/rum/errors", rumHandler.GetErrors)
+
+	// Synthetics API
+	mux.HandleFunc("GET /api/v1/synthetics/results", syntheticsHandler.GetResults)
+	mux.HandleFunc("POST /api/v1/synthetics/tests", syntheticsHandler.CreateTarget)
 
 	// Mock SaaS Control Plane endpoint for Zero-Data-Egress metadata
 	mux.HandleFunc("POST /api/v1/control-plane/incidents", func(w http.ResponseWriter, r *http.Request) {
@@ -91,6 +137,10 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "received", "action": "stored_in_saas_db"})
 	})
+
+	// USP 3: Preventative Shift-Left Gates (GitHub Webhook)
+	githubWebhookHandler := handler.NewGithubWebhookHandler()
+	mux.HandleFunc("POST /api/v1/webhooks/github", githubWebhookHandler.Handle)
 
 	mux.Handle("/", router)
 

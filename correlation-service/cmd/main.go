@@ -12,6 +12,7 @@ import (
 
 	"github.com/pulsetrace/correlation-service/internal/engine"
 	"github.com/pulsetrace/correlation-service/internal/handler"
+	"github.com/pulsetrace/correlation-service/internal/llm"
 	"github.com/pulsetrace/correlation-service/internal/repository"
 	"github.com/pulsetrace/shared/causal"
 	"github.com/pulsetrace/shared/client"
@@ -88,18 +89,18 @@ func main() {
 	incidentHandler := handler.NewIncidentHandler(repo)
 
 	// ── SLO subsystem ────────────────────────────────────────────────────────
-	// ── ClickHouse ────────────────────────────────────────────────────────────
-	chConn, err := db.NewClickHouseConnection()
-	var sloRepo *repository.SLORepository
-	if err != nil {
-		log.Printf("WARNING: ClickHouse connection failed: %v. SLI computation will fallback to Postgres.", err)
-		sloRepo = repository.NewSLORepository(pool, nil)
+	// ── Quickwit (SLI queries) ────────────────────────────────────────────────
+	quickwitURL := os.Getenv("QUICKWIT_URL")
+	if quickwitURL == "" {
+		log.Println("WARNING: QUICKWIT_URL not set. SLI computation will fallback to Postgres.")
 	} else {
-		defer chConn.Close()
-		log.Println("correlation-service: connected to ClickHouse for SLI queries")
-		sloRepo = repository.NewSLORepository(pool, chConn)
+		log.Printf("correlation-service: using Quickwit at %s for SLI queries", quickwitURL)
 	}
-	sloHandler := handler.NewSLOHandler(sloRepo)
+	// ── LLM Chat Handler ──────────────────────────────────────────────────────
+	ollamaProvider := llm.NewOllamaProvider("", "") // Defaults to host.docker.internal
+
+	sloRepo := repository.NewSLORepository(pool, quickwitURL)
+	sloHandler := handler.NewSLOHandler(sloRepo, ollamaProvider)
 	sloWorker := engine.NewSLOWorker(sloRepo, publisher)
 	go sloWorker.Start(ctx)
 
@@ -121,10 +122,14 @@ func main() {
 		}
 	}()
 
+	// ── LLM Chat Handler ──────────────────────────────────────────────────────
+	chatHandler := handler.NewChatHandler(ollamaProvider)
+
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	incidentHandler.RegisterRoutes(mux)
 	sloHandler.RegisterRoutes(mux)
+	chatHandler.RegisterRoutes(mux)
 	mux.Handle("/debug/pprof/", http.DefaultServeMux)
 
 	chain := middleware.CORS(middleware.Tracing(serviceName)(middleware.RequestLogger(mux)))

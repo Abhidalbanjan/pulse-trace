@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 
+	"github.com/pulsetrace/correlation-service/internal/llm"
 	"github.com/pulsetrace/correlation-service/internal/repository"
 	"github.com/pulsetrace/shared/models"
 )
@@ -17,10 +19,11 @@ import (
 // and querying the SLO dashboard data.
 type SLOHandler struct {
 	repo *repository.SLORepository
+	llm  llm.Provider
 }
 
-func NewSLOHandler(repo *repository.SLORepository) *SLOHandler {
-	return &SLOHandler{repo: repo}
+func NewSLOHandler(repo *repository.SLORepository, llmProvider llm.Provider) *SLOHandler {
+	return &SLOHandler{repo: repo, llm: llmProvider}
 }
 
 // RegisterRoutes wires up all SLO-related routes.
@@ -30,6 +33,45 @@ func (h *SLOHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/v1/slo/definitions/{id}", h.DeleteDefinition)
 	mux.HandleFunc("GET /api/v1/slo/dashboard", h.Dashboard)
 	mux.HandleFunc("GET /api/v1/slo/budget-alerts", h.ListBudgetAlerts)
+	mux.HandleFunc("POST /api/v1/slo/evaluate-pr", h.EvaluatePR)
+}
+
+type PREvaluationRequest struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
+func (h *SLOHandler) EvaluatePR(w http.ResponseWriter, r *http.Request) {
+	var req PREvaluationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, models.Fail("invalid request body"))
+		return
+	}
+
+	prompt := fmt.Sprintf(`You are an SRE AI evaluator. Evaluate if the following GitHub Pull Request might cause a severe SLO violation or outage based on its title and body.
+If the PR explicitly introduces breaking database schema changes without backwards compatibility, hardcodes dangerous credentials, or removes critical rate limiting logic, you should block it.
+Otherwise, approve it.
+
+PR Title: %s
+PR Body: %s
+
+Respond with ONLY the word "BLOCK" if it violates SLOs, or "APPROVE" if it looks safe.`, req.Title, req.Body)
+
+	messages := []llm.Message{{Role: "user", Content: prompt}}
+	resp, err := h.llm.Chat(r.Context(), messages)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, models.Fail("LLM evaluation failed"))
+		return
+	}
+
+	respStr := strings.TrimSpace(strings.ToUpper(resp.Text))
+	
+	result := map[string]string{"decision": "APPROVE"}
+	if strings.Contains(respStr, "BLOCK") {
+		result["decision"] = "BLOCK"
+	}
+	
+	writeJSON(w, http.StatusOK, models.OK(result))
 }
 
 // ListDefinitions returns all configured SLO definitions.

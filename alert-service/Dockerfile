@@ -9,6 +9,7 @@ COPY shared/ ../shared/
 # Copy the entire alert-service module.
 COPY alert-service/ .
 
+RUN apk add --no-cache git
 RUN go mod download
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/alert-service ./cmd

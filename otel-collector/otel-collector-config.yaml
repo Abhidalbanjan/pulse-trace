@@ -5,6 +5,14 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+  
+  # Trojan Horse: Accept Datadog Agent payloads directly
+  datadog:
+    endpoint: 0.0.0.0:8126
+    
+  # Trojan Horse: Accept Splunk HEC payloads directly
+  splunk_hec:
+    endpoint: 0.0.0.0:8088
 
 processors:
   batch:
@@ -32,7 +40,7 @@ processors:
         latency: { threshold_ms: 500 }
       - name: normal-sampling-policy
         type: probabilistic
-        probabilistic: { sampling_percentage: 5.0 }
+        probabilistic: { sampling_percentage: 1.0 }
 
 exporters:
   # Send traces to Jaeger via OTLP gRPC.
@@ -40,6 +48,16 @@ exporters:
     endpoint: jaeger:4317
     tls:
       insecure: true
+
+  # Send traces to ClickHouse for analytics
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s&compress=true
+    database: pulsetrace
+    username: pulsetrace
+    password: pulsetrace_secret
+    ttl_days: 7
+    traces_table_name: otel_traces
+    create_schema: true
 
   # Send traces to topology-service via OTLP HTTP JSON
   otlphttp/topology:
@@ -57,9 +75,9 @@ exporters:
 service:
   pipelines:
     traces:
-      receivers: [otlp]
-      processors: [tail_sampling, batch, resource]
-      exporters: [otlp/jaeger, debug, otlphttp/topology]
+      receivers: [otlp, datadog, splunk_hec]
+      processors: [resource, tail_sampling, batch]
+      exporters: [otlp/jaeger, clickhouse, otlphttp/topology]
 
     metrics:
       receivers: [otlp]

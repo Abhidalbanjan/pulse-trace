@@ -43,6 +43,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/topology/dependencies/upstream/", a.handleGetUpstream)
 	mux.HandleFunc("GET /api/v1/topology/agent-config/", a.handleGetAgentConfig)
 	mux.HandleFunc("POST /api/v1/topology/state", a.handleUpdateState)
+	mux.HandleFunc("POST /api/v1/topology/catalog", a.handleUpdateCatalog)
 	mux.HandleFunc("POST /api/v1/topology/causal-path", a.handleUpdateCausalPath)
 	mux.HandleFunc("POST /v1/traces", a.handleReceiveTraces)
 	mux.HandleFunc("POST /api/v1/agent/playbook/execute", a.handleExecutePlaybook)
@@ -136,6 +137,38 @@ func (a *API) handleUpdateState(w http.ResponseWriter, r *http.Request) {
 
 	if err := a.repo.UpdateServiceState(r.Context(), req.ServiceName, req.State); err != nil {
 		log.Printf("failed to update state for %s: %v", req.ServiceName, err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+type UpdateCatalogRequest struct {
+	ServiceName string `json:"service_name"`
+	Team        string `json:"team"`
+	Repo        string `json:"repo"`
+	Slack       string `json:"slack"`
+}
+
+func (a *API) handleUpdateCatalog(w http.ResponseWriter, r *http.Request) {
+	// CORS support
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	var req UpdateCatalogRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := a.repo.UpsertServiceCatalog(r.Context(), req.ServiceName, req.Team, req.Repo, req.Slack); err != nil {
+		log.Printf("failed to update catalog for %s: %v", req.ServiceName, err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}

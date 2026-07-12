@@ -1,0 +1,42 @@
+version: 0.8
+index_id: pulsetrace-traces
+doc_mapping:
+  mode: dynamic
+  field_mappings:
+    - name: timestamp
+      type: datetime
+      fast: true
+    - name: trace_id
+      type: text
+      tokenizer: raw
+      fast: true
+    - name: span_id
+      type: text
+      tokenizer: raw
+      fast: true
+    - name: parent_span_id
+      type: text
+      tokenizer: raw
+      fast: true
+    - name: service_name
+      type: text
+      tokenizer: raw
+      fast: true
+    - name: operation_name
+      type: text
+      tokenizer: raw
+      fast: true
+    - name: duration_ms
+      type: u64
+      fast: true
+    - name: status_code
+      type: text
+      tokenizer: raw
+      fast: true
+    - name: tenant_id
+      type: text
+      tokenizer: raw
+      fast: true
+    - name: attributes
+      type: json
+  timestamp_field: timestamp

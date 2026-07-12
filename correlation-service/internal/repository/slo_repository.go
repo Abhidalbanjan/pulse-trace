@@ -2,23 +2,33 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pulsetrace/shared/models"
 )
 
 // SLORepository handles all PostgreSQL operations for SLO definitions,
-// snapshots, and budget alerts, and queries ClickHouse for SLIs.
+// snapshots, and budget alerts, and queries Quickwit for SLIs.
 type SLORepository struct {
-	db *pgxpool.Pool
-	ch driver.Conn
+	db          *pgxpool.Pool
+	quickwitURL string
+	httpClient  *http.Client
 }
 
-func NewSLORepository(db *pgxpool.Pool, ch driver.Conn) *SLORepository {
-	return &SLORepository{db: db, ch: ch}
+func NewSLORepository(db *pgxpool.Pool, quickwitURL string) *SLORepository {
+	return &SLORepository{
+		db:          db,
+		quickwitURL: quickwitURL,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+	}
 }
 
 // ── SLO Definitions ─────────────────────────────────────────────────────────
@@ -88,10 +98,18 @@ func (r *SLORepository) DeleteDefinition(ctx context.Context, id string) error {
 
 // ── SLI Computation ─────────────────────────────────────────────────────────
 
-// ComputeSLI calculates the availability SLI from ClickHouse logs table for a service
-// within the given time range. Returns total events, error events, and SLI %.
+// quickwitSearchResponse represents the aggregation response from Quickwit's search API.
+type quickwitSearchResponse struct {
+	NumHits      uint64                 `json:"num_hits"`
+	Aggregations map[string]interface{} `json:"aggregations"`
+}
+
+// ComputeSLI calculates the availability SLI from Quickwit's pulsetrace-logs index
+// for a service within the given time range. Returns total events, error events, and SLI %.
+// Falls back to Postgres if Quickwit is not configured.
 func (r *SLORepository) ComputeSLI(ctx context.Context, serviceName string, from, to time.Time) (total int64, errors int64, sli float64, err error) {
-	if r.ch == nil {
+	if r.quickwitURL == "" {
+		// Fallback to Postgres when Quickwit is not available
 		const q = `
 			SELECT
 			    COUNT(*)                                                    AS total_events,
@@ -111,21 +129,61 @@ func (r *SLORepository) ComputeSLI(ctx context.Context, serviceName string, from
 		return total, errors, sli, nil
 	}
 
-	const q = `
-		SELECT
-		    count() AS total_events,
-		    countIf(level IN ('ERROR', 'FATAL')) AS error_events
-		FROM logs
-		WHERE service_name = ?
-		  AND timestamp >= ?
-		  AND timestamp <= ?
-	`
-	var totalVal, errorsVal uint64
-	if err = r.ch.QueryRow(ctx, q, serviceName, from, to).Scan(&totalVal, &errorsVal); err != nil {
-		return 0, 0, 0, fmt.Errorf("compute sli from clickhouse: %w", err)
+	// Query Quickwit search API with aggregation for total and error counts
+	searchBody := fmt.Sprintf(`{
+		"query": "service_name:%s AND timestamp:[%s TO %s]",
+		"max_hits": 0,
+		"aggs": {
+			"total_count": {
+				"value_count": { "field": "timestamp" }
+			},
+			"error_count": {
+				"filter": {
+					"bool": {
+						"should": [
+							{ "term": { "level": "ERROR" } },
+							{ "term": { "level": "FATAL" } }
+						]
+					}
+				}
+			}
+		}
+	}`, serviceName, from.Format(time.RFC3339), to.Format(time.RFC3339))
+
+	url := strings.TrimRight(r.quickwitURL, "/") + "/api/v1/pulsetrace-logs/search"
+	req, reqErr := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(searchBody))
+	if reqErr != nil {
+		return 0, 0, 0, fmt.Errorf("create quickwit request: %w", reqErr)
 	}
-	total = int64(totalVal)
-	errors = int64(errorsVal)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, respErr := r.httpClient.Do(req)
+	if respErr != nil {
+		return 0, 0, 0, fmt.Errorf("quickwit search request failed: %w", respErr)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return 0, 0, 0, fmt.Errorf("quickwit search returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result quickwitSearchResponse
+	if jsonErr := json.Unmarshal(body, &result); jsonErr != nil {
+		return 0, 0, 0, fmt.Errorf("parse quickwit response: %w", jsonErr)
+	}
+
+	// Extract total count from num_hits (all matching documents)
+	total = int64(result.NumHits)
+
+	// Extract error count from aggregation
+	if errAgg, ok := result.Aggregations["error_count"]; ok {
+		if errMap, ok := errAgg.(map[string]interface{}); ok {
+			if docCount, ok := errMap["doc_count"].(float64); ok {
+				errors = int64(docCount)
+			}
+		}
+	}
 
 	if total == 0 {
 		return 0, 0, 100.0, nil

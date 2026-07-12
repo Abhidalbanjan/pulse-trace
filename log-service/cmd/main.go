@@ -10,11 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/pulsetrace/log-service/internal/consumer"
+
 	"github.com/pulsetrace/log-service/internal/handler"
-	"github.com/pulsetrace/log-service/internal/repository"
-	"github.com/pulsetrace/shared/db"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/middleware"
 	"github.com/pulsetrace/shared/telemetry"
@@ -38,31 +35,7 @@ func main() {
 		}()
 	}
 
-	// ── ClickHouse ────────────────────────────────────────────────────────────
-	chConn, err := db.NewClickHouseConnection()
-	if err != nil {
-		log.Fatalf("ClickHouse connection failed: %v", err)
-	}
-	defer chConn.Close()
 
-	var chEnterpriseConn driver.Conn
-	enterpriseAddr := os.Getenv("CLICKHOUSE_ADDR_ENTERPRISE")
-	if enterpriseAddr != "" {
-		enterpriseUser := os.Getenv("CLICKHOUSE_USER_ENTERPRISE")
-		enterprisePassword := os.Getenv("CLICKHOUSE_PASSWORD_ENTERPRISE")
-		chEnterpriseConn, err = db.NewClickHouseConnectionWithAddr(enterpriseAddr, enterpriseUser, enterprisePassword, "default")
-		if err != nil {
-			log.Printf("WARNING: Enterprise ClickHouse connection failed (addr=%s): %v. Proceeding with default cluster only.", enterpriseAddr, err)
-		} else {
-			defer chEnterpriseConn.Close()
-			log.Printf("Connected to Enterprise ClickHouse shard at %s", enterpriseAddr)
-		}
-	}
-
-	chRepo := repository.NewClickHouseLogRepository(chConn, chEnterpriseConn)
-	if err := chRepo.InitializeSchema(ctx); err != nil {
-		log.Fatalf("ClickHouse schema initialization failed: %v", err)
-	}
 
 	// ── Kafka producer ────────────────────────────────────────────────────────
 	producer, err := kafka.NewProducer()
@@ -73,25 +46,10 @@ func main() {
 		defer producer.Close()
 	}
 
-	// ── Kafka consumer (logs topic for ClickHouse batching) ───────────────────
-	chConsumer := consumer.NewClickHouseConsumer(chRepo)
-	defer chConsumer.Close()
 
-	cg, err := kafka.NewConsumerGroup("log-service-clickhouse", []string{"logs"}, chConsumer.Handle)
-	if err != nil {
-		log.Fatalf("failed to create ClickHouse Kafka consumer group: %v", err)
-	}
-	defer cg.Close()
-
-	go func() {
-		log.Println("log-service: starting ClickHouse consumer group on topic \"logs\"")
-		if err := cg.Start(ctx); err != nil {
-			log.Printf("ClickHouse consumer group stopped: %v", err)
-		}
-	}()
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
-	logHandler := handler.NewLogHandler(chRepo, producer)
+	logHandler := handler.NewLogHandler(producer)
 
 	mux := http.NewServeMux()
 	logHandler.RegisterRoutes(mux)

@@ -1,6 +1,13 @@
-# PulseTrace: 11-Week Enterprise-Grade Observability Roadmap
+# PulseTrace: 14-Week Enterprise-Grade Observability Roadmap
 
-This roadmap details the step-by-step path to evolve PulseTrace from its current foundation into a production-ready, highly scalable, secure, and maintainable observability platform. The goals are tailored to challenge market leaders like Datadog, New Relic, and Dynatrace by prioritizing **privacy (local Causal AI)**, **cost-efficiency**, and **frictionless migration**.
+This roadmap details the step-by-step path to evolve PulseTrace into a production-ready observability platform. 
+
+## 💡 Core Unique Value Propositions (UVPs)
+To challenge market leaders like Datadog, New Relic, and Dynatrace, we compete purely on **Cost, Privacy, and Frictionless Adoption**:
+
+1. **90% Cheaper than Datadog (Automated Cost Control):** Keeping petabytes of data on hot SSDs is how giants overcharge. PulseTrace uses **S3 Cold Tiering** for infinite cheap retention. Furthermore, our **AI Log Leveling** defaults to dropping debug logs, but instantly commands agents to stream full `DEBUG` logs only when latency/errors spike, drastically cutting ingestion bills.
+2. **Zero-Code "Trojan Horse" Migration:** You don't have to rip out Datadog or Splunk agents. Simply change the ingestion URL in your existing agents to point to PulseTrace. We spoof competitor endpoints (via OTLP) for an instant, zero-code migration.
+3. **Zero-Egress Security (The Hybrid Cloud Advantage):** Raw logs stay on your on-premise/VPC infrastructure. Only metadata is sent to our SaaS control plane. This eliminates millions in AWS/GCP egress fees and solves data-privacy compliance instantly.
 
 ---
 
@@ -8,7 +15,7 @@ This roadmap details the step-by-step path to evolve PulseTrace from its current
 
 ```mermaid
 gantt
-    title PulseTrace 11-Week Evolution Plan
+    title PulseTrace 14-Week Evolution Plan
     dateFormat  YYYY-MM-DD
     section Backend Focus (Weeks 2-8)
     Telemetry Ingestion & ClickHouse Cold Tiering :active, w2, 2026-06-04, 7d
@@ -16,13 +23,17 @@ gantt
     Zero-Egress Multi-Tenancy & Sharding         :w4, after w3, 7d
     Topology Discovery & Self-Healing Actions    :w5, after w4, 7d
     Performance Tuning & High Availability        :w6, after w5, 7d
-    SSO, Enterprise RBAC & Tag-Based Isolation   :w7, after w6, 7d
-    CI/CD, Helm Charts & Self-Observability      :w8, after w7, 7d
-    section UI/Frontend Focus (Weeks 9-10)
-    Interactive React Flow Graph & HUD           :w9, after w8, 7d
-    Observability Explorer & Onboarding Flows      :w10, after w9, 7d
-    section Bonus Week (Week 11)
-    Frictionless Onboarding & PulseTrace Lite     :w11, after w10, 7d
+    Vendor Migration & Frictionless Onboarding    :w7, after w6, 7d
+    SSO, Enterprise RBAC & Tag-Based Isolation    :w8, after w7, 7d
+    section UI/Frontend Focus (Week 9)
+    Full UI (Topology, HUD & Dashboards)          :w9, after w8, 7d
+    section Deployment & Distribution (Week 10)
+    CI/CD, Helm Charts & PulseTrace Lite          :w10, after w9, 7d
+    section Advanced Enterprise Modules (Weeks 11-14)
+    Continuous Profiling & eBPF                   :w11, after w10, 7d
+    Real User Monitoring (RUM) & Session Replay   :w12, after w11, 7d
+    Synthetic Monitoring & Global Uptime Checks   :w13, after w12, 7d
+    Native Incident Management & On-Call          :w14, after w13, 7d
 ```
 
 ---
@@ -39,94 +50,116 @@ gantt
 
 ---
 
-### Week 2: ClickHouse Telemetry Storage & Multi-Cloud Cold Storage Tiering
+### Week 2: ClickHouse Telemetry Storage & Multi-Cloud Cold Storage Tiering (Completed)
 *   **Target:** Integrate ClickHouse for structured log analytics and metrics, enabling ingestion speeds matching enterprise scales while offering hyper-cheap archival.
 *   **Key Deliverables:**
-    *   **ClickHouse Integration:** Deploy ClickHouse clusters for high-volume structured log and metric storage, utilizing MergeTree engines for sub-second queries.
-    *   **Kafka Batch Ingestion:** Configure Go consumers using batching algorithms to insert up to 10,000 logs in single ClickHouse transactional batches to maximize throughput.
-    *   **Multi-Cloud Cold Storage Tiering (USP):** Implement ClickHouse storage tiering policies. *Hot data* stays on local SSD/NVMe drives; *Cold data* is compressed and archived directly to the client's choice of object storage: AWS S3, Google Cloud Storage (GCS), Azure Blob Storage, or on-premise private object stores (MinIO/Ceph).
-    *   **Native OTLP Receivers:** Implement direct OTLP/gRPC and OTLP/HTTP ingestion endpoints in `gateway-service` for seamless client-agent migration.
+    *   Deploy ClickHouse clusters for high-volume structured log and metric storage, utilizing MergeTree engines for sub-second queries.
+    *   Configure Go consumers using batching algorithms to insert up to 10,000 logs in single ClickHouse transactional batches to maximize throughput.
+    *   Implement ClickHouse storage tiering policies. *Hot data* stays on local SSD/NVMe drives; *Cold data* is compressed and archived directly to S3/MinIO.
+    *   Implement direct OTLP/gRPC and OTLP/HTTP ingestion endpoints in `gateway-service`.
 
 ---
 
-### Week 3: Pluggable AI Adapters & Dynamic Log Detail Leveling (The Cost Killer)
+### Week 3: Pluggable AI Adapters & Dynamic Log Detail Leveling (Completed)
 *   **Target:** Deploy advanced alerting, multi-window SLO budget tracking, pluggable LLMs, and real-time ingestion volume controls.
 *   **Key Deliverables:**
-    *   **Multi-Provider AI Adapters:** Refactor the causal analyzer to support pluggable adapters: local LLM (LangChain Go), OpenAI (GPT-4o), Google Gemini API (Gemini 1.5 Pro), and Anthropic Claude (Claude 3.5 Sonnet).
-    *   **Dynamic Log Detail Leveling (USP):** Create agent feedback endpoints. By default, agents send only high-level metrics and `WARN`/`ERROR` logs. If the correlation engine detects a warning or SLO burn rate anomaly, it automatically commands agents to toggle "Debug Mode" (streaming full `DEBUG` logs and 100% trace sampling) for the affected systems.
-    *   **Burn Rate Alerting:** Implement multi-window multi-threshold budget alerts for availability and latency SLO targets.
+    *   Refactor the causal analyzer to support pluggable adapters: local LLM (LangChain Go), OpenAI (GPT-4o), Google Gemini API (Gemini 1.5 Pro), and Anthropic Claude (Claude 3.5 Sonnet).
+    *   Create agent feedback endpoints to command agents to toggle "Debug Mode" automatically for cost savings.
+    *   Implement multi-window multi-threshold budget alerts for availability and latency SLO targets.
 
 ---
 
-### Week 4: Zero-Egress Hybrid Architecture & Enterprise Sharding
-*   **Target:** Implement a hyper-scale tenant isolation model built to support massive tech giants (similar to Netflix, Uber, or Akamai) with on-premise security.
+### Week 4: Zero-Egress Hybrid Architecture & Enterprise Sharding (Completed)
+*   **Target:** Implement a hyper-scale tenant isolation model built to support massive tech giants with on-premise security.
 *   **Key Deliverables:**
-    *   **Zero-Data-Egress Architecture (USP):** Allow raw telemetry and databases (ClickHouse) to remain securely on-premise inside the customer's cloud network. The central SaaS control plane only receives anonymized metadata, alerts, and incident state graphs, eliminating network egress fees and compliance risks.
-    *   **ClickHouse Cluster Sharding:** Implement a hybrid multi-tenancy model using `tenant_id` as the distribution/partition key. Enable automatic dynamic routing of high-tier enterprise clients to dedicated physical database shards.
-    *   **PII Sanitizer Pipeline:** Write high-performance regex parsing routines in Go to mask sensitive credentials and PII (card details, tokens, credentials) at the ingestion gateway before queuing to Kafka.
+    *   Allow raw telemetry and databases (ClickHouse) to remain securely on-premise inside the customer's cloud network to eliminate network egress fees.
+    *   Implement a hybrid multi-tenancy model using `tenant_id` as the distribution/partition key for shard routing.
+    *   Write high-performance regex parsing routines in Go to mask sensitive credentials and PII at the ingestion gateway.
 
 ---
 
-### Week 5: Auto-Topology Discovery & AI Self-Healing Playbooks
+### Week 5: Auto-Topology Discovery & AI Self-Healing Playbooks (Completed)
 *   **Target:** Enable automated service dependency map creation, optimize graph database queries, and automate recovery playbooks.
 *   **Key Deliverables:**
-    *   **Span-Based Topology Discovery:** Extract relationship links directly from OpenTelemetry span parent/child interactions (e.g., tracing a call from `gateway` to `payment-service` automatically upserts dependencies).
-    *   **AI Self-Healing Actions & Runbook Execution (USP):** Connect the AI root cause engine to an automation router. When the AI model validates an incident's root cause (e.g., *"Kubernetes pod memory leak"*), it suggests or automatically executes a signed recovery playbook (e.g., Kubernetes rolling restart or database pool recycle) via secure agent handlers.
-    *   **Neo4j Graph Caching:** Implement a Redis cache layer for graph topology to reduce Neo4j lookup times during critical RCA loops.
+    *   Extract relationship links directly from OpenTelemetry span parent/child interactions.
+    *   Connect the AI root cause engine to an automation router for automatic recovery playbook execution (e.g., Kubernetes rolling restart).
+    *   Implement a Redis cache layer for graph topology to reduce Neo4j lookup times during critical RCA loops.
 
 ---
 
-### Week 6: Performance Profiling, Optimization & Load Testing
+### Week 6: Performance Profiling, Optimization & Load Testing (Completed)
 *   **Target:** Scale the Go backend services to handle high traffic loads with minimal resources.
 *   **Key Deliverables:**
-    *   **Memory Profiling (`pprof`):** Audit memory allocations, using `sync.Pool` for JSON encoders/decoders to minimize Garbage Collector overhead.
-    *   **High-Volume Benchmarking:** Run scale tests using `k6` or `Locust` to verify the system handles 10,000+ incoming requests/sec.
-    *   **Clustering & Fault Tolerance:** Configure Active-Active replica clusters for RabbitMQ and setup Postgres Read-Replicas.
+    *   Audit memory allocations, using `sync.Pool` for JSON encoders/decoders to minimize Garbage Collector overhead.
+    *   Run scale tests using `k6` or `Locust` to verify the system handles 10,000+ incoming requests/sec.
+    *   Configure Active-Active replica clusters for RabbitMQ and setup Postgres Read-Replicas.
 
 ---
 
-### Week 7: Single Sign-On (SSO), Enterprise RBAC & Tag-Based Isolation
-*   **Target:** Establish enterprise identity delegation, dynamic custom role creation, and metadata tag restrictions.
+### Week 7: Quickwit Architecture Pivot, Vendor Migration & UI Foundation
+*   **Target:** Pivot to native S3 log indexing, create a zero-code migration path for Datadog/Splunk customers, and scaffold the UI.
 *   **Key Deliverables:**
-    *   **SSO Integration (SAML 2.0 / OIDC):** Integrate standard identity federation protocols inside `gateway-service` to authorize login requests via Okta, Entra ID (Azure), Google Workspace, or Ping Identity.
-    *   **Granular Custom Roles & Permissions:** Design dynamic role configuration APIs. Administrators can create, read, update, and delete roles mapping to specific capability scopes (e.g., `telemetry:read`, `slo:write`, `runbook:execute`, `billing:manage`).
-    *   **Tag-Based Security Constraints (ABAC/Row-Level Security):** Implement metadata filters on telemetry searches. Users belonging to restricted roles are bound by resource tags (e.g., a role restricted with `env: staging` or `team: payment` can only execute ClickHouse queries that include those filter parameters, isolating databases between sensitive departments).
-    *   **Distributed Rate Limiting:** Implement sliding window rate limiters using Redis at the `gateway-service` level, configurable per tenant.
-    *   **Microservices mTLS:** Secure all service-to-service communication paths using Mutual TLS certificates.
-    *   **Audit Logging:** Implement immutable audit logging for administrative actions (like modifying SLO thresholds or deleting users).
+    *   **Backend (Quickwit Pivot):** Replace ClickHouse with **Quickwit** for sub-second, true S3-native log and trace indexing. Delete custom Kafka consumer code and use Quickwit's native Kafka ingest. 
+    *   **Backend (Cost & Migration):** Configure OTel Collector for **"Trojan Horse" Ingestion** (accepting Datadog/Splunk payloads directly). Implement **Tail-Based Trace Sampling** in the OTel Collector (dropping 99% of successful traces to save costs). Create the 1-Line Bootstrap shell scripts.
+    *   **Frontend (UI):** Scaffold the **Next.js** application and **Unified Design System** (Tailwind/Shadcn). Build the **Frictionless Onboarding Wizard** and API Key generation screens.
 
 ---
 
-### Week 8: CI/CD, Containerization & Production Packaging
-*   **Target:** Package PulseTrace for easy, automated deployments to multi-cloud Kubernetes environments.
+### Week 8: Single Sign-On (SSO), RBAC & Service Catalog UI
+*   **Target:** Establish enterprise identity delegation, RBAC, and core telemetry views.
 *   **Key Deliverables:**
-    *   **Kubernetes Helm Charts:** Develop production-ready Helm charts to deploy PulseTrace on Amazon EKS, Google GKE, or Azure AKS.
-    *   **Self-Observability Pipeline:** Set up PulseTrace to monitor itself. Expose `/metrics` endpoints across all Go services for Prometheus scraping.
-    *   **Zero-Downtime CI/CD:** Build GitHub Actions pipelines to build, lint, test, and release Docker images using distroless base images.
+    *   **Backend:** Integrate SSO (SAML/OIDC). Implement dynamic RBAC APIs, ABAC Tag-based constraints, and distributed rate limiting.
+    *   **Frontend (UI):** Build the **Telemetry Explorer** using Virtualized Lists. Include **Live Tail / Live Search** (viewing 100% of un-sampled real-time traces) and **Faceted App Analytics** (Datadog APM parity). Build the **Service Catalog & Ownership Dashboard** (mapping teams, Slack channels, and GitHub repos to microservices). Build the **Settings & Role Management Dashboard**.
 
 ---
 
-### Week 9: UI Part 1 — Interactive Dependency Graph & Incident HUD
-*   **Target:** Build a premium, high-density visualization panel for topology graphs and active incidents.
+### Week 9: Advanced UI — Topology, Flame Graphs & Pulse AI
+*   **Target:** Build premium visualization panels and deploy the Pulse AI Autonomous Agents.
 *   **Key Deliverables:**
-    *   **React Flow Topology Graph:** Build the dynamic system graph showing nodes (colored by real-time health status) and edges. Highlight failure propagation paths visually.
-    *   **Incident Command Center:** Design the HUD displaying active incidents, impact levels, and real-time alerts.
-    *   **Root Cause Modal:** Develop the visual diagnostic screen displaying the AI-generated natural language summary and troubleshooting checklists.
+    *   **Interactive React Flow Graph:** Build the dynamic system graph showing service nodes (colored by health status) and edges to visually highlight failure propagation paths.
+    *   **Trace Flame Graph Viewer:** Build a Gantt-chart style visualization for deep-dive debugging of individual distributed traces (span-by-span latency analysis).
+    *   **Deployment Tracking & DBM:** Add UI panels for version-to-version release comparisons and Database Monitoring (slow query analytics).
+    *   **Pulse AI Chat Widget (UI):** Build the conversational interface for Text-to-SQL querying directly in the dashboard.
+    *   **Pulse AI Auto-Fix (Backend):** Upgrade the `correlation-service` to trigger automated GitHub Pull Requests when stack traces are detected.
 
 ---
 
-### Week 10: UI Part 2 — Observability Explorer & Onboarding Flows
-*   **Target:** Complete logs/traces query explorers, SLO dashboards, and frictionless onboarding screens.
+### Week 10: Developer Experience & Enterprise Packaging
+*   **Target:** Create a production-ready deployment package and build the ultimate developer workflow tools.
 *   **Key Deliverables:**
-    *   **Telemetry Explorer:** Create a high-density, searchable table for logs and traces. Allow users to filter by tags, severity, and service names, and click a log to jump to its distributed trace graph.
-    *   **SLO Configurator:** Build a wizard to add, edit, and delete SLO targets, displaying error budget depletion trendlines.
-    *   **Onboarding Checklist:** Build a walkthrough interface that provides API keys and config snippets to help new customers connect their applications in under 5 minutes.
+    *   **Backend:** Develop Helm charts for Kubernetes deployments. Build robust CI/CD pipelines via GitHub Actions.
+    *   **Frontend (UI):** Build the **Tenant & Cost Dashboards**. Add the **Outlier Explorer** (Honeycomb "BubbleUp" parity) and **Watchdog-Style Anomaly Highlights** to instantly highlight anomalous dimensions. Build the **Grouped Error Tracking Dashboard** (Datadog/Sentry parity) to track high-frequency exceptions. Perform final UI polish and animation passes.
+    *   **IDE Extension:** Build the **PulseTrace VS Code Extension** (New Relic CodeStream parity) to bring stack traces and active incidents directly into the developer's editor.
 
 ---
 
-### Bonus Week (Week 11): Frictionless Onboarding & PulseTrace Lite
-*   **Target:** Make the product instantly adoptable for teams of all sizes, from indie developers to enterprise trials.
+### Week 11: Continuous Profiling & eBPF Auto-Instrumentation
+*   **Target:** Provide zero-instrumentation profiling and deep infrastructure visibility to rival Datadog's continuous profiler.
 *   **Key Deliverables:**
-    *   **`pulsetrace-lite` Single-Binary Target:** Build a compilation configuration utilizing Go build tags (e.g., `-tags lite`) to bundle all services into a single self-contained binary. Relational data is backed by embedded **SQLite**, telemetry is backed by embedded **DuckDB**, and message passing uses in-memory queues, dropping external dependencies (Kafka, RabbitMQ, Neo4j, ClickHouse) for small environments.
-    *   **Interactive Shell Bootstrap Script:** Create a simple install shell script (`curl -sfL https://pulsetrace.sh/install.sh | sh`) for one-line installation and spin-up.
-    *   **SaaS Gateway Agent Registration:** Build automated provisioning routines in `gateway-service` that generate customized configuration yaml templates for new users in one click.
+    *   **Backend:** Deploy eBPF daemonsets for continuous CPU/Memory profiling and Network Performance Monitoring (NPM).
+    *   **Frontend (UI):** Build the Flamegraph UI for continuous profiling visualization.
+
+---
+
+### Week 12: Real User Monitoring (RUM) & Session Replay
+*   **Target:** Capture frontend performance metrics and user sessions to provide full end-to-end visibility.
+*   **Key Deliverables:**
+    *   **SDK:** Create a lightweight JS SDK for capturing Core Web Vitals, frontend errors, and DOM mutations.
+    *   **Frontend (UI):** Build the Session Replay video player and frontend error tracking dashboard.
+
+---
+
+### Week 13: Synthetic Monitoring & Global Uptime Checks
+*   **Target:** Proactively monitor API endpoints and critical user journeys from global locations.
+*   **Key Deliverables:**
+    *   **Backend:** Build geo-distributed runners to execute API pings and simulate browser flows (using Puppeteer/Playwright).
+    *   **Frontend (UI):** Add multi-step API assertions and uptime dashboards.
+
+---
+
+### Week 14: Native Incident Management & On-Call (PagerDuty Parity)
+*   **Target:** Eliminate the need for expensive third-party tools like PagerDuty by providing built-in on-call scheduling and escalations.
+*   **Key Deliverables:**
+    *   **Backend:** Implement Escalation Policies, On-Call Schedules, and integrate with Twilio for SMS/Voice alerts.
+    *   **Frontend (UI):** Build the Incident Command Center UI for managing active incidents and responder coordination.
+

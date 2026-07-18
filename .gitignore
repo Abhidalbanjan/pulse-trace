@@ -42,3 +42,7 @@ docker_related_config.xml
 # this repo builds from it (gateway-service uses its own /gateway-service/vendor/
 # instead, see above). Removed from tracking; keep it from coming back.
 /vendor/
+
+# Tool config/output, not project source
+/.claude/
+/graphify-out/

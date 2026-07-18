@@ -12,6 +12,7 @@ import (
 	"github.com/pulsetrace/notification-service/internal/worker"
 	"github.com/pulsetrace/shared/rabbitmq"
 	"github.com/pulsetrace/shared/telemetry"
+	"github.com/grafana/pyroscope-go"
 )
 
 const serviceName = "notification-service"
@@ -31,6 +32,24 @@ func main() {
 			}
 		}()
 	}
+
+	// ── Continuous Profiling (Pyroscope) ──────────────────────────────────────
+	pyroscopeURL := os.Getenv("PYROSCOPE_URL")
+	if pyroscopeURL == "" {
+		pyroscopeURL = "http://pyroscope:4040"
+	}
+	pyroscope.Start(pyroscope.Config{
+		ApplicationName: serviceName,
+		ServerAddress:   pyroscopeURL,
+		Logger:          pyroscope.StandardLogger,
+		ProfileTypes: []pyroscope.ProfileType{
+			pyroscope.ProfileCPU,
+			pyroscope.ProfileAllocObjects,
+			pyroscope.ProfileAllocSpace,
+			pyroscope.ProfileInuseObjects,
+			pyroscope.ProfileInuseSpace,
+		},
+	})
 
 	go func() {
 		log.Println("notification-service pprof server listening on :8085")

@@ -102,21 +102,28 @@ func (c *TopologyClient) UpdateServiceState(ctx context.Context, serviceName, st
 	return nil
 }
 
-// UpdateCausalPath sets the active causal path edges in Neo4j topology.
-func (c *TopologyClient) UpdateCausalPath(ctx context.Context, chain []models.CausalLink) error {
+// UpdateCausalPath sets the active causal path edges in Neo4j topology, scoped
+// to incidentID so concurrently-analyzed incidents never clobber each other's
+// causal highlighting (see topology-service's Neo4jRepository.UpdateCausalPath).
+func (c *TopologyClient) UpdateCausalPath(ctx context.Context, incidentID string, chain []models.CausalLink) error {
 	type Link struct {
 		Source string `json:"source"`
 		Target string `json:"target"`
 		Reason string `json:"reason"`
 	}
-	var payload []Link
+	type request struct {
+		IncidentID string `json:"incident_id"`
+		Links      []Link `json:"links"`
+	}
+	var links []Link
 	for _, l := range chain {
-		payload = append(payload, Link{
+		links = append(links, Link{
 			Source: l.FromService,
 			Target: l.ToService,
 			Reason: l.Evidence,
 		})
 	}
+	payload := request{IncidentID: incidentID, Links: links}
 
 	url := fmt.Sprintf("%s/api/v1/topology/causal-path", c.baseURL)
 	b, err := json.Marshal(payload)

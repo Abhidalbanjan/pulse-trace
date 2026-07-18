@@ -33,21 +33,27 @@ func InitTracer(ctx context.Context, serviceName string) (trace.Tracer, func(con
 		return nil, nil, fmt.Errorf("failed to create OTLP exporter: %w", err)
 	}
 
+	version := os.Getenv("SERVICE_VERSION")
+	if version == "" {
+		version = "dev"
+	}
+
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceName(serviceName),
-			semconv.ServiceVersion("1.0.0"),
+			semconv.ServiceVersion(version),
 		),
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create OTel resource: %w", err)
 	}
 
+	sampler, pollCancel := resolveSampler(ctx, serviceName)
+
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(res),
-		// Sample everything in dev; tune with OTEL_TRACES_SAMPLER in prod.
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSampler(sampler),
 	)
 
 	// Register as the global provider so otel.Tracer() works anywhere.
@@ -59,13 +65,42 @@ func InitTracer(ctx context.Context, serviceName string) (trace.Tracer, func(con
 		propagation.Baggage{},
 	))
 
-	log.Printf("telemetry: OTel tracer initialised for service=%q endpoint=%s", serviceName, endpoint)
+	log.Printf("telemetry: OTel tracer initialised for service=%q endpoint=%s sampler=%s", serviceName, endpoint, sampler.Description())
 
 	shutdown := func(ctx context.Context) error {
+		if pollCancel != nil {
+			pollCancel()
+		}
 		shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		return tp.Shutdown(shutdownCtx)
 	}
 
 	return tp.Tracer(serviceName), shutdown, nil
+}
+
+// resolveSampler picks the trace sampler for this service:
+//  1. An explicit OTEL_TRACES_SAMPLER always wins (operator override).
+//  2. Otherwise, if TOPOLOGY_SERVICE_URL is set, use a DynamicSampler that polls
+//     topology-service's per-service agent-config and adjusts live (100% while
+//     the service is DEGRADED/PREDICTIVE_WARNING, 1% baseline otherwise).
+//  3. Otherwise, sample everything - the original dev-friendly default.
+//
+// In every case, the result is wrapped with withForceDrop so known-noisy endpoints
+// (health checks, metrics scrapes) never get sampled at all, no matter which mode
+// is active - a manual force-drop, independent of the tail_sampling retention
+// filters that decide keep/drop for everything else.
+func resolveSampler(ctx context.Context, serviceName string) (sdktrace.Sampler, context.CancelFunc) {
+	if s, ok := staticSamplerFromEnv(); ok {
+		return withForceDrop(s), nil
+	}
+
+	if topologyURL := os.Getenv("TOPOLOGY_SERVICE_URL"); topologyURL != "" {
+		dynamic := NewDynamicSampler(1.0)
+		pollCtx, cancel := context.WithCancel(context.Background())
+		go pollAgentConfig(pollCtx, serviceName, topologyURL, dynamic)
+		return withForceDrop(dynamic), cancel
+	}
+
+	return withForceDrop(sdktrace.AlwaysSample()), nil
 }

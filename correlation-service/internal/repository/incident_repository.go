@@ -126,6 +126,14 @@ func (r *IncidentRepository) Query(ctx context.Context, params *models.IncidentQ
 		args = append(args, params.Severity)
 		idx++
 	}
+	if params.Service != "" {
+		// service_name lives on incident_alerts (see serviceNames below), not on
+		// incidents itself - filter via a semi-join so ?service= actually works
+		// instead of being silently ignored.
+		where += fmt.Sprintf(" AND id IN (SELECT incident_id FROM incident_alerts WHERE service_name = $%d)", idx)
+		args = append(args, params.Service)
+		idx++
+	}
 	if params.From != "" {
 		if t, err := time.Parse(time.RFC3339, params.From); err == nil {
 			where += fmt.Sprintf(" AND started_at >= $%d", idx)

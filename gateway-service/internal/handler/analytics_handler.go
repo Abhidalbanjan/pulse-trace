@@ -1,54 +1,57 @@
 package handler
 
 import (
-	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 )
 
 type AnalyticsHandler struct {
-	ClickHouseURL string
+	ch *clickHouseClient
 }
 
 func NewAnalyticsHandler(clickhouseURL string) *AnalyticsHandler {
-	return &AnalyticsHandler{
-		ClickHouseURL: clickhouseURL,
-	}
+	return &AnalyticsHandler{ch: &clickHouseClient{URL: clickhouseURL}}
 }
 
-// GetTraceAnalytics queries ClickHouse for trace latency percentiles and aggregations
+// GetTraceAnalytics queries ClickHouse for trace latency percentiles and volume, filterable by
+// time range, service name, and HTTP route.
 func (h *AnalyticsHandler) GetTraceAnalytics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// 1. Construct ClickHouse SQL query
-	// We want P50, P90, P99 over time buckets
-	query := `
-		SELECT 
-			toStartOfMinute(Timestamp) as time_bucket,
+	_, sqlInterval, bucketExpr := resolveInterval(r.URL.Query().Get("interval"))
+
+	services := r.URL.Query()["service"]
+	routes := r.URL.Query()["route"]
+
+	where := fmt.Sprintf("ParentSpanId = '' AND Timestamp >= now() - INTERVAL %s", sqlInterval)
+	params := map[string]string{}
+	if len(services) > 0 {
+		where += " AND ServiceName IN {services:Array(String)}"
+		params["services"] = arrayParam(services)
+	}
+	if len(routes) > 0 {
+		where += " AND SpanAttributes['http.route'] IN {routes:Array(String)}"
+		params["routes"] = arrayParam(routes)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT
+			%s as time_bucket,
 			count() as total_traces,
 			quantile(0.50)(Duration / 1000000.0) as p50_ms,
 			quantile(0.90)(Duration / 1000000.0) as p90_ms,
 			quantile(0.99)(Duration / 1000000.0) as p99_ms
 		FROM pulsetrace.otel_traces
-		WHERE ParentSpanId = '' AND Timestamp >= now() - INTERVAL 1 HOUR
+		WHERE %s
 		GROUP BY time_bucket
 		ORDER BY time_bucket ASC
 		FORMAT JSON
-	`
+	`, bucketExpr, where)
 
-	req, err := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(query))
-	if err != nil {
-		log.Printf("[AnalyticsHandler] Failed to create request: %v", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	
-	// ClickHouse authentication
-	req.SetBasicAuth("pulsetrace", "pulsetrace_secret")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := h.ch.query(query, params)
 	if err != nil {
 		log.Printf("[AnalyticsHandler] Failed to execute query: %v", err)
 		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)
@@ -69,6 +72,69 @@ func (h *AnalyticsHandler) GetTraceAnalytics(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Stream ClickHouse JSON response directly to the client
 	io.Copy(w, resp.Body)
+}
+
+// GetTraceFacets returns the distinct service names and HTTP routes seen in stored traces,
+// for populating the Trace Analytics facet sidebar with real data.
+func (h *AnalyticsHandler) GetTraceFacets(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	serviceResp, err := h.ch.query(`
+		SELECT DISTINCT ServiceName as name
+		FROM pulsetrace.otel_traces
+		WHERE ParentSpanId = '' AND Timestamp >= now() - INTERVAL 7 DAY
+		ORDER BY name
+		LIMIT 50
+		FORMAT JSON
+	`, nil)
+	if err != nil {
+		log.Printf("[AnalyticsHandler] Failed to query service facets: %v", err)
+		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)
+		return
+	}
+	defer serviceResp.Body.Close()
+
+	routeResp, err := h.ch.query(`
+		SELECT DISTINCT SpanAttributes['http.route'] as name
+		FROM pulsetrace.otel_traces
+		WHERE Timestamp >= now() - INTERVAL 7 DAY AND SpanAttributes['http.route'] != ''
+		ORDER BY name
+		LIMIT 50
+		FORMAT JSON
+	`, nil)
+	if err != nil {
+		log.Printf("[AnalyticsHandler] Failed to query route facets: %v", err)
+		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)
+		return
+	}
+	defer routeResp.Body.Close()
+
+	type row struct {
+		Name string `json:"name"`
+	}
+	type chResult struct {
+		Data []row `json:"data"`
+	}
+
+	extract := func(resp *http.Response) []string {
+		if resp.StatusCode != http.StatusOK {
+			return []string{}
+		}
+		var result chResult
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return []string{}
+		}
+		names := make([]string, 0, len(result.Data))
+		for _, r := range result.Data {
+			names = append(names, r.Name)
+		}
+		return names
+	}
+
+	out := map[string][]string{
+		"services": extract(serviceResp),
+		"routes":   extract(routeResp),
+	}
+	_ = json.NewEncoder(w).Encode(out)
 }

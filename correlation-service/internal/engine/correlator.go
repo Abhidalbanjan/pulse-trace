@@ -214,7 +214,7 @@ func (c *Correlator) scheduleCausalAnalysis(incidentID string) {
 
 		// Option 3 Integration: push the causal chain path to Neo4j via topology client!
 		log.Printf("causal: pushing causal chain of length %d to Neo4j topology", len(result.Chain))
-		if err := c.topoclient.UpdateCausalPath(ctx, result.Chain); err != nil {
+		if err := c.topoclient.UpdateCausalPath(ctx, incidentID, result.Chain); err != nil {
 			log.Printf("causal: failed to push causal path to topology service: %v", err)
 		}
 

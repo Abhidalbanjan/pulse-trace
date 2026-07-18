@@ -18,6 +18,7 @@ import (
 	"github.com/pulsetrace/shared/jsonpool"
 	"github.com/pulsetrace/topology-service/internal/repository"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -176,14 +177,23 @@ func (a *API) handleUpdateCatalog(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+type UpdateCausalPathRequest struct {
+	IncidentID string                  `json:"incident_id"`
+	Links      []repository.CausalLink `json:"links"`
+}
+
 func (a *API) handleUpdateCausalPath(w http.ResponseWriter, r *http.Request) {
-	var req []repository.CausalLink
+	var req UpdateCausalPathRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
+	if req.IncidentID == "" {
+		http.Error(w, "incident_id is required", http.StatusBadRequest)
+		return
+	}
 
-	if err := a.repo.UpdateCausalPath(r.Context(), req); err != nil {
+	if err := a.repo.UpdateCausalPath(r.Context(), req.IncidentID, req.Links); err != nil {
 		log.Printf("failed to update causal path: %v", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -244,6 +254,8 @@ func (a *API) handleReceiveTraces(w http.ResponseWriter, r *http.Request) {
 			for _, span := range scopeSpans.Spans {
 				spanID := hex.EncodeToString(span.SpanId)
 				parentSpanID := hex.EncodeToString(span.ParentSpanId)
+				durationMs := float64(span.EndTimeUnixNano-span.StartTimeUnixNano) / 1e6
+				isError := span.Status != nil && span.Status.Code == tracepb.Status_STATUS_CODE_ERROR
 
 				// 1. Store spanID -> serviceName mapping in Redis (TTL 5m)
 				spanKey := "span:" + spanID
@@ -256,17 +268,24 @@ func (a *API) handleReceiveTraces(w http.ResponseWriter, r *http.Request) {
 					parentKey := "span:" + parentSpanID
 					parentService, err := a.repo.GetSpanService(ctx, parentKey)
 					if err == nil && parentService != "" {
-						// Parent found! Create the dependency edge
+						// Parent found! Create the dependency edge. This span IS the
+						// downstream call itself, so its own duration/status are exactly
+						// what should be attributed to the parentService -> serviceName edge.
 						if parentService != serviceName {
 							log.Printf("topology: span relation discovered edge: %s -> %s", parentService, serviceName)
 							if err := a.repo.UpsertDependencyEdge(ctx, parentService, serviceName); err != nil {
 								log.Printf("topology: failed to upsert edge %s -> %s: %v", parentService, serviceName, err)
 							}
+							if err := a.repo.RecordEdgeMetric(ctx, parentService, serviceName, durationMs, isError); err != nil {
+								log.Printf("topology: failed to record edge metric %s -> %s: %v", parentService, serviceName, err)
+							}
 						}
 					} else {
-						// Parent not found yet. Store current service in pending list for parentSpanID
+						// Parent not found yet. Store this span's own duration/error
+						// alongside its service name, so the metric can still be attributed
+						// once the parent arrives and resolves it (see step 3 below).
 						pendingKey := "pending:" + parentSpanID
-						if err := a.repo.AddPendingChild(ctx, pendingKey, serviceName, 5*time.Minute); err != nil {
+						if err := a.repo.AddPendingChild(ctx, pendingKey, serviceName, durationMs, isError, spanID, 5*time.Minute); err != nil {
 							log.Printf("topology: failed to add pending child: %v", err)
 						}
 					}
@@ -276,12 +295,17 @@ func (a *API) handleReceiveTraces(w http.ResponseWriter, r *http.Request) {
 				pendingKey := "pending:" + spanID
 				children, err := a.repo.GetPendingChildren(ctx, pendingKey)
 				if err == nil && len(children) > 0 {
-					for _, childSvc := range children {
-						if serviceName != childSvc {
-							log.Printf("topology: pending span relation resolved edge: %s -> %s", serviceName, childSvc)
-							if err := a.repo.UpsertDependencyEdge(ctx, serviceName, childSvc); err != nil {
-								log.Printf("topology: failed to upsert edge %s -> %s: %v", serviceName, childSvc, err)
-							}
+					for _, raw := range children {
+						entry, ok := repository.ParsePendingChildEntry(raw)
+						if !ok || serviceName == entry.Service {
+							continue
+						}
+						log.Printf("topology: pending span relation resolved edge: %s -> %s", serviceName, entry.Service)
+						if err := a.repo.UpsertDependencyEdge(ctx, serviceName, entry.Service); err != nil {
+							log.Printf("topology: failed to upsert edge %s -> %s: %v", serviceName, entry.Service, err)
+						}
+						if err := a.repo.RecordEdgeMetric(ctx, serviceName, entry.Service, entry.DurationMs, entry.IsError); err != nil {
+							log.Printf("topology: failed to record edge metric %s -> %s: %v", serviceName, entry.Service, err)
 						}
 					}
 					_ = a.repo.DeleteKey(ctx, pendingKey)
@@ -341,7 +365,7 @@ func (a *API) handleExecutePlaybook(w http.ResponseWriter, r *http.Request) {
 	sigBytes, _ := hex.DecodeString(req.Signature)
 	expectedBytes, _ := hex.DecodeString(expectedSig)
 	if !hmac.Equal(sigBytes, expectedBytes) {
-		log.Printf("agent-handler: signature verification failed for incident=%s, service=%s, playbook=%s", 
+		log.Printf("agent-handler: signature verification failed for incident=%s, service=%s, playbook=%s",
 			req.IncidentID, req.ServiceName, req.PlaybookName)
 		http.Error(w, "signature verification failed", http.StatusUnauthorized)
 		return
@@ -398,10 +422,9 @@ func (a *API) handleExecutePlaybook(w http.ResponseWriter, r *http.Request) {
 			dockerCmd.Stderr = &dockerOut
 			if errDocker := dockerCmd.Run(); errDocker != nil {
 				log.Printf("agent-handler: docker restart fallback failed: %v", errDocker)
-				output = fmt.Sprintf("Failed to restart service %q. Kubectl error: %v (output: %q). Docker error: %v (output: %q). Simulated fallback triggered.", 
+				status = "FAILED"
+				output = fmt.Sprintf("Failed to restart service %q. Kubectl error: %v (output: %q). Docker error: %v (output: %q).",
 					req.ServiceName, errExec, out.String(), errDocker, dockerOut.String())
-				// Return success on mock fallback to keep demo alive
-				output += "\nFallback: Graceful rolling restart of pods simulated successfully."
 			} else {
 				output = fmt.Sprintf("Successfully restarted container pulsetrace-%s using Docker. Output: %s", req.ServiceName, strings.TrimSpace(dockerOut.String()))
 			}
@@ -419,16 +442,16 @@ func (a *API) handleExecutePlaybook(w http.ResponseWriter, r *http.Request) {
 
 		if errExec != nil {
 			log.Printf("agent-handler: kubectl scale failed: %v", errExec)
-			output = fmt.Sprintf("Failed to scale deployment/%s. Kubectl error: %v (output: %q). Simulated fallback triggered.", 
+			status = "FAILED"
+			output = fmt.Sprintf("Failed to scale deployment/%s. Kubectl error: %v (output: %q).",
 				req.ServiceName, errExec, out.String())
-			// Fallback mock scaling
-			output += "\nFallback: Scaled service replicas up by 2 (desired state: 4) simulated successfully."
 		} else {
 			output = fmt.Sprintf("Successfully scaled deployment/%s to 4 replicas. Output: %s", req.ServiceName, strings.TrimSpace(out.String()))
 		}
 
 	default:
-		output = fmt.Sprintf("Executed custom playbook %q on service %q successfully.", req.PlaybookName, req.ServiceName)
+		status = "FAILED"
+		output = fmt.Sprintf("Unknown playbook %q — no handler registered for service %q.", req.PlaybookName, req.ServiceName)
 	}
 
 	resp := map[string]string{

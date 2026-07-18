@@ -13,13 +13,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/grafana/pyroscope-go"
 	"github.com/pulsetrace/gateway-service/internal/auth"
 	"github.com/pulsetrace/gateway-service/internal/handler"
 	"github.com/pulsetrace/gateway-service/internal/pii"
 	"github.com/pulsetrace/gateway-service/internal/proxy"
 	"github.com/pulsetrace/shared/middleware"
 	"github.com/pulsetrace/shared/telemetry"
-	"github.com/grafana/pyroscope-go"
 )
 
 const serviceName = "gateway-service"
@@ -64,6 +64,23 @@ func main() {
 		log.Printf("gateway-service: auth database connection failed: %v", err)
 	}
 	analyticsHandler := handler.NewAnalyticsHandler(clickhouseURL)
+	serviceHandler := handler.NewServiceHandler(clickhouseURL)
+	errorTrackingHandler := handler.NewErrorTrackingHandler(clickhouseURL, authHandler.GetDB())
+	deploymentHandler := handler.NewDeploymentHandler(authHandler.GetDB())
+	rbacEngine := auth.NewRBACEngine(authHandler.GetDB())
+	auditLogHandler := auth.NewAuditLogHandler(authHandler.GetDB())
+	// Distributed rate limiting: counters live in Redis, so the budget holds across
+	// every gateway-service replica, not just per-instance. The initial rules here are
+	// just a pre-Postgres-load seed - rateLimitRuleHandler immediately overwrites them
+	// with whatever's in rate_limit_rules and keeps polling every 5s after that, so
+	// admins can add/edit/disable a rule from Settings with no redeploy.
+	rateLimiter := middleware.NewRateLimiter(getEnv("REDIS_ADDR", "redis:6379"), []middleware.RateLimitRule{
+		{Name: "auth-login", PathPrefixes: []string{"/api/v1/auth/login", "/api/v1/auth/register"}, Limit: 10, Window: time.Minute},
+		{Name: "telemetry-ingest", PathPrefixes: []string{"/v1/traces", "/v1/metrics", "/v1/logs", "/api/v1/logs"}, Limit: 6000, Window: time.Minute},
+		{Name: "default", PathPrefixes: []string{"/"}, Limit: 600, Window: time.Minute},
+	})
+	rateLimitRuleHandler := handler.NewRateLimitRuleHandler(authHandler.GetDB(), rateLimiter)
+	rateLimitRuleHandler.StartPolling(ctx, 5*time.Second)
 	rumHandler := handler.NewRUMHandler(clickhouseURL)
 	syntheticsHandler := handler.NewSyntheticsHandler(clickhouseURL, authHandler.GetDB())
 	syntheticsHandler.StartWorker()
@@ -112,10 +129,46 @@ func main() {
 		mux.HandleFunc("POST /api/v1/admin/users", authHandler.CreateUser)
 		mux.HandleFunc("DELETE /api/v1/admin/users", authHandler.DeleteUser)
 		mux.HandleFunc("PUT /api/v1/admin/users/role", authHandler.UpdateUserRole)
+
+		// Dynamic RBAC: role CRUD (permissions e.g. "read"/"write"/"admin"/"*")
+		mux.HandleFunc("GET /api/v1/admin/roles", rbacEngine.ListRoles)
+		mux.HandleFunc("POST /api/v1/admin/roles", rbacEngine.CreateRole)
+		mux.HandleFunc("PUT /api/v1/admin/roles/{name}", rbacEngine.UpdateRole)
+		mux.HandleFunc("DELETE /api/v1/admin/roles/{name}", rbacEngine.DeleteRole)
+
+		// ABAC: attribute-based policy CRUD (expr-lang conditions over subject/resource/action)
+		mux.HandleFunc("GET /api/v1/admin/policies", rbacEngine.ListPolicies)
+		mux.HandleFunc("POST /api/v1/admin/policies", rbacEngine.CreatePolicy)
+		mux.HandleFunc("PUT /api/v1/admin/policies/{id}", rbacEngine.UpdatePolicy)
+		mux.HandleFunc("DELETE /api/v1/admin/policies/{id}", rbacEngine.DeletePolicy)
+
+		// Audit trail for role/policy/user mutations
+		mux.HandleFunc("GET /api/v1/admin/audit-log", auditLogHandler.ListAuditLog)
+
+		// Dynamic rate limit rules: DB-backed, no redeploy needed to change a limit
+		mux.HandleFunc("GET /api/v1/admin/rate-limits", rateLimitRuleHandler.ListRateLimitRules)
+		mux.HandleFunc("POST /api/v1/admin/rate-limits", rateLimitRuleHandler.CreateRateLimitRule)
+		mux.HandleFunc("PUT /api/v1/admin/rate-limits/{id}", rateLimitRuleHandler.UpdateRateLimitRule)
+		mux.HandleFunc("DELETE /api/v1/admin/rate-limits/{id}", rateLimitRuleHandler.DeleteRateLimitRule)
 	}
 
 	// Analytics APIs (powered by ClickHouse)
 	mux.HandleFunc("GET /api/v1/analytics/traces", analyticsHandler.GetTraceAnalytics)
+	mux.HandleFunc("GET /api/v1/analytics/traces/facets", analyticsHandler.GetTraceFacets)
+
+	// Service Page APIs (powered by ClickHouse) — per-service and per-resource RED metrics
+	mux.HandleFunc("GET /api/v1/services", serviceHandler.ListServices)
+	mux.HandleFunc("GET /api/v1/services/{name}", serviceHandler.GetServiceDetail)
+
+	// Error Tracking APIs (ClickHouse grouping + Postgres triage workflow)
+	mux.HandleFunc("GET /api/v1/errors/groups", errorTrackingHandler.ListErrorGroups)
+	mux.HandleFunc("POST /api/v1/errors/groups/{fingerprint}/resolve", errorTrackingHandler.ResolveErrorGroup)
+	mux.HandleFunc("POST /api/v1/errors/groups/{fingerprint}/mute", errorTrackingHandler.MuteErrorGroup)
+	mux.HandleFunc("POST /api/v1/errors/groups/{fingerprint}/reopen", errorTrackingHandler.ReopenErrorGroup)
+
+	// Deployment Tracking APIs (Postgres)
+	mux.HandleFunc("POST /api/v1/deployments", deploymentHandler.RecordDeployment)
+	mux.HandleFunc("GET /api/v1/deployments", deploymentHandler.ListDeployments)
 
 	// RUM APIs (powered by ClickHouse)
 	mux.HandleFunc("POST /api/v1/rum/ingest", rumHandler.Ingest)
@@ -144,10 +197,11 @@ func main() {
 
 	mux.Handle("/", router)
 
-	// Middleware chain: CORS → Tracing → RequestLogger → Auth → PII Sanitizer → RBAC → router
+	// Middleware chain: CORS → Tracing → RequestLogger → Auth → RateLimit → PII Sanitizer → RBAC/ABAC → router
 	var chain http.Handler = mux
-	chain = auth.RBACMiddleware(chain)
+	chain = rbacEngine.Middleware(chain)
 	chain = pii.PIISanitizerMiddleware(chain)
+	chain = rateLimiter.RateLimit(chain)
 	chain = auth.AuthMiddleware(chain)
 	chain = middleware.RequestLogger(chain)
 	chain = middleware.Tracing(serviceName)(chain)

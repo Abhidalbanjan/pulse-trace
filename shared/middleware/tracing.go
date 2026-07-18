@@ -1,10 +1,14 @@
 package middleware
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 
+	"github.com/grafana/pyroscope-go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"go.opentelemetry.io/otel/trace"
@@ -44,9 +48,26 @@ func Tracing(serviceName string) func(http.Handler) http.Handler {
 
 			// Wrap the ResponseWriter to capture the status code.
 			rw := &tracingResponseWriter{ResponseWriter: w, status: http.StatusOK}
-			next.ServeHTTP(rw, r.WithContext(ctx))
+
+			// Tag CPU/memory profile samples taken during this request with the
+			// span's trace_id/span_id (pprof labels - a no-op if Pyroscope isn't
+			// running). This is what makes a slow span clickable through to its
+			// own flame graph in the Continuous Profiler.
+			sc := span.SpanContext()
+			pyroscope.TagWrapper(ctx, pyroscope.Labels(
+				"trace_id", sc.TraceID().String(),
+				"span_id", sc.SpanID().String(),
+				"http_route", r.Method+" "+r.URL.Path,
+			), func(ctx context.Context) {
+				next.ServeHTTP(rw, r.WithContext(ctx))
+			})
 
 			span.SetAttributes(semconv.HTTPStatusCode(rw.status))
+			// Mark the root span as an error on server failures so error-rate metrics,
+			// Error Tracking, and RED dashboards derived from ClickHouse/StatusCode see it.
+			if rw.status >= 500 {
+				span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", rw.status))
+			}
 		})
 	}
 }

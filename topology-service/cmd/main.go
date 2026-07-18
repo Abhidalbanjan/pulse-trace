@@ -14,14 +14,17 @@ import (
 	"github.com/pulsetrace/topology-service/internal/consumer"
 	"github.com/pulsetrace/topology-service/internal/handler"
 	"github.com/pulsetrace/topology-service/internal/repository"
+	"github.com/grafana/pyroscope-go"
 )
+
+const serviceName = "topology-service"
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Initialize OpenTelemetry
-	_, shutdown, err := telemetry.InitTracer(ctx, "topology-service")
+	_, shutdown, err := telemetry.InitTracer(ctx, serviceName)
 	if err != nil {
 		log.Fatalf("failed to init telemetry: %v", err)
 	}
@@ -30,6 +33,24 @@ func main() {
 			log.Printf("failed to shutdown telemetry: %v", err)
 		}
 	}()
+
+	// ── Continuous Profiling (Pyroscope) ──────────────────────────────────────
+	pyroscopeURL := os.Getenv("PYROSCOPE_URL")
+	if pyroscopeURL == "" {
+		pyroscopeURL = "http://pyroscope:4040"
+	}
+	pyroscope.Start(pyroscope.Config{
+		ApplicationName: serviceName,
+		ServerAddress:   pyroscopeURL,
+		Logger:          pyroscope.StandardLogger,
+		ProfileTypes: []pyroscope.ProfileType{
+			pyroscope.ProfileCPU,
+			pyroscope.ProfileAllocObjects,
+			pyroscope.ProfileAllocSpace,
+			pyroscope.ProfileInuseObjects,
+			pyroscope.ProfileInuseSpace,
+		},
+	})
 
 	// Neo4j Setup
 	uri := os.Getenv("NEO4J_URI")

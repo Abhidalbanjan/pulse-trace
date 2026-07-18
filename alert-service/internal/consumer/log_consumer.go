@@ -88,6 +88,12 @@ func (c *LogConsumer) Handle(msg *sarama.ConsumerMessage) error {
 	log.Printf("log_consumer: alert created id=%s service=%s level=%s trace_id=%s",
 		alert.ID, alert.ServiceName, alert.Level, alert.TraceID)
 
+	// Retention filter: a FATAL alert is a critical event worth keeping regardless
+	// of sampling/cost policy - force it past the collector's tail_sampling.
+	if entry.Level == models.LogLevelFatal {
+		telemetry.ForceKeep(ctx)
+	}
+
 	// Publish alert to the alerts topic so the correlation engine can group it.
 	if c.producer != nil {
 		go func() {

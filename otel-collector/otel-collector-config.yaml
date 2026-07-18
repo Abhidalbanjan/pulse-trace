@@ -20,13 +20,20 @@ processors:
     send_batch_size: 1024
 
   # Add resource attributes to every span for easier filtering in Jaeger/Grafana.
+  # DEPLOYMENT_ENVIRONMENT is a real env var (set in docker-compose.yml, defaults to
+  # "development"), not a hardcoded value - so environment-based retention below is meaningful.
   resource:
     attributes:
       - key: deployment.environment
-        value: development
+        value: ${env:DEPLOYMENT_ENVIRONMENT}
         action: upsert
 
-  # Tail-based sampling policy for cost and storage optimization
+  # Tail-based sampling: retention filters. Any ONE matching policy keeps the trace,
+  # regardless of the others - this is the same tag-based mechanism Datadog calls
+  # "Retention Filters". manual-keep-policy is the escape hatch application code uses
+  # via telemetry.ForceKeep(ctx) (shared/telemetry/sampler.go) for traces that must be
+  # kept no matter what (e.g. a critical business transaction), independent of error/
+  # latency/random sampling.
   tail_sampling:
     decision_wait: 5s
     num_traces: 50000
@@ -38,6 +45,9 @@ processors:
       - name: latency-policy
         type: latency
         latency: { threshold_ms: 500 }
+      - name: manual-keep-policy
+        type: string_attribute
+        string_attribute: { key: sampling.priority, values: [ keep ] }
       - name: normal-sampling-policy
         type: probabilistic
         probabilistic: { sampling_percentage: 1.0 }
@@ -57,12 +67,21 @@ exporters:
     password: pulsetrace_secret
     ttl_days: 7
     traces_table_name: otel_traces
-    create_schema: true
+    # create_schema isn't a valid key on the clickhouse exporter in collector
+    # v0.101.0 (it was added in a later release) - the collector was crash-looping
+    # on startup ("has invalid keys: create_schema") on every boot until this was
+    # removed. Schema/table creation is this exporter's default behavior pre-flag.
 
   # Send traces to topology-service via OTLP HTTP JSON
   otlphttp/topology:
     endpoint: http://topology-service:8084
     encoding: json
+
+  # Send traces to Quickwit's native OTLP gRPC ingestion (auto-creates otel-traces-v0_7 index)
+  otlp/quickwit:
+    endpoint: quickwit:7281
+    tls:
+      insecure: true
 
   # Expose Prometheus metrics scraped from the collector itself.
   prometheus:
@@ -75,9 +94,13 @@ exporters:
 service:
   pipelines:
     traces:
-      receivers: [otlp, datadog, splunk_hec]
+      # splunk_hec only supports logs/metrics telemetry types, not traces - wiring
+      # it into the traces pipeline crashes collector startup ("telemetry type is
+      # not supported"). There's no logs pipeline in this collector to attach it to
+      # (logs ingest via Vector/log-service instead), so drop it here.
+      receivers: [otlp, datadog]
       processors: [resource, tail_sampling, batch]
-      exporters: [otlp/jaeger, clickhouse, otlphttp/topology]
+      exporters: [otlp/jaeger, clickhouse, otlphttp/topology, otlp/quickwit]
 
     metrics:
       receivers: [otlp]

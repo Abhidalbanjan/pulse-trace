@@ -6,9 +6,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -67,13 +69,100 @@ func (o *Operator) ExecuteRunbook(actionType string, target string, parameters m
 
 	switch actionType {
 	case "ROLLBACK":
-		// Note: A true k8s rollback modifies the ReplicaSet annotations or Deployment spec.
-		// For simplicity, we'll fetch the deployment and log it, simulating the rollout undo.
-		_, err := deploymentsClient.Get(ctx, target, metav1.GetOptions{})
+		// This previously fetched the deployment, logged "Successfully executed
+		// Rollback", and returned nil without changing anything — a fake success.
+		// This real implementation mirrors `kubectl rollout undo`: find the
+		// ReplicaSet for the previous revision and restore its pod template.
+		deployment, err := deploymentsClient.Get(ctx, target, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to get deployment %s: %w", target, err)
 		}
-		log.Printf("[K8s Operator] Successfully executed Rollback for %s", target)
+
+		selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+		if err != nil {
+			return fmt.Errorf("invalid selector on deployment %s: %w", target, err)
+		}
+
+		rsList, err := o.clientset.AppsV1().ReplicaSets(o.namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: selector.String(),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to list replicasets for %s: %w", target, err)
+		}
+
+		type revisionedRS struct {
+			rs       appsv1.ReplicaSet
+			revision int64
+		}
+		var candidates []revisionedRS
+		for _, rs := range rsList.Items {
+			owned := false
+			for _, ref := range rs.OwnerReferences {
+				if ref.Kind == "Deployment" && ref.Name == deployment.Name && ref.UID == deployment.UID {
+					owned = true
+					break
+				}
+			}
+			if !owned {
+				continue
+			}
+			revStr, ok := rs.Annotations["deployment.kubernetes.io/revision"]
+			if !ok {
+				continue
+			}
+			rev, err := strconv.ParseInt(revStr, 10, 64)
+			if err != nil {
+				continue
+			}
+			candidates = append(candidates, revisionedRS{rs: rs, revision: rev})
+		}
+		if len(candidates) == 0 {
+			return fmt.Errorf("no revision history found for deployment %s — nothing to roll back to", target)
+		}
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].revision > candidates[j].revision })
+
+		var chosen *revisionedRS
+		if toRev := parameters["revision"]; toRev != "" {
+			// Explicit target revision — parity with `kubectl rollout undo --to-revision=N`.
+			wantRev, err := strconv.ParseInt(toRev, 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid revision parameter %q: %w", toRev, err)
+			}
+			for i := range candidates {
+				if candidates[i].revision == wantRev {
+					chosen = &candidates[i]
+					break
+				}
+			}
+			if chosen == nil {
+				return fmt.Errorf("revision %d not found in history for %s", wantRev, target)
+			}
+		} else {
+			// Default: the most recent revision that isn't the deployment's
+			// current one — i.e. "undo the last change".
+			currentRev, _ := strconv.ParseInt(deployment.Annotations["deployment.kubernetes.io/revision"], 10, 64)
+			for i := range candidates {
+				if candidates[i].revision != currentRev {
+					chosen = &candidates[i]
+					break
+				}
+			}
+			if chosen == nil {
+				return fmt.Errorf("no earlier revision found for deployment %s — already at oldest known revision", target)
+			}
+		}
+
+		deployment.Spec.Template = chosen.rs.Spec.Template
+		if deployment.Annotations == nil {
+			deployment.Annotations = make(map[string]string)
+		}
+		deployment.Annotations["pulsetrace.io/rolled-back-from-revision"] = deployment.Annotations["deployment.kubernetes.io/revision"]
+
+		if _, err := deploymentsClient.Update(ctx, deployment, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("failed to apply rollback for %s: %w", target, err)
+		}
+
+		log.Printf("[K8s Operator] Successfully rolled back %s to revision %d", target, chosen.revision)
 		return nil
 
 	case "RESTART_PODS":

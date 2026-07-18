@@ -69,7 +69,7 @@ func (h *SyntheticsHandler) initClickHouseTable() {
 	`
 	
 	req, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(query))
-	req.SetBasicAuth("pulsetrace", "pulsetrace_secret")
+	req.SetBasicAuth(clickhouseUser, clickhousePassword)
 	
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
@@ -185,7 +185,7 @@ func (h *SyntheticsHandler) flushResults(results []SyntheticResult) {
 	}
 
 	req, _ := http.NewRequest("POST", h.ClickHouseURL, &insertQuery)
-	req.SetBasicAuth("pulsetrace", "pulsetrace_secret")
+	req.SetBasicAuth(clickhouseUser, clickhousePassword)
 	
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
@@ -219,7 +219,7 @@ func (h *SyntheticsHandler) GetResults(w http.ResponseWriter, r *http.Request) {
 	`
 
 	req, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(query))
-	req.SetBasicAuth("pulsetrace", "pulsetrace_secret")
+	req.SetBasicAuth(clickhouseUser, clickhousePassword)
 	
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)

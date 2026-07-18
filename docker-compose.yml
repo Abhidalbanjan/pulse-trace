@@ -68,6 +68,9 @@ services:
     image: clickhouse/clickhouse-server:24.3-alpine
     container_name: pulsetrace-clickhouse
     restart: unless-stopped
+    depends_on:
+      minio-mc:
+        condition: service_completed_successfully
     ports:
       - "8123:8123"
     environment:
@@ -75,8 +78,10 @@ services:
       CLICKHOUSE_USER: pulsetrace
       CLICKHOUSE_PASSWORD: pulsetrace_secret
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - ./clickhouse/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -101,6 +106,12 @@ services:
       - ./gateway-service/migrations/001_create_auth_tables.sql:/docker-entrypoint-initdb.d/005_create_auth_tables.sql
       - ./correlation-service/migrations/003_create_slo_tables.sql:/docker-entrypoint-initdb.d/006_create_slo_tables.sql
       - ./correlation-service/migrations/004_add_tenant_fields.sql:/docker-entrypoint-initdb.d/007_add_tenant_fields.sql
+      - ./gateway-service/migrations/002_create_error_tracking.sql:/docker-entrypoint-initdb.d/008_create_error_tracking.sql
+      - ./gateway-service/migrations/003_create_deployments.sql:/docker-entrypoint-initdb.d/009_create_deployments.sql
+      - ./gateway-service/migrations/004_create_rbac_abac.sql:/docker-entrypoint-initdb.d/010_create_rbac_abac.sql
+      - ./gateway-service/migrations/005_scope_editor_permissions.sql:/docker-entrypoint-initdb.d/011_scope_editor_permissions.sql
+      - ./gateway-service/migrations/006_create_audit_log.sql:/docker-entrypoint-initdb.d/012_create_audit_log.sql
+      - ./gateway-service/migrations/007_create_rate_limit_rules.sql:/docker-entrypoint-initdb.d/013_create_rate_limit_rules.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pulsetrace"]
       interval: 5s
@@ -163,6 +174,8 @@ services:
     container_name: pulsetrace-otel-collector
     restart: unless-stopped
     command: ["--config=/etc/otel-collector-config.yaml"]
+    environment:
+      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-development}
     volumes:
       - ./otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml
     ports:
@@ -171,6 +184,8 @@ services:
       - "8088:8088" # Splunk HEC receiver
     depends_on:
       jaeger:
+        condition: service_healthy
+      quickwit:
         condition: service_healthy
 
   # ── Prometheus ───────────────────────────────────────────────────────────────
@@ -218,7 +233,9 @@ services:
       DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
       KAFKA_BROKERS: kafka:29092
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      SERVICE_VERSION: ${SERVICE_VERSION:-dev}
       QUICKWIT_URL: http://quickwit:7280
+      TOPOLOGY_SERVICE_URL: http://topology-service:8084
       PORT: "8081"
     ports:
       - "8081:8081"
@@ -242,6 +259,8 @@ services:
       KAFKA_BROKERS: kafka:29092
       KAFKA_GROUP_ID: alert-service
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      SERVICE_VERSION: ${SERVICE_VERSION:-dev}
+      TOPOLOGY_SERVICE_URL: http://topology-service:8084
       PORT: "8082"
     ports:
       - "8082:8082"
@@ -266,10 +285,17 @@ services:
       KAFKA_GROUP_ID: correlation-service
       RABBITMQ_URL: amqp://pulsetrace:pulsetrace_secret@rabbitmq:5672/
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      SERVICE_VERSION: ${SERVICE_VERSION:-dev}
       QUICKWIT_URL: http://quickwit:7280
       HYBRID_MODE: "true"
       CONTROL_PLANE_URL: http://gateway:8080/api/v1/control-plane/incidents
       PORT: "8083"
+      # Used by the anomaly detector to poll real per-service RED metrics directly
+      # from ClickHouse (queried directly rather than via gateway's authenticated
+      # /api/v1/services route — see anomaly_detector.go for why).
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-pulsetrace}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-pulsetrace_secret}
       # LangChain Go Multi-LLM support config
       LLM_PROVIDER: ${LLM_PROVIDER:-}
       LLM_MODEL: ${LLM_MODEL:-}
@@ -280,6 +306,9 @@ services:
       CAUSAL_MODEL: ${CAUSAL_MODEL:-}
       CAUSAL_DISABLED: ${CAUSAL_DISABLED:-}
       TOPOLOGY_SERVICE_URL: http://topology-service:8084
+      # DEV DEFAULT ONLY — same fallback value on both correlation-service and
+      # topology-service so they interoperate out of the box locally. Override
+      # PLAYBOOK_HMAC_SECRET in any shared/staging/production deployment; see .env.example.
       PLAYBOOK_HMAC_SECRET: ${PLAYBOOK_HMAC_SECRET:-pulsetrace_secure_playbook_hmac_secret}
     ports:
       - "8083:8083"
@@ -293,6 +322,8 @@ services:
       otel-collector:
         condition: service_started
       redis:
+        condition: service_healthy
+      clickhouse:
         condition: service_healthy
 
   # ── Topology Service ──────────────────────────────────────────────────────────
@@ -309,8 +340,12 @@ services:
       KAFKA_BROKERS: kafka:29092
       KAFKA_GROUP_ID: topology-service
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      SERVICE_VERSION: ${SERVICE_VERSION:-dev}
       PORT: "8084"
       REDIS_ADDR: redis:6379
+      # DEV DEFAULT ONLY — same fallback value on both correlation-service and
+      # topology-service so they interoperate out of the box locally. Override
+      # PLAYBOOK_HMAC_SECRET in any shared/staging/production deployment; see .env.example.
       PLAYBOOK_HMAC_SECRET: ${PLAYBOOK_HMAC_SECRET:-pulsetrace_secure_playbook_hmac_secret}
       DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
     ports:
@@ -337,9 +372,17 @@ services:
     environment:
       RABBITMQ_URL: amqp://pulsetrace:pulsetrace_secret@rabbitmq:5672/
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
-      # Optional: set these to activate real channels
-      # SLACK_WEBHOOK_URL: https://hooks.slack.com/services/...
-      # SMTP_HOST: smtp.example.com
+      SERVICE_VERSION: ${SERVICE_VERSION:-dev}
+      TOPOLOGY_SERVICE_URL: http://topology-service:8084
+      # Optional: set these in your .env to activate real delivery channels.
+      # Unset = that channel is skipped (log channel always fires regardless).
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-alerts@pulsetrace.local}
+      SMTP_TO: ${SMTP_TO:-}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -351,6 +394,11 @@ services:
     image: timberio/vector:0.38.0-alpine
     container_name: pulsetrace-vector
     restart: unless-stopped
+    # The image's default entrypoint loads /etc/vector/vector.yaml regardless of
+    # what's bind-mounted at vector.toml, silently falling back to its own baked-in
+    # demo config (a demo_logs source generating fake syslog messages) instead of
+    # our http_server source. Force it to load our config explicitly.
+    command: ["--config", "/etc/vector/vector.toml"]
     ports:
       - "8383:8383"
     volumes:
@@ -372,8 +420,15 @@ services:
       TOPOLOGY_SERVICE_URL: http://topology-service:8084
       DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      SERVICE_VERSION: ${SERVICE_VERSION:-dev}
       OTEL_COLLECTOR_HTTP_URL: http://otel-collector:4318
+      REDIS_ADDR: redis:6379
       PORT: "8080"
+      CLICKHOUSE_URL: http://clickhouse:8123
+      # Must match the clickhouse container's own CLICKHOUSE_USER/CLICKHOUSE_PASSWORD above.
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-pulsetrace}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-pulsetrace_secret}
+      JWT_SECRET: ${JWT_SECRET:-}
     ports:
       - "8080:8080"
       - "4317:4317"
@@ -384,6 +439,7 @@ services:
       - correlation-service
       - topology-service
       - otel-collector
+      - redis
 
 
   # ── MinIO (S3 Cold Tier Emulator) ────────────────────────────────────────────
@@ -416,6 +472,7 @@ services:
       /bin/sh -c "
       mc alias set localminio http://minio:9000 minioadmin minioadmin;
       mc mb --ignore-existing localminio/quickwit-indexes;
+      mc mb --ignore-existing localminio/clickhouse-cold;
       exit 0;
       "
 
@@ -484,10 +541,9 @@ services:
       /bin/sh -c "
       echo 'Creating Quickwit indexes...';
       quickwit index create --index-config /config/logs-index.yaml --endpoint http://quickwit:7280 || true;
-      quickwit index create --index-config /config/traces-index.yaml --endpoint http://quickwit:7280 || true;
       echo 'Attaching Kafka source for logs...';
       quickwit source create --index pulsetrace-logs --source-config /config/kafka-source.yaml --endpoint http://quickwit:7280 || true;
-      echo 'Quickwit setup complete.';
+      echo 'Quickwit setup complete. Traces use native OTLP ingestion (otel-traces-v0_7 index, auto-created by the collector).';
       "
 
   # ── Pyroscope (Continuous Profiling) ─────────────────────────────────────────

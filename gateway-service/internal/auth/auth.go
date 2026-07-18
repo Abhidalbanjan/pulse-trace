@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log"
@@ -18,7 +20,27 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-var jwtSecret = []byte(getEnv("JWT_SECRET", "pulsetrace-super-secret-key-change-in-prod"))
+var jwtSecret = loadJWTSecret()
+
+// loadJWTSecret requires JWT_SECRET in production. If it isn't set, we do NOT
+// fall back to a guessable hardcoded string (that string would be visible to
+// anyone who reads this public repo, letting them forge admin tokens against
+// any deployment that forgot to override it). Instead we generate a random
+// per-process secret so local dev still works out of the box — the tradeoff
+// is that every process restart invalidates existing sessions, which is a
+// strong signal to set JWT_SECRET before this ever runs somewhere real.
+func loadJWTSecret() []byte {
+	if v := os.Getenv("JWT_SECRET"); v != "" {
+		return []byte(v)
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		log.Fatalf("auth: failed to generate fallback JWT secret: %v", err)
+	}
+	log.Println("auth: WARNING — JWT_SECRET is not set. Using a random per-process secret; " +
+		"all sessions will be invalidated on restart. Set JWT_SECRET before deploying anywhere real.")
+	return secret
+}
 
 type AuthHandler struct {
 	db *sql.DB
@@ -43,6 +65,18 @@ func NewAuthHandler() (*AuthHandler, error) {
 
 func (h *AuthHandler) GetDB() *sql.DB {
 	return h.db
+}
+
+// roleExists checks the dynamic roles table (see rbac.go) rather than a
+// hardcoded admin/viewer list, so newly-created custom roles are assignable.
+func (h *AuthHandler) roleExists(role string) bool {
+	var exists bool
+	err := h.db.QueryRow("SELECT EXISTS(SELECT 1 FROM roles WHERE name = $1)", role).Scan(&exists)
+	if err != nil {
+		log.Printf("auth: failed to check role existence: %v", err)
+		return false
+	}
+	return exists
 }
 
 type Credentials struct {
@@ -116,13 +150,17 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 // AuthMiddleware validates the JWT token
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow login, registration, OTLP, control plane, and log ingestion (POST) endpoints without token
+		// Allow login, registration, OTLP, control plane, log ingestion (POST), and RUM
+		// ingestion (POST) endpoints without token. RUM specifically must stay
+		// unauthenticated: it captures page views/errors/web-vitals for every visitor,
+		// including anonymous sessions on public pages like /login before sign-in.
 		isLogIngest := r.URL.Path == "/api/v1/logs" && r.Method == http.MethodPost
-		if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/api/v1/auth/register" || r.URL.Path == "/healthz" || 
+		isRUMIngest := r.URL.Path == "/api/v1/rum/ingest" && r.Method == http.MethodPost
+		if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/api/v1/auth/register" || r.URL.Path == "/healthz" ||
 			r.URL.Path == "/api/v1/auth/sso/login" || r.URL.Path == "/api/v1/auth/sso/callback" ||
 			strings.HasPrefix(r.URL.Path, "/v1/traces") || strings.HasPrefix(r.URL.Path, "/v1/metrics") || strings.HasPrefix(r.URL.Path, "/v1/logs") ||
-			strings.HasPrefix(r.URL.Path, "/api/v1/topology/agent-config") || r.URL.Path == "/api/v1/control-plane/incidents" || isLogIngest {
-			
+			strings.HasPrefix(r.URL.Path, "/api/v1/topology/agent-config") || r.URL.Path == "/api/v1/control-plane/incidents" || isLogIngest || isRUMIngest {
+
 			// For unauthenticated telemetry endpoints, propagate tenant headers if provided in request
 			if isLogIngest || strings.HasPrefix(r.URL.Path, "/v1/traces") || strings.HasPrefix(r.URL.Path, "/v1/metrics") || strings.HasPrefix(r.URL.Path, "/v1/logs") {
 				tenantID := r.Header.Get("X-Tenant-ID")
@@ -136,7 +174,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 				r.Header.Set("X-Tenant-ID", tenantID)
 				r.Header.Set("X-Tenant-Tier", tenantTier)
 			}
-			
+
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -174,23 +212,6 @@ func AuthMiddleware(next http.Handler) http.Handler {
 				r.Header.Set("X-Tenant-Tier", tenantTier)
 			} else {
 				r.Header.Set("X-Tenant-Tier", "standard")
-			}
-		}
-
-		next.ServeHTTP(w, r)
-	})
-}
-
-// RBACMiddleware ensures only admins can access sensitive endpoints
-func RBACMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		role := r.Header.Get("X-User-Role")
-		
-		// Endpoints that require 'admin' role
-		if strings.HasPrefix(r.URL.Path, "/api/v1/admin") || strings.HasPrefix(r.URL.Path, "/api/v1/settings") {
-			if role != "admin" {
-				http.Error(w, "Forbidden: Admin access required", http.StatusForbidden)
-				return
 			}
 		}
 
@@ -256,16 +277,22 @@ func (h *AuthHandler) UpdateUserRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Role != "admin" && req.Role != "viewer" {
+	if !h.roleExists(req.Role) {
 		http.Error(w, "Invalid role", http.StatusBadRequest)
 		return
 	}
+
+	var previousRole string
+	_ = h.db.QueryRow("SELECT role FROM users WHERE id = $1", userID).Scan(&previousRole)
 
 	_, err := h.db.Exec("UPDATE users SET role = $1 WHERE id = $2", req.Role, userID)
 	if err != nil {
 		http.Error(w, "Failed to update role", http.StatusInternalServerError)
 		return
 	}
+
+	WriteAudit(h.db, actorFromRequest(r), "update", "user_role", userID,
+		map[string]string{"role": previousRole}, map[string]string{"role": req.Role})
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
@@ -307,6 +334,8 @@ func (h *AuthHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	WriteAudit(h.db, actorFromRequest(r), "delete", "user", userID, map[string]string{"username": username}, nil)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "User deleted successfully"})
 }
@@ -335,7 +364,7 @@ func (h *AuthHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Role != "admin" && req.Role != "viewer" {
+	if !h.roleExists(req.Role) {
 		http.Error(w, "Invalid role", http.StatusBadRequest)
 		return
 	}
@@ -366,6 +395,10 @@ func (h *AuthHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	// Never write the password (or its hash) to the audit trail.
+	WriteAudit(h.db, actorFromRequest(r), "create", "user", req.Username,
+		nil, map[string]string{"username": req.Username, "role": req.Role, "tenant_id": tenantID, "tier": tier})
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -444,7 +477,21 @@ var googleOauthConfig = &oauth2.Config{
 	Endpoint:     google.Endpoint,
 }
 
-const oauthStateString = "pseudo-random-state" // In production, generate this per-request
+const oauthStateCookie = "pt_oauth_state"
+
+// generateOAuthState returns a fresh random CSRF token for a single OAuth
+// round-trip. Previously this was a hardcoded constant string, which meant
+// the "state" check never actually protected against CSRF — anyone could
+// replay the known value. State is now generated per-login and verified
+// against a short-lived cookie on callback (see SSOCallback), so it works
+// correctly even with multiple gateway replicas and no server-side session store.
+func generateOAuthState() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
+}
 
 // SSOLogin handles GET /api/v1/auth/sso/login
 func (h *AuthHandler) SSOLogin(w http.ResponseWriter, r *http.Request) {
@@ -452,7 +499,21 @@ func (h *AuthHandler) SSOLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "SSO is not configured on this server.", http.StatusServiceUnavailable)
 		return
 	}
-	url := googleOauthConfig.AuthCodeURL(oauthStateString)
+	state, err := generateOAuthState()
+	if err != nil {
+		log.Printf("auth: failed to generate OAuth state: %v", err)
+		http.Error(w, "Failed to start SSO login", http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthStateCookie,
+		Value:    state,
+		Path:     "/",
+		MaxAge:   300, // 5 minutes — plenty for a login redirect round trip
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	url := googleOauthConfig.AuthCodeURL(state)
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
 
@@ -467,10 +528,13 @@ func (h *AuthHandler) GetSSOConfig(w http.ResponseWriter, r *http.Request) {
 // SSOCallback handles GET /api/v1/auth/sso/callback
 func (h *AuthHandler) SSOCallback(w http.ResponseWriter, r *http.Request) {
 	state := r.FormValue("state")
-	if state != oauthStateString {
+	cookie, err := r.Cookie(oauthStateCookie)
+	if state == "" || err != nil || cookie.Value != state {
 		http.Error(w, "Invalid OAuth state", http.StatusBadRequest)
 		return
 	}
+	// Consume the state cookie so it can't be replayed for a second callback.
+	http.SetCookie(w, &http.Cookie{Name: oauthStateCookie, Value: "", Path: "/", MaxAge: -1})
 
 	code := r.FormValue("code")
 	if code == "" {
@@ -480,7 +544,7 @@ func (h *AuthHandler) SSOCallback(w http.ResponseWriter, r *http.Request) {
 
 	tokenOAuth, err := googleOauthConfig.Exchange(context.Background(), code)
 	if err != nil {
-		// Mock fallback for local dev when real client ID/Secret isn't provided, 
+		// Mock fallback for local dev when real client ID/Secret isn't provided,
 		// but structure is fully production ready.
 		log.Printf("OAuth exchange failed (using fallback for local dev): %v", err)
 	}
@@ -527,8 +591,14 @@ func (h *AuthHandler) SSOCallback(w http.ResponseWriter, r *http.Request) {
 			tenantID = "default"
 			tier = "standard"
 			role = "viewer"
-			// Create a random dummy password hash since they authenticate via SSO
-			dummyHash, _ := bcrypt.GenerateFromPassword([]byte(oauthStateString+email), bcrypt.DefaultCost)
+			// Create a random dummy password hash since they authenticate via SSO —
+			// this account should never be logged into via the password flow.
+			dummySecret, err := generateOAuthState() // reuse: 32 random bytes, base64-encoded
+			if err != nil {
+				http.Error(w, "Failed to auto-provision SSO user", http.StatusInternalServerError)
+				return
+			}
+			dummyHash, _ := bcrypt.GenerateFromPassword([]byte(dummySecret+email), bcrypt.DefaultCost)
 			_, err = h.db.Exec("INSERT INTO users (username, password_hash, role, tenant_id, tier) VALUES ($1, $2, $3, $4, $5)", email, string(dummyHash), role, tenantID, tier)
 			if err != nil {
 				http.Error(w, "Failed to auto-provision SSO user", http.StatusInternalServerError)

@@ -22,6 +22,8 @@ type RUMEvent struct {
 	MetricValue float64 `json:"metric_value,omitempty"`
 	ErrorMsg    string  `json:"error_msg,omitempty"`
 	ErrorStack  string  `json:"error_stack,omitempty"`
+	TraceID     string  `json:"trace_id,omitempty"` // W3C trace id shared with backend API calls made during this page view
+	SpanID      string  `json:"span_id,omitempty"`
 }
 
 func NewRUMHandler(clickhouseURL string) *RUMHandler {
@@ -41,15 +43,17 @@ func (h *RUMHandler) initTable() {
 			MetricName String,
 			MetricValue Float64,
 			ErrorMsg String,
-			ErrorStack String
+			ErrorStack String,
+			TraceID String DEFAULT '',
+			SpanID String DEFAULT ''
 		) ENGINE = MergeTree()
 		ORDER BY (Timestamp, Type)
 		TTL toDateTime(Timestamp) + INTERVAL 7 DAY;
 	`
-	
+
 	req, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(query))
-	req.SetBasicAuth("pulsetrace", "pulsetrace_secret")
-	
+	req.SetBasicAuth(clickhouseUser, clickhousePassword)
+
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -57,12 +61,31 @@ func (h *RUMHandler) initTable() {
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		log.Printf("[RUMHandler] WARNING: ClickHouse table creation returned %d: %s", resp.StatusCode, string(body))
 	} else {
 		log.Println("[RUMHandler] ClickHouse rum_events table initialized.")
+	}
+
+	// Table may already exist from before TraceID/SpanID were added - add them if missing.
+	alterQuery := `
+		ALTER TABLE pulsetrace.rum_events
+			ADD COLUMN IF NOT EXISTS TraceID String DEFAULT '',
+			ADD COLUMN IF NOT EXISTS SpanID String DEFAULT ''
+	`
+	alterReq, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(alterQuery))
+	alterReq.SetBasicAuth(clickhouseUser, clickhousePassword)
+	alterResp, err := client.Do(alterReq)
+	if err != nil {
+		log.Printf("[RUMHandler] WARNING: Failed to alter rum_events table: %v", err)
+		return
+	}
+	defer alterResp.Body.Close()
+	if alterResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(alterResp.Body)
+		log.Printf("[RUMHandler] WARNING: ClickHouse table alter returned %d: %s", alterResp.StatusCode, string(body))
 	}
 }
 
@@ -81,7 +104,7 @@ func (h *RUMHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 
 	// Batch insert into ClickHouse
 	var insertQuery bytes.Buffer
-	insertQuery.WriteString("INSERT INTO pulsetrace.rum_events (SessionID, Type, Path, UserAgent, MetricName, MetricValue, ErrorMsg, ErrorStack) FORMAT JSONEachRow\n")
+	insertQuery.WriteString("INSERT INTO pulsetrace.rum_events (SessionID, Type, Path, UserAgent, MetricName, MetricValue, ErrorMsg, ErrorStack, TraceID, SpanID) FORMAT JSONEachRow\n")
 	
 	for _, ev := range events {
 		b, _ := json.Marshal(ev)
@@ -90,7 +113,7 @@ func (h *RUMHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req, _ := http.NewRequest("POST", h.ClickHouseURL, &insertQuery)
-	req.SetBasicAuth("pulsetrace", "pulsetrace_secret")
+	req.SetBasicAuth(clickhouseUser, clickhousePassword)
 	
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
@@ -129,7 +152,7 @@ func (h *RUMHandler) GetAnalytics(w http.ResponseWriter, r *http.Request) {
 	`
 
 	req, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(query))
-	req.SetBasicAuth("pulsetrace", "pulsetrace_secret")
+	req.SetBasicAuth(clickhouseUser, clickhousePassword)
 	
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
@@ -151,12 +174,13 @@ func (h *RUMHandler) GetErrors(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	query := `
-		SELECT 
+		SELECT
 			Timestamp as timestamp,
 			Path as path,
 			ErrorMsg as error_msg,
 			ErrorStack as error_stack,
-			UserAgent as user_agent
+			UserAgent as user_agent,
+			TraceID as trace_id
 		FROM pulsetrace.rum_events
 		WHERE Type = 'error'
 		ORDER BY Timestamp DESC
@@ -165,7 +189,7 @@ func (h *RUMHandler) GetErrors(w http.ResponseWriter, r *http.Request) {
 	`
 
 	req, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(query))
-	req.SetBasicAuth("pulsetrace", "pulsetrace_secret")
+	req.SetBasicAuth(clickhouseUser, clickhousePassword)
 	
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)

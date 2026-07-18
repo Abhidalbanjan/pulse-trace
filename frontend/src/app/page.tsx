@@ -2,6 +2,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { fetchWithAuth } from '@/lib/api';
+import { useTheme } from '@/context/ThemeContext';
 
 interface ChatMessage {
   id: string;
@@ -16,11 +17,17 @@ interface ChatMessage {
 }
 
 export default function ConversationalSRE() {
+  const { tokens: t } = useTheme();
+  // Previously opened with a hardcoded fake finding ("I noticed a 15% increase
+  // in error rates on cart-service") regardless of what was actually happening
+  // in the cluster — anyone testing this would eventually notice the number
+  // never changes. The opener now makes no unverified claims; real findings
+  // only appear once the backend actually returns them via handleSend.
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: '1',
       sender: 'ai',
-      text: 'Hello. I am PulseTrace, your Autonomous SRE. The cluster is currently healthy, but I noticed a 15% increase in error rates on the `cart-service` over the last hour. How can I help you today?'
+      text: 'Hello. I am PulseTrace, your Autonomous SRE. Ask me about a service, an incident, or tell me what to fix.'
     }
   ]);
   const [inputValue, setInputValue] = useState('');
@@ -71,16 +78,24 @@ export default function ConversationalSRE() {
           onExecute: async () => {
              alert(`Executing ${data.actionCard.type} on ${data.actionCard.target}...`);
              try {
-                // In a full production app, this would hit the action-service
                 const actRes = await fetchWithAuth('/api/v1/action', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify(data.actionCard)
                 });
-                if (actRes.ok) alert('Action executed successfully by PulseTrace Operator.');
-                else alert('Action failed.');
+                if (actRes.ok) {
+                  alert('Action executed successfully by PulseTrace Operator.');
+                } else {
+                  // Surface the real failure reason instead of a generic message.
+                  const detail = await actRes.text().catch(() => '');
+                  alert(`Action failed (${actRes.status}).${detail ? ' ' + detail : ''}`);
+                }
              } catch (e) {
-                alert('Action executed successfully (Simulated execution).');
+                // This previously reported fake success on a network/request
+                // failure — the operator would believe an action ran when it
+                // never reached the backend at all. Report the real failure instead.
+                console.error('action execution failed:', e);
+                alert(`Action failed: could not reach PulseTrace Operator (${e instanceof Error ? e.message : 'unknown error'}).`);
              }
           }
         };
@@ -99,99 +114,146 @@ export default function ConversationalSRE() {
     }
   };
 
+  const suggestionChips = [
+    'Rollback gateway-service',
+    'Restart postgres connection pool',
+    'Show me slow queries',
+  ];
+
+  const sendSuggestion = (text: string) => {
+    setInputValue(text);
+  };
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 120px)', maxWidth: '1000px', margin: '0 auto', width: '100%' }}>
-      
+    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 120px)', maxWidth: '880px', margin: '0 auto', width: '100%' }}>
+
       {/* Header */}
       <div style={{ marginBottom: '24px', textAlign: 'center' }}>
-        <h2 style={{ fontSize: '32px', fontWeight: 700, marginBottom: '8px' }} className="text-gradient">PulseTrace Autonomous SRE</h2>
-        <p style={{ color: 'var(--text-secondary)' }}>Don't look at charts. Ask questions and execute fixes.</p>
+        <h1 style={{
+          fontSize: '34px',
+          fontWeight: 800,
+          margin: '4px 0 8px',
+          letterSpacing: '-0.01em',
+          background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
+          WebkitBackgroundClip: 'text',
+          WebkitTextFillColor: 'transparent',
+        }}>PulseTrace Autonomous SRE</h1>
+        <p style={{ color: t.text2, fontSize: '15px' }}>Don&apos;t look at charts. Ask questions and execute fixes.</p>
       </div>
 
       {/* Chat Area */}
-      <div className="glass-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', padding: 0 }}>
-        
+      <div style={{
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        borderRadius: '24px',
+        background: t.panelBg,
+        border: `1px solid ${t.panelBorder}`,
+        borderTop: `1px solid ${t.panelTop}`,
+        backdropFilter: 'blur(28px) saturate(180%)',
+        WebkitBackdropFilter: 'blur(28px) saturate(180%)',
+        boxShadow: t.shadow,
+      }}>
+
         {/* Message Feed */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '32px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
-          {messages.map(msg => (
-            <div key={msg.id} style={{ display: 'flex', justifyContent: msg.sender === 'user' ? 'flex-end' : 'flex-start' }}>
-              
-              <div style={{ 
-                maxWidth: '75%', 
-                display: 'flex', 
-                gap: '16px',
-                alignItems: 'flex-start',
-                flexDirection: msg.sender === 'user' ? 'row-reverse' : 'row'
-              }}>
-                {/* Avatar */}
-                <div style={{ 
-                  width: '36px', 
-                  height: '36px', 
-                  borderRadius: '50%', 
-                  background: msg.sender === 'ai' ? 'var(--accent-purple)' : 'rgba(255,255,255,0.1)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: '18px',
-                  flexShrink: 0
-                }}>
-                  {msg.sender === 'ai' ? '✨' : 'U'}
-                </div>
+          {messages.map(msg => {
+            const isUser = msg.sender === 'user';
+            return (
+              <div key={msg.id} style={{ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start' }}>
 
-                {/* Message Bubble */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', alignItems: msg.sender === 'user' ? 'flex-end' : 'flex-start' }}>
-                  <div style={{ 
-                    background: msg.sender === 'user' ? 'var(--accent-blue)' : 'rgba(255,255,255,0.05)',
-                    padding: '16px 20px',
-                    borderRadius: '16px',
-                    borderTopLeftRadius: msg.sender === 'ai' ? '4px' : '16px',
-                    borderTopRightRadius: msg.sender === 'user' ? '4px' : '16px',
-                    lineHeight: '1.6',
+                <div style={{
+                  maxWidth: '75%',
+                  display: 'flex',
+                  gap: '14px',
+                  alignItems: 'flex-start',
+                  flexDirection: isUser ? 'row-reverse' : 'row'
+                }}>
+                  {/* Avatar */}
+                  <div style={{
+                    width: '34px',
+                    height: '34px',
+                    borderRadius: '50%',
+                    background: isUser ? t.accent : `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
                     fontSize: '15px',
-                    border: msg.sender === 'ai' ? '1px solid var(--border-color)' : 'none'
+                    fontWeight: 700,
+                    color: '#fff',
+                    flexShrink: 0
                   }}>
-                    {msg.text}
+                    {isUser ? 'U' : '✦'}
                   </div>
 
-                  {/* Action Card */}
-                  {msg.actionCard && (
-                    <div style={{ 
-                      background: 'rgba(239, 68, 68, 0.1)', 
-                      border: '1px solid rgba(239, 68, 68, 0.3)',
-                      padding: '20px',
-                      borderRadius: '12px',
-                      width: '100%',
-                      boxShadow: '0 8px 32px rgba(239, 68, 68, 0.1)'
+                  {/* Message Bubble */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', alignItems: isUser ? 'flex-end' : 'flex-start' }}>
+                    <div style={{
+                      background: isUser ? t.accent : t.panelBg,
+                      color: isUser ? '#fff' : t.text1,
+                      padding: '15px 19px',
+                      borderRadius: '17px',
+                      borderTopLeftRadius: isUser ? '17px' : '5px',
+                      borderTopRightRadius: isUser ? '5px' : '17px',
+                      lineHeight: 1.6,
+                      fontSize: '14.5px',
+                      border: isUser ? 'none' : `1px solid ${t.panelBorder}`
                     }}>
-                      <h4 style={{ fontSize: '16px', fontWeight: 600, color: 'var(--status-red)', marginBottom: '8px' }}>⚡ {msg.actionCard.title}</h4>
-                      <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginBottom: '16px' }}>{msg.actionCard.description}</p>
-                      <button 
-                        onClick={msg.actionCard.onExecute}
-                        style={{ 
-                          background: 'var(--status-red)', 
-                          color: '#fff', 
-                          border: 'none', 
-                          padding: '10px 20px', 
-                          borderRadius: '8px', 
-                          fontWeight: 600, 
-                          cursor: 'pointer',
-                          width: '100%'
-                        }}
-                      >
-                        {msg.actionCard.actionLabel}
-                      </button>
+                      {msg.text}
                     </div>
-                  )}
-                </div>
 
+                    {/* Action Card */}
+                    {msg.actionCard && (
+                      <div style={{
+                        background: t.redSoft,
+                        border: `1px solid ${t.red}33`,
+                        padding: '20px',
+                        borderRadius: '16px',
+                        width: '100%',
+                      }}>
+                        <h4 style={{ fontSize: '15px', fontWeight: 700, color: t.red, marginBottom: '8px' }}>{msg.actionCard.title}</h4>
+                        <p style={{ color: t.text2, fontSize: '13.5px', lineHeight: 1.5, marginBottom: '16px' }}>{msg.actionCard.description}</p>
+                        <button
+                          onClick={msg.actionCard.onExecute}
+                          style={{
+                            background: t.red,
+                            color: '#fff',
+                            border: 'none',
+                            padding: '11px 20px',
+                            borderRadius: '10px',
+                            fontWeight: 600,
+                            fontSize: '13.5px',
+                            cursor: 'pointer',
+                            width: '100%'
+                          }}
+                        >
+                          {msg.actionCard.actionLabel}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           {isTyping && (
              <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
-                <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-                  <div style={{ width: '36px', height: '36px', borderRadius: '50%', background: 'var(--accent-purple)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px' }}>✨</div>
-                  <div style={{ color: 'var(--text-secondary)', fontStyle: 'italic', fontSize: '14px' }}>PulseTrace is thinking...</div>
+                <div style={{ display: 'flex', gap: '14px', alignItems: 'center' }}>
+                  <div style={{
+                    width: '34px',
+                    height: '34px',
+                    borderRadius: '50%',
+                    background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '15px',
+                    fontWeight: 700,
+                    color: '#fff'
+                  }}>✦</div>
+                  <div style={{ color: t.text2, fontStyle: 'italic', fontSize: '14px' }}>PulseTrace is thinking…</div>
                 </div>
              </div>
           )}
@@ -199,32 +261,60 @@ export default function ConversationalSRE() {
         </div>
 
         {/* Input Area */}
-        <div style={{ padding: '24px', borderTop: '1px solid var(--border-color)', background: 'rgba(0,0,0,0.2)' }}>
-          <form onSubmit={handleSend} style={{ display: 'flex', gap: '12px', position: 'relative' }}>
-            <input 
-              type="text" 
+        <div style={{ padding: '20px 24px', borderTop: `1px solid ${t.panelBorder}` }}>
+          <form onSubmit={handleSend} style={{ display: 'flex', gap: '12px' }}>
+            <input
+              type="text"
               value={inputValue}
               onChange={e => setInputValue(e.target.value)}
               placeholder="Ask a question or execute a runbook (e.g. 'Why is cart-service failing?')"
-              style={{ 
-                flex: 1, 
-                background: 'rgba(255,255,255,0.05)', 
-                border: '1px solid var(--border-color)', 
-                padding: '16px 24px', 
-                borderRadius: '128px',
-                color: '#fff',
-                fontSize: '15px',
+              style={{
+                flex: 1,
+                background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.6)',
+                border: `1px solid ${t.panelBorder}`,
+                padding: '15px 22px',
+                borderRadius: '100px',
+                color: t.text1,
+                fontSize: '14.5px',
                 outline: 'none'
               }}
             />
-            <button type="submit" disabled={!inputValue.trim() || isTyping} className="btn-primary" style={{ borderRadius: '128px', padding: '0 32px' }}>
+            <button
+              type="submit"
+              disabled={!inputValue.trim() || isTyping}
+              style={{
+                background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
+                color: '#fff',
+                border: 'none',
+                borderRadius: '100px',
+                padding: '0 32px',
+                fontWeight: 600,
+                fontSize: '14.5px',
+                cursor: (!inputValue.trim() || isTyping) ? 'not-allowed' : 'pointer',
+                opacity: (!inputValue.trim() || isTyping) ? 0.6 : 1,
+              }}
+            >
               Send
             </button>
           </form>
-          <div style={{ display: 'flex', gap: '12px', marginTop: '16px', justifyContent: 'center' }}>
-            <span style={{ fontSize: '12px', color: 'var(--text-secondary)', background: 'rgba(255,255,255,0.05)', padding: '4px 12px', borderRadius: '128px', cursor: 'pointer' }}>"Rollback gateway-service"</span>
-            <span style={{ fontSize: '12px', color: 'var(--text-secondary)', background: 'rgba(255,255,255,0.05)', padding: '4px 12px', borderRadius: '128px', cursor: 'pointer' }}>"Restart postgres connection pool"</span>
-            <span style={{ fontSize: '12px', color: 'var(--text-secondary)', background: 'rgba(255,255,255,0.05)', padding: '4px 12px', borderRadius: '128px', cursor: 'pointer' }}>"Show me slow queries"</span>
+          <div style={{ display: 'flex', gap: '12px', marginTop: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
+            {suggestionChips.map(chip => (
+              <span
+                key={chip}
+                onClick={() => sendSuggestion(chip)}
+                style={{
+                  fontSize: '12.5px',
+                  color: t.text2,
+                  background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.6)',
+                  border: `1px solid ${t.panelBorder}`,
+                  padding: '6px 14px',
+                  borderRadius: '100px',
+                  cursor: 'pointer'
+                }}
+              >
+                &quot;{chip}&quot;
+              </span>
+            ))}
           </div>
         </div>
 

@@ -65,6 +65,7 @@ func main() {
 	}
 	analyticsHandler := handler.NewAnalyticsHandler(clickhouseURL)
 	serviceHandler := handler.NewServiceHandler(clickhouseURL)
+	metricsHandler := handler.NewMetricsHandler(clickhouseURL)
 	errorTrackingHandler := handler.NewErrorTrackingHandler(clickhouseURL, authHandler.GetDB())
 	deploymentHandler := handler.NewDeploymentHandler(authHandler.GetDB())
 	rbacEngine := auth.NewRBACEngine(authHandler.GetDB())
@@ -169,6 +170,12 @@ func main() {
 	// Service Page APIs (powered by ClickHouse) — per-service and per-resource RED metrics
 	mux.HandleFunc("GET /api/v1/services", serviceHandler.ListServices)
 	mux.HandleFunc("GET /api/v1/services/{name}", serviceHandler.GetServiceDetail)
+
+	// Native Metrics APIs (powered by ClickHouse otel_metrics_* tables, populated
+	// by the collector's clickhouse/metrics exporter — see
+	// otel-collector/otel-collector-config.yaml)
+	mux.HandleFunc("GET /api/v1/metrics", metricsHandler.ListMetricNames)
+	mux.HandleFunc("GET /api/v1/metrics/query", metricsHandler.QueryMetric)
 
 	// Error Tracking APIs (ClickHouse grouping + Postgres triage workflow)
 	mux.HandleFunc("GET /api/v1/errors/groups", errorTrackingHandler.ListErrorGroups)

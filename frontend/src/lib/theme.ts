@@ -56,6 +56,7 @@ export const NAV_ICONS: Record<string, string> = {
   explorer: 'manage_search',
   traces: 'timeline',
   services: 'monitor_heart',
+  metrics: 'show_chart',
   errors: 'bug_report',
   profiler: 'speed',
   rum: 'groups',

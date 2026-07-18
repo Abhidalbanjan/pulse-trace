@@ -14,6 +14,36 @@ receivers:
   splunk_hec:
     endpoint: 0.0.0.0:8088
 
+  # Scrape Prometheus-format /metrics endpoints and convert them to OTLP so
+  # they land in the native metrics pillar (ClickHouse) alongside anything
+  # pushed via the otlp receiver above. Same target list as
+  # prometheus/prometheus.yml (kept in sync manually - two different tools
+  # scraping the same endpoints for two different purposes: Prometheus for
+  # internal self-monitoring/Grafana, this receiver for the product's own
+  # metrics UI). otel-collector:8888 is the collector's own self-telemetry
+  # and is always real; the per-service /metrics targets will start
+  # returning data once each service registers a promhttp handler (tracked
+  # separately - not yet done, see PulseTrace_Implementation_Roadmap.md).
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: otel-collector-self
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["localhost:8888"]
+        - job_name: gateway-service
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["gateway:8080"]
+        - job_name: log-service
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["log-service:8081"]
+        - job_name: alert-service
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["alert-service:8082"]
+
 processors:
   batch:
     timeout: 1s
@@ -83,9 +113,35 @@ exporters:
     tls:
       insecure: true
 
-  # Expose Prometheus metrics scraped from the collector itself.
+  # Expose Prometheus metrics scraped from the collector itself. Kept purely
+  # for PulseTrace's own internal service self-monitoring (Prometheus/Grafana
+  # in docker-compose.yml) — the product's own metrics UI reads from
+  # ClickHouse below instead, so this stays even though the frontend never
+  # links to it.
   prometheus:
     endpoint: "0.0.0.0:8889"
+
+  # Send metrics to ClickHouse so they're a native, queryable pillar of the
+  # product (gateway-service's MetricsHandler reads these tables) instead of
+  # only being visible via a bundled Grafana dashboard. Same instance/creds
+  # as the traces clickhouse exporter above; one table per OTLP metric type.
+  clickhouse/metrics:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s&compress=true
+    database: pulsetrace
+    username: pulsetrace
+    password: pulsetrace_secret
+    ttl_days: 30
+    metrics_tables:
+      gauge:
+        name: otel_metrics_gauge
+      sum:
+        name: otel_metrics_sum
+      summary:
+        name: otel_metrics_summary
+      histogram:
+        name: otel_metrics_histogram
+      exponential_histogram:
+        name: otel_metrics_exp_histogram
 
   # Debug logging — remove or set verbosity: basic in production.
   debug:
@@ -103,6 +159,6 @@ service:
       exporters: [otlp/jaeger, clickhouse, otlphttp/topology, otlp/quickwit]
 
     metrics:
-      receivers: [otlp]
+      receivers: [otlp, prometheus]
       processors: [batch]
-      exporters: [prometheus]
+      exporters: [prometheus, clickhouse/metrics]

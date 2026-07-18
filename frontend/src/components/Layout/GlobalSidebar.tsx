@@ -20,6 +20,7 @@ export function GlobalSidebar({ isCollapsed, onToggle }: { isCollapsed?: boolean
     { key: 'explorer', label: 'Log Explorer', path: '/explorer' },
     { key: 'traces', label: 'Distributed Traces', path: '/traces' },
     { key: 'services', label: 'Services', path: '/services' },
+    { key: 'metrics', label: 'Metrics', path: '/metrics' },
     { key: 'errors', label: 'Error Tracking', path: '/errors' },
     { key: 'profiler', label: 'Continuous Profiler', path: '/profiler' },
     { key: 'rum', label: 'Real User Monitoring', path: '/rum' },

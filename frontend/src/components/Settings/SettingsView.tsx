@@ -1,14 +1,22 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
+import { fetchWithAuth } from '@/lib/api';
+import { RolesPanel } from './RolesPanel';
+import { PoliciesPanel } from './PoliciesPanel';
+import { AuditLogPanel } from './AuditLogPanel';
+import { RateLimitsPanel } from './RateLimitsPanel';
+import { useTheme } from '@/context/ThemeContext';
 
 export function SettingsView() {
+  const { tokens: t } = useTheme();
   const [activeTab, setActiveTab] = useState('users');
   const [ssoClientId, setSsoClientId] = useState<string | null>(null);
   const [users, setUsers] = useState<any[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [inviteForm, setInviteForm] = useState({ username: '', password: '', role: 'viewer' });
+  const [availableRoles, setAvailableRoles] = useState<string[]>(['viewer', 'admin']);
   const [token, setToken] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,27 +35,23 @@ export function SettingsView() {
 
   useEffect(() => {
     if (activeTab === 'sso') {
-      import('@/lib/api').then(({ fetchWithAuth }) => {
-        fetchWithAuth('/api/v1/auth/sso/config')
-          .then(async res => {
-            if (!res.ok) throw new Error(await res.text());
-            return res.json();
-          })
-          .then(data => {
-            if (data && data.client_id) {
-              setSsoClientId(data.client_id);
-            }
-          })
-          .catch(err => console.error("Failed to fetch SSO config:", err.message || err));
-      });
+      fetchWithAuth('/api/v1/auth/sso/config')
+        .then(async res => {
+          if (!res.ok) throw new Error(await res.text());
+          return res.json();
+        })
+        .then(data => {
+          if (data && data.client_id) {
+            setSsoClientId(data.client_id);
+          }
+        })
+        .catch(err => console.error("Failed to fetch SSO config:", err.message || err));
     }
   }, [activeTab]);
 
   const fetchUsers = () => {
     setLoadingUsers(true);
-    fetch('http://localhost:8080/api/v1/admin/users', {
-      headers: { 'Authorization': `Bearer ${token}` }
-    })
+    fetchWithAuth('/api/v1/admin/users')
       .then(async res => {
         if (!res.ok) throw new Error(await res.text());
         return res.json();
@@ -66,21 +70,31 @@ export function SettingsView() {
       });
   };
 
+  const fetchAvailableRoles = () => {
+    fetchWithAuth('/api/v1/admin/roles')
+      .then(async res => {
+        if (!res.ok) throw new Error(await res.text());
+        return res.json();
+      })
+      .then(data => {
+        const names = (data.data || []).map((r: any) => r.name);
+        if (names.length > 0) setAvailableRoles(names);
+      })
+      .catch(err => console.error('Failed to load roles for invite form:', err));
+  };
+
   useEffect(() => {
     if (activeTab === 'users' && token) {
       fetchUsers();
+      fetchAvailableRoles();
     }
   }, [activeTab, token]);
 
   const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('http://localhost:8080/api/v1/admin/users', {
+      const res = await fetchWithAuth('/api/v1/admin/users', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
         body: JSON.stringify(inviteForm)
       });
       if (!res.ok) throw new Error(await res.text());
@@ -98,12 +112,9 @@ export function SettingsView() {
       return;
     }
     if (!confirm(`Are you sure you want to revoke access for ${username}?`)) return;
-    
+
     try {
-      const res = await fetch(`http://localhost:8080/api/v1/admin/users?id=${id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await fetchWithAuth(`/api/v1/admin/users?id=${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error(await res.text());
       fetchUsers();
     } catch (err: any) {
@@ -111,33 +122,65 @@ export function SettingsView() {
     }
   };
 
+  const primaryBtnStyle: React.CSSProperties = {
+    padding: '10px 18px',
+    borderRadius: '10px',
+    border: 'none',
+    background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
+    color: '#fff',
+    fontWeight: 600,
+    fontSize: '13px',
+    flexShrink: 0,
+    cursor: 'pointer',
+  };
+
+  const ghostRedBtnStyle: React.CSSProperties = {
+    padding: '6px 12px',
+    fontSize: '12px',
+    borderRadius: '8px',
+    border: '1px solid ' + t.red,
+    background: 'transparent',
+    color: t.red,
+    cursor: 'pointer',
+  };
+
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    padding: '10px 12px',
+    background: t.dark ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.7)',
+    border: '1px solid ' + t.panelBorder,
+    borderRadius: '8px',
+    color: t.text1,
+  };
+
   return (
-    <div style={{ display: 'flex', gap: '40px', padding: '40px', maxWidth: '1200px', margin: '0 auto', width: '100%', height: '100%', position: 'relative' }}>
-      
+    <div style={{ display: 'flex', gap: '28px', minWidth: 0, padding: '40px', maxWidth: '1200px', margin: '0 auto', width: '100%', height: '100%', position: 'relative' }}>
+
       {/* Invite Modal */}
       {showInviteModal && (
-        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.8)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ background: '#1e1e1e', padding: '32px', borderRadius: '16px', width: '400px', border: '1px solid var(--border-color)' }}>
-            <h3 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '24px' }}>Invite New User</h3>
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(4px)' }}>
+          <div style={{ background: t.panelBg, backdropFilter: 'blur(30px) saturate(180%)', padding: '32px', borderRadius: '20px', width: '400px', border: '1px solid ' + t.panelBorder, boxShadow: t.shadow }}>
+            <h3 style={{ fontSize: '19px', fontWeight: 700, margin: '0 0 24px', color: t.text1 }}>Invite New User</h3>
             <form onSubmit={handleInvite} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div>
-                <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px' }}>Email / Username</label>
-                <input type="text" required value={inviteForm.username} onChange={e => setInviteForm({...inviteForm, username: e.target.value})} style={{ width: '100%', padding: '12px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)', borderRadius: '8px', color: '#fff' }} />
+                <label style={{ display: 'block', fontSize: '13px', color: t.text2, marginBottom: '8px' }}>Email / Username</label>
+                <input type="text" required value={inviteForm.username} onChange={e => setInviteForm({...inviteForm, username: e.target.value})} style={inputStyle} />
               </div>
               <div>
-                <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px' }}>Temporary Password</label>
-                <input type="password" required value={inviteForm.password} onChange={e => setInviteForm({...inviteForm, password: e.target.value})} style={{ width: '100%', padding: '12px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)', borderRadius: '8px', color: '#fff' }} />
+                <label style={{ display: 'block', fontSize: '13px', color: t.text2, marginBottom: '8px' }}>Temporary Password</label>
+                <input type="password" required value={inviteForm.password} onChange={e => setInviteForm({...inviteForm, password: e.target.value})} style={inputStyle} />
               </div>
               <div>
-                <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px' }}>Role</label>
-                <select value={inviteForm.role} onChange={e => setInviteForm({...inviteForm, role: e.target.value})} style={{ width: '100%', padding: '12px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)', borderRadius: '8px', color: '#fff' }}>
-                  <option value="viewer">Viewer</option>
-                  <option value="admin">Admin</option>
+                <label style={{ display: 'block', fontSize: '13px', color: t.text2, marginBottom: '8px' }}>Role</label>
+                <select value={inviteForm.role} onChange={e => setInviteForm({...inviteForm, role: e.target.value})} style={inputStyle}>
+                  {availableRoles.map(r => (
+                    <option key={r} value={r}>{r.charAt(0).toUpperCase() + r.slice(1)}</option>
+                  ))}
                 </select>
               </div>
               <div style={{ display: 'flex', gap: '12px', marginTop: '16px' }}>
-                <button type="button" onClick={() => setShowInviteModal(false)} className="btn-secondary" style={{ flex: 1 }}>Cancel</button>
-                <button type="submit" className="btn-primary" style={{ flex: 1 }}>Send Invite</button>
+                <button type="button" onClick={() => setShowInviteModal(false)} style={{ flex: 1, padding: '10px 18px', borderRadius: '10px', border: '1px solid ' + t.panelBorder, background: 'transparent', color: t.text1, fontWeight: 600, fontSize: '13px', cursor: 'pointer' }}>Cancel</button>
+                <button type="submit" style={{ ...primaryBtnStyle, flex: 1 }}>Send Invite</button>
               </div>
             </form>
           </div>
@@ -145,91 +188,98 @@ export function SettingsView() {
       )}
 
       {/* Settings Navigation */}
-      <div style={{ width: '240px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-        <h2 style={{ fontSize: '24px', fontWeight: 600, marginBottom: '24px' }}>Settings</h2>
-        
-        {['users', 'apikeys', 'sso', 'alerts'].map(tab => (
-          <button 
+      <div style={{ width: '230px', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+        <h2 style={{ fontSize: '24px', fontWeight: 700, margin: '0 0 20px', color: t.text1 }}>Settings</h2>
+
+        {['users', 'roles', 'policies', 'ratelimits', 'audit', 'apikeys', 'sso', 'alerts'].map(tab => (
+          <button
             key={tab}
             onClick={() => setActiveTab(tab)}
-            style={{ 
-              textAlign: 'left', 
-              padding: '12px 16px', 
-              borderRadius: '8px',
-              background: activeTab === tab ? 'rgba(255,255,255,0.1)' : 'transparent',
+            style={{
+              textAlign: 'left',
+              padding: '11px 16px',
+              borderRadius: '10px',
+              background: activeTab === tab ? (t.dark ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.6)') : 'transparent',
               border: 'none',
-              color: activeTab === tab ? 'white' : 'var(--text-secondary)',
+              color: activeTab === tab ? t.text1 : t.text2,
               cursor: 'pointer',
-              fontSize: '14px',
-              fontWeight: 500,
+              fontSize: '13.5px',
+              fontWeight: 600,
               transition: '0.2s',
               textTransform: 'capitalize'
             }}
           >
-            {tab === 'users' ? 'Users & Roles' : tab === 'apikeys' ? 'API Keys' : tab === 'sso' ? 'SSO / SAML' : 'Alert Channels'}
+            {tab === 'users' ? 'Users'
+              : tab === 'roles' ? 'Roles (RBAC)'
+              : tab === 'policies' ? 'Policies (ABAC)'
+              : tab === 'ratelimits' ? 'Rate Limits'
+              : tab === 'audit' ? 'Audit Log'
+              : tab === 'apikeys' ? 'API Keys'
+              : tab === 'sso' ? 'SSO / SAML'
+              : 'Alert Channels'}
           </button>
         ))}
       </div>
 
       {/* Main Content Area */}
-      <div className="glass-panel" style={{ flex: 1, padding: '40px', display: 'flex', flexDirection: 'column' }}>
-        
+      <div style={{ flex: 1, minWidth: 0, padding: 'clamp(20px,3vw,40px)', borderRadius: '24px', background: t.panelBg, border: '1px solid ' + t.panelBorder, backdropFilter: 'blur(30px) saturate(180%)', boxShadow: t.shadow, display: 'flex', flexDirection: 'column' }}>
+
         {activeTab === 'users' && (
           <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '28px', gap: '16px', flexWrap: 'wrap' }}>
               <div>
-                <h3 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '8px' }}>User Management</h3>
-                <p style={{ color: 'var(--text-secondary)' }}>Manage access control and RBAC roles.</p>
+                <h3 style={{ fontSize: '19px', fontWeight: 700, margin: '0 0 8px', color: t.text1 }}>User Management</h3>
+                <p style={{ color: t.text2, fontSize: '13.5px', maxWidth: '520px', lineHeight: 1.6 }}>Manage access control and RBAC roles.</p>
               </div>
-              <button className="btn-primary" onClick={() => setShowInviteModal(true)} style={{ padding: '8px 16px' }}>+ Invite User</button>
+              <button onClick={() => setShowInviteModal(true)} style={primaryBtnStyle}>+ Invite User</button>
             </div>
-            
+
             {!token && (
-               <div style={{ padding: '16px', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--status-red)', borderRadius: '8px', marginBottom: '24px' }}>
+               <div style={{ padding: '16px', background: t.redSoft, color: t.red, borderRadius: '8px', marginBottom: '24px' }}>
                   You are viewing this page without an admin token. Please authenticate via SSO or standard login.
                </div>
             )}
-            
+
             {error && (
-               <div style={{ padding: '16px', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--status-red)', borderRadius: '8px', marginBottom: '24px', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+               <div style={{ padding: '16px', background: t.redSoft, color: t.red, borderRadius: '8px', marginBottom: '24px', border: '1px solid ' + t.red }}>
                   <strong>Access Denied:</strong> {error}
                </div>
             )}
 
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
-                <tr style={{ borderBottom: '1px solid var(--border-color)', color: 'var(--text-secondary)', fontSize: '13px', textAlign: 'left' }}>
-                  <th style={{ padding: '12px 0' }}>User</th>
-                  <th>Role</th>
-                  <th>Joined</th>
-                  <th>Actions</th>
+                <tr style={{ borderBottom: '1px solid ' + t.panelBorder, textAlign: 'left' }}>
+                  <th style={{ padding: '10px 8px', fontWeight: 600, color: t.text2, fontSize: '12px' }}>User</th>
+                  <th style={{ padding: '10px 8px', fontWeight: 600, color: t.text2, fontSize: '12px' }}>Role</th>
+                  <th style={{ padding: '10px 8px', fontWeight: 600, color: t.text2, fontSize: '12px' }}>Joined</th>
+                  <th style={{ padding: '10px 8px', fontWeight: 600, color: t.text2, fontSize: '12px' }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {loadingUsers ? (
                   <tr>
-                    <td colSpan={4} style={{ padding: '24px', textAlign: 'center', color: 'var(--text-secondary)' }}>Loading users...</td>
+                    <td colSpan={4} style={{ padding: '24px', textAlign: 'center', color: t.text2 }}>Loading users...</td>
                   </tr>
                 ) : users.length === 0 ? (
                   <tr>
-                    <td colSpan={4} style={{ padding: '24px', textAlign: 'center', color: 'var(--text-secondary)' }}>No users found. Are you authenticated?</td>
+                    <td colSpan={4} style={{ padding: '24px', textAlign: 'center', color: t.text2 }}>No users found. Are you authenticated?</td>
                   </tr>
                 ) : (
                   users.map(user => (
-                    <tr key={user.id} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                      <td style={{ padding: '16px 0', display: 'flex', alignItems: 'center', gap: '12px' }}>
-                        <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'var(--accent-purple)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 600 }}>
+                    <tr key={user.id} style={{ borderBottom: '1px solid ' + t.panelBorder }}>
+                      <td style={{ padding: '14px 8px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: '13px' }}>
                           {user.username ? user.username[0].toUpperCase() : 'U'}
                         </div>
                         <div>
-                          <div style={{ fontWeight: 500 }}>{user.username.split('@')[0]}</div>
-                          <div style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>{user.username}</div>
+                          <div style={{ fontWeight: 600, fontSize: '13.5px', color: t.text1 }}>{user.username.split('@')[0]}</div>
+                          <div style={{ color: t.text2, fontSize: '12px' }}>{user.username}</div>
                         </div>
                       </td>
-                      <td><span style={{ background: 'rgba(255,255,255,0.1)', padding: '4px 12px', borderRadius: '128px', fontSize: '12px' }}>{user.role}</span></td>
-                      <td style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>{user.created_at ? new Date(user.created_at).toLocaleDateString() : 'Unknown'}</td>
-                      <td>
-                        <button onClick={() => handleRevoke(user.id, user.username)} className="btn-secondary" style={{ padding: '4px 8px', color: 'var(--status-red)', borderColor: 'var(--status-red)' }}>Revoke</button>
+                      <td style={{ padding: '14px 8px', fontSize: '13.5px' }}><span style={{ background: t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)', color: t.text1, padding: '4px 12px', borderRadius: '100px', fontSize: '12px' }}>{user.role}</span></td>
+                      <td style={{ padding: '14px 8px', color: t.text2, fontSize: '13.5px' }}>{user.created_at ? new Date(user.created_at).toLocaleDateString() : 'Unknown'}</td>
+                      <td style={{ padding: '14px 8px', fontSize: '13.5px' }}>
+                        <button onClick={() => handleRevoke(user.id, user.username)} style={ghostRedBtnStyle}>Revoke</button>
                       </td>
                     </tr>
                   ))
@@ -239,30 +289,38 @@ export function SettingsView() {
           </div>
         )}
 
+        {activeTab === 'roles' && <RolesPanel />}
+
+        {activeTab === 'policies' && <PoliciesPanel />}
+
+        {activeTab === 'ratelimits' && <RateLimitsPanel />}
+
+        {activeTab === 'audit' && <AuditLogPanel />}
+
         {activeTab === 'sso' && (
            <div>
-             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px' }}>
+             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '28px', gap: '16px', flexWrap: 'wrap' }}>
                <div>
-                 <h3 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '8px' }}>SSO / SAML Configuration</h3>
-                 <p style={{ color: 'var(--text-secondary)' }}>Configure enterprise identity providers (OIDC / OAuth2).</p>
+                 <h3 style={{ fontSize: '19px', fontWeight: 700, margin: '0 0 8px', color: t.text1 }}>SSO / SAML Configuration</h3>
+                 <p style={{ color: t.text2, fontSize: '13.5px', maxWidth: '520px', lineHeight: 1.6 }}>Configure enterprise identity providers (OIDC / OAuth2).</p>
                </div>
-               <a href="http://localhost:8080/api/v1/auth/sso/login" className="btn-primary" style={{ padding: '8px 16px', textDecoration: 'none' }}>Test SSO Login</a>
+               <a href="/api/v1/auth/sso/login" style={{ ...primaryBtnStyle, textDecoration: 'none', display: 'inline-block' }}>Test SSO Login</a>
              </div>
-             
-             <div style={{ background: 'rgba(0,0,0,0.2)', padding: '24px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
-                <div style={{ fontWeight: 600, marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+
+             <div style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '24px', borderRadius: '12px', border: '1px solid ' + t.panelBorder }}>
+                <div style={{ fontWeight: 600, marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', color: t.text1 }}>
                   <img src="https://www.google.com/favicon.ico" alt="Google" style={{ width: '16px', height: '16px' }} />
                   Google Workspace (OIDC)
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '12px', fontSize: '14px' }}>
-                   <div style={{ color: 'var(--text-secondary)' }}>Status:</div>
-                   <div style={{ color: ssoClientId ? 'var(--status-green)' : 'var(--status-orange)' }}>
+                   <div style={{ color: t.text2 }}>Status:</div>
+                   <div style={{ color: ssoClientId ? t.green : t.amber }}>
                      {ssoClientId ? 'Active' : 'Missing Client ID'}
                    </div>
-                   <div style={{ color: 'var(--text-secondary)' }}>Client ID:</div>
-                   <div style={{ fontFamily: 'monospace' }}>{ssoClientId || '[Not configured]'}</div>
-                   <div style={{ color: 'var(--text-secondary)' }}>Redirect URI:</div>
-                   <div style={{ fontFamily: 'monospace' }}>http://localhost:8080/api/v1/auth/sso/callback</div>
+                   <div style={{ color: t.text2 }}>Client ID:</div>
+                   <div style={{ fontFamily: 'monospace', color: t.text1 }}>{ssoClientId || '[Not configured]'}</div>
+                   <div style={{ color: t.text2 }}>Redirect URI:</div>
+                   <div style={{ fontFamily: 'monospace', color: t.text1 }}>http://localhost:8080/api/v1/auth/sso/callback</div>
                 </div>
              </div>
            </div>
@@ -270,52 +328,52 @@ export function SettingsView() {
 
         {activeTab === 'apikeys' && (
            <div>
-             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px' }}>
+             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '28px', gap: '16px', flexWrap: 'wrap' }}>
                <div>
-                 <h3 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '8px' }}>API Keys</h3>
-                 <p style={{ color: 'var(--text-secondary)' }}>Keys for OpenTelemetry agents to send telemetry.</p>
+                 <h3 style={{ fontSize: '19px', fontWeight: 700, margin: '0 0 8px', color: t.text1 }}>API Keys</h3>
+                 <p style={{ color: t.text2, fontSize: '13.5px', maxWidth: '520px', lineHeight: 1.6 }}>Keys for OpenTelemetry agents to send telemetry.</p>
                </div>
-               <button className="btn-primary" style={{ padding: '8px 16px' }}>Generate New Key</button>
+               <button style={primaryBtnStyle}>Generate New Key</button>
              </div>
-             
-             <div style={{ background: 'rgba(0,0,0,0.2)', padding: '24px', borderRadius: '12px', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+
+             <div style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '24px', borderRadius: '12px', border: '1px solid ' + t.panelBorder, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                <div>
-                 <div style={{ fontWeight: 600, marginBottom: '8px' }}>Production Cluster Key</div>
-                 <div style={{ fontFamily: 'monospace', color: 'var(--accent-blue)' }}>pt_live_************************</div>
+                 <div style={{ fontWeight: 600, marginBottom: '8px', color: t.text1 }}>Production Cluster Key</div>
+                 <div style={{ fontFamily: 'monospace', color: t.accent }}>pt_live_************************</div>
                </div>
-               <button className="btn-secondary" style={{ padding: '6px 12px' }}>Revoke</button>
+               <button style={ghostRedBtnStyle}>Revoke</button>
              </div>
            </div>
         )}
 
         {activeTab === 'alerts' && (
            <div>
-             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px' }}>
+             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '28px', gap: '16px', flexWrap: 'wrap' }}>
               <div>
-                <h3 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '8px' }}>Alert Channels</h3>
-                <p style={{ color: 'var(--text-secondary)' }}>Configure where PulseTrace sends incident alerts.</p>
+                <h3 style={{ fontSize: '19px', fontWeight: 700, margin: '0 0 8px', color: t.text1 }}>Alert Channels</h3>
+                <p style={{ color: t.text2, fontSize: '13.5px', maxWidth: '520px', lineHeight: 1.6 }}>Configure where PulseTrace sends incident alerts.</p>
               </div>
-              <button className="btn-primary" style={{ padding: '8px 16px' }}>+ Add Channel</button>
+              <button style={primaryBtnStyle}>+ Add Channel</button>
             </div>
 
              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
-                <div style={{ background: 'rgba(0,0,0,0.2)', padding: '24px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
+                <div style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '24px', borderRadius: '12px', border: '1px solid ' + t.panelBorder }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}>
-                    <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', color: t.text1 }}>
                       <span style={{ color: '#E01E5A' }}>#</span> Slack
                     </div>
-                    <span style={{ color: 'var(--status-green)', fontSize: '12px' }}>Connected</span>
+                    <span style={{ color: t.green, fontSize: '12px' }}>Connected</span>
                   </div>
-                  <p style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>Sending critical alerts to #eng-oncall</p>
+                  <p style={{ color: t.text2, fontSize: '13px' }}>Sending critical alerts to #eng-oncall</p>
                 </div>
-                <div style={{ background: 'rgba(0,0,0,0.2)', padding: '24px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
+                <div style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '24px', borderRadius: '12px', border: '1px solid ' + t.panelBorder }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}>
-                    <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ color: 'var(--status-green)' }}>✉</span> PagerDuty
+                    <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', color: t.text1 }}>
+                      <span style={{ color: t.green }}>✉</span> PagerDuty
                     </div>
-                    <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>Not Configured</span>
+                    <span style={{ color: t.text2, fontSize: '12px' }}>Not Configured</span>
                   </div>
-                  <p style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>Trigger on-call escalations.</p>
+                  <p style={{ color: t.text2, fontSize: '13px' }}>Trigger on-call escalations.</p>
                 </div>
              </div>
            </div>

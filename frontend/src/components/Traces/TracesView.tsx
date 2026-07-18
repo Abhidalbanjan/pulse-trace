@@ -1,9 +1,11 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { fetchWithAuth } from '@/lib/api';
 import { TraceWaterfall } from './TraceWaterfall';
 import { TraceAnalyticsView } from './TraceAnalyticsView';
+import { useTheme } from '@/context/ThemeContext';
 
 interface Trace {
   traceID: string;
@@ -16,13 +18,16 @@ interface Trace {
 }
 
 export function TracesView() {
+  const { tokens: t } = useTheme();
+  const searchParams = useSearchParams();
   const [traces, setTraces] = useState<Trace[]>([]);
-  const [services, setServices] = useState<string[]>(['cart-service', 'payment-service', 'gateway-service']);
-  const [selectedService, setSelectedService] = useState<string>('cart-service');
-  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+  const [services, setServices] = useState<string[]>([]);
+  const [selectedService, setSelectedService] = useState<string>('');
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(() => searchParams.get('trace'));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'list' | 'analytics'>('list');
+  const [tagFilter, setTagFilter] = useState('');
 
   useEffect(() => {
     // Fetch available services from Jaeger
@@ -34,15 +39,32 @@ export function TracesView() {
       .then(data => {
         if (data && data.data && data.data.length > 0) {
           setServices(data.data);
+          setSelectedService(prev => prev || data.data[0]);
         }
       })
       .catch(err => console.error("Failed to fetch Jaeger services:", err));
   }, []);
 
+  const parseTagFilter = (raw: string): string | null => {
+    const pairs = raw
+      .split(',')
+      .map(p => p.trim())
+      .filter(Boolean)
+      .map(p => p.split('='))
+      .filter(([k, v]) => k && v !== undefined) as [string, string][];
+    if (pairs.length === 0) return null;
+    const tags: Record<string, string> = {};
+    for (const [k, v] of pairs) tags[k.trim()] = v.trim();
+    return JSON.stringify(tags);
+  };
+
   const fetchTraces = () => {
+    if (!selectedService) return;
     setLoading(true);
     setError(null);
-    fetchWithAuth(`/api/traces?service=${selectedService}&limit=20`)
+    const tags = parseTagFilter(tagFilter);
+    const tagsParam = tags ? `&tags=${encodeURIComponent(tags)}` : '';
+    fetchWithAuth(`/api/traces?service=${selectedService}&limit=20${tagsParam}`)
       .then(async res => {
         if (!res.ok) throw new Error(await res.text());
         return res.json();
@@ -54,7 +76,7 @@ export function TracesView() {
             const rootSpan = t.spans.find((s: any) => !s.references || s.references.length === 0) || t.spans[0];
             const rootServiceName = rootSpan?.processID && t.processes[rootSpan.processID] ? t.processes[rootSpan.processID].serviceName : 'Unknown';
             const hasError = t.spans.some((s: any) => s.tags?.some((tag: any) => tag.key === 'error' && tag.value === true));
-            
+
             return {
               traceID: t.traceID,
               spans: t.spans,
@@ -81,22 +103,46 @@ export function TracesView() {
     return () => clearInterval(interval);
   }, [selectedService]);
 
+  const handleTagFilterKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') fetchTraces();
+  };
+
   const formatDuration = (micros: number) => {
     if (micros > 1000000) return `${(micros / 1000000).toFixed(2)}s`;
     if (micros > 1000) return `${(micros / 1000).toFixed(2)}ms`;
     return `${micros}µs`;
   };
 
+  const inputStyle: React.CSSProperties = {
+    background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.7)',
+    border: '1px solid ' + t.panelBorder,
+    color: t.text1,
+    padding: '10px 14px',
+    borderRadius: '10px',
+    outline: 'none',
+  };
+
   if (selectedTraceId) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
         <div style={{ marginBottom: '16px' }}>
-          <button 
-            className="btn-secondary" 
+          <button
             onClick={() => setSelectedTraceId(null)}
-            style={{ padding: '8px 16px', background: 'rgba(255,255,255,0.1)', border: '1px solid var(--border-color)', borderRadius: '8px', color: 'white', cursor: 'pointer' }}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '9px 16px',
+              borderRadius: '10px',
+              border: '1px solid ' + t.panelBorder,
+              background: t.panelBg,
+              color: t.text1,
+              fontSize: '13px',
+              cursor: 'pointer',
+            }}
           >
-            ← Back to Traces
+            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>arrow_back</span>
+            Back to Traces
           </button>
         </div>
         <TraceWaterfall traceId={selectedTraceId} />
@@ -106,31 +152,31 @@ export function TracesView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', height: '100%' }}>
-      
+
       {/* View Switcher */}
       <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-        <button 
+        <button
           onClick={() => setViewMode('list')}
-          style={{ 
-            padding: '8px 16px', 
-            borderRadius: '8px', 
-            border: '1px solid var(--border-color)', 
-            background: viewMode === 'list' ? 'rgba(0, 210, 255, 0.1)' : 'transparent',
-            color: viewMode === 'list' ? 'var(--accent-blue)' : 'var(--text-secondary)',
+          style={{
+            padding: '8px 16px',
+            borderRadius: '10px',
+            border: '1px solid ' + t.panelBorder,
+            background: viewMode === 'list' ? t.accentSoft : 'transparent',
+            color: viewMode === 'list' ? t.accent : t.text2,
             fontWeight: 500,
             cursor: 'pointer'
           }}
         >
           Trace Explorer
         </button>
-        <button 
+        <button
           onClick={() => setViewMode('analytics')}
-          style={{ 
-            padding: '8px 16px', 
-            borderRadius: '8px', 
-            border: '1px solid var(--border-color)', 
-            background: viewMode === 'analytics' ? 'rgba(0, 210, 255, 0.1)' : 'transparent',
-            color: viewMode === 'analytics' ? 'var(--accent-blue)' : 'var(--text-secondary)',
+          style={{
+            padding: '8px 16px',
+            borderRadius: '10px',
+            border: '1px solid ' + t.panelBorder,
+            background: viewMode === 'analytics' ? t.accentSoft : 'transparent',
+            color: viewMode === 'analytics' ? t.accent : t.text2,
             fontWeight: 500,
             cursor: 'pointer'
           }}
@@ -144,86 +190,128 @@ export function TracesView() {
       ) : (
         <>
           {/* Filters Toolbar */}
-      <div className="glass-panel" style={{ padding: '16px', display: 'flex', gap: '16px', alignItems: 'center' }}>
-        <div style={{ flex: 1, display: 'flex', gap: '12px' }}>
-          <select 
-            value={selectedService}
-            onChange={(e) => setSelectedService(e.target.value)}
-            style={{ background: 'rgba(0,0,0,0.5)', border: '1px solid var(--border-color)', color: 'white', padding: '10px 16px', borderRadius: '8px', outline: 'none' }}
-          >
-            {services.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-          
-          <input 
-            type="text" 
-            placeholder="Filter by Tags (e.g. error=true)"
-            style={{ flex: 1, background: 'rgba(0,0,0,0.5)', border: '1px solid var(--border-color)', color: 'white', padding: '10px 16px', borderRadius: '8px', outline: 'none' }}
-          />
-        </div>
-        <button className="btn-primary" onClick={fetchTraces} style={{ padding: '10px 24px' }}>
-          Search Traces
-        </button>
-      </div>
+          <div style={{
+            display: 'flex',
+            gap: '14px',
+            padding: '16px',
+            borderRadius: '18px',
+            background: t.panelBg,
+            border: '1px solid ' + t.panelBorder,
+            backdropFilter: 'blur(30px) saturate(180%)',
+            alignItems: 'center',
+          }}>
+            <select
+              value={selectedService}
+              onChange={(e) => setSelectedService(e.target.value)}
+              disabled={services.length === 0}
+              style={inputStyle}
+            >
+              {services.length === 0 ? (
+                <option value="">No services reporting yet</option>
+              ) : (
+                services.map(s => <option key={s} value={s}>{s}</option>)
+              )}
+            </select>
 
-      {/* Traces List */}
-      <div className="glass-panel" style={{ flex: 1, overflow: 'auto', padding: '0' }}>
-        {loading && traces.length === 0 ? (
-          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-secondary)' }}>Searching traces in Jaeger...</div>
-        ) : error ? (
-          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--status-red)' }}>{error}</div>
-        ) : traces.length === 0 ? (
-          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-secondary)' }}>No traces found for this service.</div>
-        ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid var(--border-color)', background: 'rgba(0,0,0,0.2)' }}>
-                <th style={{ padding: '16px', fontWeight: 500, color: 'var(--text-secondary)', fontSize: '13px' }}>Status</th>
-                <th style={{ padding: '16px', fontWeight: 500, color: 'var(--text-secondary)', fontSize: '13px' }}>Trace ID</th>
-                <th style={{ padding: '16px', fontWeight: 500, color: 'var(--text-secondary)', fontSize: '13px' }}>Root Operation</th>
-                <th style={{ padding: '16px', fontWeight: 500, color: 'var(--text-secondary)', fontSize: '13px' }}>Spans</th>
-                <th style={{ padding: '16px', fontWeight: 500, color: 'var(--text-secondary)', fontSize: '13px' }}>Duration</th>
-                <th style={{ padding: '16px', fontWeight: 500, color: 'var(--text-secondary)', fontSize: '13px' }}>Timestamp</th>
-              </tr>
-            </thead>
-            <tbody>
-              {traces.map((trace) => (
-                <tr 
-                  key={trace.traceID} 
-                  onClick={() => setSelectedTraceId(trace.traceID)}
-                  style={{ 
-                    borderBottom: '1px solid var(--border-color)',
-                    cursor: 'pointer',
-                    transition: 'background 0.2s'
-                  }}
-                  onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.02)'}
-                  onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
-                >
-                  <td style={{ padding: '16px' }}>
-                    {trace.error ? (
-                      <span style={{ color: 'var(--status-red)', fontSize: '12px', padding: '4px 8px', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '12px' }}>Error</span>
-                    ) : (
-                      <span style={{ color: 'var(--status-green)', fontSize: '12px', padding: '4px 8px', background: 'rgba(16, 185, 129, 0.1)', borderRadius: '12px' }}>OK</span>
-                    )}
-                  </td>
-                  <td style={{ padding: '16px', fontSize: '13px', fontFamily: 'monospace' }}>
-                    {trace.traceID.substring(0, 12)}...
-                  </td>
-                  <td style={{ padding: '16px', fontWeight: 500 }}>
-                    <span style={{ color: 'var(--accent-blue)', marginRight: '8px' }}>{trace.rootServiceName}</span>
-                    {trace.rootOperationName}
-                  </td>
-                  <td style={{ padding: '16px', color: 'var(--text-secondary)' }}>{trace.spans.length} spans</td>
-                  <td style={{ padding: '16px', fontWeight: 500 }}>{formatDuration(trace.duration)}</td>
-                  <td style={{ padding: '16px', color: 'var(--text-secondary)', fontSize: '13px' }}>
-                    {new Date(trace.startTime / 1000).toLocaleString()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-      </>
+            <input
+              type="text"
+              value={tagFilter}
+              onChange={(e) => setTagFilter(e.target.value)}
+              onKeyDown={handleTagFilterKeyDown}
+              placeholder="Filter by Tags (e.g. error=true)"
+              style={{ ...inputStyle, flex: 1 }}
+            />
+
+            <button
+              onClick={fetchTraces}
+              style={{
+                padding: '10px 24px',
+                borderRadius: '10px',
+                border: 'none',
+                background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
+                color: '#fff',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Search Traces
+            </button>
+          </div>
+
+          {/* Traces List */}
+          <div style={{
+            flex: 1,
+            overflow: 'auto',
+            borderRadius: '20px',
+            background: t.panelBg,
+            border: '1px solid ' + t.panelBorder,
+            backdropFilter: 'blur(30px) saturate(180%)',
+            boxShadow: t.shadow,
+          }}>
+            {loading && traces.length === 0 ? (
+              <div style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>Searching traces in Jaeger...</div>
+            ) : error ? (
+              <div style={{ padding: '48px', textAlign: 'center', color: t.red }}>{error}</div>
+            ) : traces.length === 0 ? (
+              <div style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>No traces found for this service.</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid ' + t.panelBorder, background: t.dark ? 'rgba(0,0,0,0.15)' : 'rgba(0,0,0,0.03)' }}>
+                    <th style={{ padding: '15px 16px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Status</th>
+                    <th style={{ padding: '15px 16px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Trace ID</th>
+                    <th style={{ padding: '15px 16px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Root Operation</th>
+                    <th style={{ padding: '15px 16px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Spans</th>
+                    <th style={{ padding: '15px 16px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Duration</th>
+                    <th style={{ padding: '15px 16px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Timestamp</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {traces.map((trace) => (
+                    <tr
+                      key={trace.traceID}
+                      onClick={() => setSelectedTraceId(trace.traceID)}
+                      style={{
+                        borderBottom: '1px solid ' + t.panelBorder,
+                        cursor: 'pointer',
+                        transition: 'background 0.2s'
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.background = t.dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)'}
+                      onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                    >
+                      <td style={{ padding: '15px 16px', fontSize: '13.5px' }}>
+                        <span style={{
+                          color: trace.error ? t.red : t.green,
+                          fontSize: '11.5px',
+                          padding: '4px 9px',
+                          background: trace.error
+                            ? (t.dark ? 'rgba(241,107,99,0.15)' : 'rgba(224,82,75,0.1)')
+                            : (t.dark ? 'rgba(52,199,126,0.15)' : 'rgba(37,169,107,0.1)'),
+                          borderRadius: '100px',
+                          fontWeight: 600,
+                        }}>
+                          {trace.error ? 'Error' : 'OK'}
+                        </span>
+                      </td>
+                      <td style={{ padding: '15px 16px', fontSize: '13.5px', fontFamily: 'monospace', color: t.text1 }}>
+                        {trace.traceID.substring(0, 12)}...
+                      </td>
+                      <td style={{ padding: '15px 16px', fontSize: '13.5px', fontWeight: 500, color: t.text1 }}>
+                        <span style={{ color: t.accent, marginRight: '8px' }}>{trace.rootServiceName}</span>
+                        {trace.rootOperationName}
+                      </td>
+                      <td style={{ padding: '15px 16px', fontSize: '13.5px', color: t.text2 }}>{trace.spans.length} spans</td>
+                      <td style={{ padding: '15px 16px', fontSize: '13.5px', fontWeight: 500, color: t.text1 }}>{formatDuration(trace.duration)}</td>
+                      <td style={{ padding: '15px 16px', color: t.text2, fontSize: '13.5px' }}>
+                        {new Date(trace.startTime / 1000).toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
       )}
 
     </div>

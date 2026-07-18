@@ -2,8 +2,10 @@
 
 import React, { useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
+import { useTheme } from '@/context/ThemeContext';
 
 export default function LoginPage() {
+  const { tokens: t } = useTheme();
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -15,7 +17,7 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    
+
     if (!isLogin && password !== confirmPassword) {
       setError('Passwords do not match');
       return;
@@ -25,7 +27,7 @@ export default function LoginPage() {
 
     try {
       const endpoint = isLogin ? '/api/v1/auth/login' : '/api/v1/auth/register';
-      
+
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -74,58 +76,63 @@ export default function LoginPage() {
     window.location.href = '/api/v1/auth/sso/login';
   };
 
+  const inputStyle: React.CSSProperties = {
+    width: '100%', padding: '12px 16px', background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)',
+    border: '1px solid ' + t.panelBorder, borderRadius: '10px',
+    color: t.text1, fontSize: '15px', outline: 'none'
+  };
+
+  const labelStyle: React.CSSProperties = {
+    display: 'block', fontSize: '13px', color: t.text2, marginBottom: '8px'
+  };
+
   return (
     <div style={{
       minHeight: '100vh',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      background: 'var(--bg-dark)',
+      background: t.pageBg,
       position: 'relative',
       overflow: 'hidden'
     }}>
-      {/* Background Effects */}
-      <div style={{
-        position: 'absolute',
-        top: '50%', left: '50%',
-        transform: 'translate(-50%, -50%)',
-        width: '800px', height: '800px',
-        background: 'radial-gradient(circle, rgba(59, 130, 246, 0.15) 0%, rgba(0,0,0,0) 70%)',
-        zIndex: 0
-      }} />
-
       <div className="glass-panel" style={{
         width: '100%',
         maxWidth: '440px',
-        padding: '48px',
+        padding: '40px',
         position: 'relative',
         zIndex: 1,
         display: 'flex',
         flexDirection: 'column',
-        alignItems: 'center'
+        alignItems: 'center',
+        borderRadius: '24px',
+        background: t.panelBg,
+        border: '1px solid ' + t.panelBorder,
+        backdropFilter: 'blur(30px) saturate(180%)',
+        boxShadow: t.shadow
       }}>
         {/* Logo */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '32px' }}>
           <div style={{ width: '40px', height: '40px' }}>
             <img src="/logo.png" alt="PulseTrace" style={{ width: '100%', height: '100%' }} />
           </div>
-          <span style={{ fontSize: '24px', fontWeight: 700, letterSpacing: '-0.02em' }}>
-            Pulse<span style={{ color: 'var(--accent-blue)' }}>Trace</span>
+          <span style={{ fontSize: '24px', fontWeight: 700, letterSpacing: '-0.02em', color: t.text1 }}>
+            Pulse<span style={{ color: t.accent }}>Trace</span>
           </span>
         </div>
 
-        <h1 style={{ fontSize: '24px', fontWeight: 600, marginBottom: '8px' }}>
+        <h1 style={{ fontSize: '24px', fontWeight: 600, margin: '0 0 8px', color: t.text1 }}>
           {isLogin ? 'Welcome back' : 'Create your account'}
         </h1>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: '32px', textAlign: 'center', fontSize: '14px' }}>
+        <p style={{ color: t.text2, marginBottom: '32px', textAlign: 'center', fontSize: '14px' }}>
           Enter your credentials to access the enterprise observability platform.
         </p>
 
         {error && (
-          <div style={{ 
-            width: '100%', padding: '12px', background: 'rgba(239, 68, 68, 0.1)', 
-            border: '1px solid rgba(239, 68, 68, 0.2)', color: 'var(--status-red)', 
-            borderRadius: '8px', marginBottom: '24px', fontSize: '14px', textAlign: 'center' 
+          <div style={{
+            width: '100%', padding: '12px', background: t.redSoft,
+            border: '1px solid ' + t.redSoft, color: t.red,
+            borderRadius: '10px', marginBottom: '24px', fontSize: '14px', textAlign: 'center'
           }}>
             {error}
           </div>
@@ -133,79 +140,78 @@ export default function LoginPage() {
 
         <form onSubmit={handleSubmit} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <div>
-            <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px' }}>Email</label>
-            <input 
-              type="email" 
+            <label style={labelStyle}>Email or Username</label>
+            <input
+              type="text"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              style={{
-                width: '100%', padding: '12px 16px', background: 'rgba(0,0,0,0.2)',
-                border: '1px solid var(--border-color)', borderRadius: '8px',
-                color: 'white', fontSize: '15px', outline: 'none'
-              }}
-              placeholder="admin@pulsetrace.ai"
+              style={inputStyle}
+              placeholder="admin"
             />
           </div>
-          
+
           <div>
-            <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px' }}>Password</label>
-            <input 
-              type="password" 
+            <label style={labelStyle}>Password</label>
+            <input
+              type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              style={{
-                width: '100%', padding: '12px 16px', background: 'rgba(0,0,0,0.2)',
-                border: '1px solid var(--border-color)', borderRadius: '8px',
-                color: 'white', fontSize: '15px', outline: 'none'
-              }}
+              style={inputStyle}
               placeholder="••••••••"
             />
           </div>
 
           {!isLogin && (
             <div>
-              <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px' }}>Confirm Password</label>
-              <input 
-                type="password" 
+              <label style={labelStyle}>Confirm Password</label>
+              <input
+                type="password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 required
-                style={{
-                  width: '100%', padding: '12px 16px', background: 'rgba(0,0,0,0.2)',
-                  border: '1px solid var(--border-color)', borderRadius: '8px',
-                  color: 'white', fontSize: '15px', outline: 'none'
-                }}
+                style={inputStyle}
                 placeholder="••••••••"
               />
             </div>
           )}
 
-          <button 
-            type="submit" 
-            className="btn-primary" 
+          <button
+            type="submit"
             disabled={loading}
-            style={{ width: '100%', padding: '14px', marginTop: '8px', fontSize: '15px', fontWeight: 600 }}
+            style={{
+              width: '100%',
+              padding: '14px',
+              marginTop: '8px',
+              fontSize: '15px',
+              fontWeight: 600,
+              background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
+              color: '#fff',
+              border: 'none',
+              borderRadius: '10px',
+              cursor: loading ? 'not-allowed' : 'pointer',
+              opacity: loading ? 0.7 : 1
+            }}
           >
             {loading ? 'Authenticating...' : (isLogin ? 'Sign In' : 'Sign Up')}
           </button>
         </form>
 
-        <div style={{ 
-          width: '100%', display: 'flex', alignItems: 'center', gap: '16px', margin: '24px 0' 
+        <div style={{
+          width: '100%', display: 'flex', alignItems: 'center', gap: '16px', margin: '24px 0'
         }}>
-          <div style={{ flex: 1, height: '1px', background: 'var(--border-color)' }} />
-          <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>OR</span>
-          <div style={{ flex: 1, height: '1px', background: 'var(--border-color)' }} />
+          <div style={{ flex: 1, height: '1px', background: t.panelBorder }} />
+          <span style={{ fontSize: '12px', color: t.text2 }}>OR</span>
+          <div style={{ flex: 1, height: '1px', background: t.panelBorder }} />
         </div>
 
-        <button 
+        <button
           type="button"
           onClick={handleSSO}
-          style={{ 
-            width: '100%', padding: '14px', background: 'white', color: 'black', 
-            borderRadius: '8px', border: 'none', fontSize: '15px', fontWeight: 600,
+          style={{
+            width: '100%', padding: '14px', background: t.dark ? 'rgba(255,255,255,0.9)' : '#fff', color: '#1c1e26',
+            borderRadius: '10px', border: '1px solid ' + t.panelBorder, fontSize: '15px', fontWeight: 600,
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px',
             cursor: 'pointer'
           }}
@@ -214,15 +220,15 @@ export default function LoginPage() {
           Continue with Google
         </button>
 
-        <p style={{ marginTop: '32px', fontSize: '14px', color: 'var(--text-secondary)' }}>
+        <p style={{ marginTop: '32px', fontSize: '14px', color: t.text2 }}>
           {isLogin ? "Don't have an account? " : "Already have an account? "}
-          <span 
+          <span
             onClick={() => {
               setIsLogin(!isLogin);
               setError('');
               setConfirmPassword('');
             }}
-            style={{ color: 'var(--accent-blue)', cursor: 'pointer', fontWeight: 500 }}
+            style={{ color: t.accent, cursor: 'pointer', fontWeight: 500 }}
           >
             {isLogin ? 'Sign up' : 'Sign in'}
           </span>

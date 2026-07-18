@@ -1,27 +1,25 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-
 :root {
-  --bg-base: #000000; /* Apple uses true black for backgrounds to make panels pop */
-  --apple-glass-bg: rgba(30, 30, 35, 0.45);
-  --apple-glass-blur: blur(40px) saturate(180%);
-  --apple-glass-border: rgba(255, 255, 255, 0.08);
-  --apple-glass-border-highlight: rgba(255, 255, 255, 0.15);
-  
+  /* Legacy aliases kept for any not-yet-restyled corner; prefer useTheme()/getTokens() in components. */
+  --apple-glass-bg: rgba(36, 38, 48, 0.5);
+  --apple-glass-blur: blur(34px) saturate(180%);
+  --apple-glass-border: rgba(255, 255, 255, 0.09);
+  --apple-glass-border-highlight: rgba(255, 255, 255, 0.14);
+
   --bg-panel: var(--apple-glass-bg);
-  --border-color: rgba(255, 255, 255, 0.08);
-  
-  --text-primary: #F8F9FA;
-  --text-secondary: #9BA1A6;
-  --text-muted: #687076;
-  
-  --accent-blue: #00D2FF;
-  --accent-purple: #7B2CBF;
+  --border-color: rgba(255, 255, 255, 0.09);
+
+  --text-primary: rgba(240, 241, 245, 0.94);
+  --text-secondary: rgba(240, 241, 245, 0.56);
+  --text-muted: rgba(240, 241, 245, 0.36);
+
+  --accent-blue: #5B6CFF;
+  --accent-purple: #3FC7D6;
   --accent-gradient: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
-  
-  --status-green: #10B981;
-  --status-red: #EF4444;
-  --status-orange: #F59E0B;
-  
+
+  --status-green: #34C77E;
+  --status-red: #F16B63;
+  --status-orange: #E6A93A;
+
   --font-sans: 'Inter', sans-serif;
 }
 
@@ -32,11 +30,6 @@
 }
 
 body {
-  background-color: var(--bg-base);
-  background-image: 
-    radial-gradient(circle at 15% 50%, rgba(0, 210, 255, 0.05), transparent 25%),
-    radial-gradient(circle at 85% 30%, rgba(123, 44, 191, 0.05), transparent 25%);
-  background-attachment: fixed;
   color: var(--text-primary);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
@@ -44,7 +37,15 @@ body {
   overflow-x: hidden;
 }
 
-/* Apple-style Glassmorphism */
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  line-height: 1;
+  display: inline-block;
+}
+
+/* Apple-style Glassmorphism (legacy fallback — restyled components use inline getTokens() styles) */
 .glass-panel {
   background: var(--apple-glass-bg);
   backdrop-filter: var(--apple-glass-blur);

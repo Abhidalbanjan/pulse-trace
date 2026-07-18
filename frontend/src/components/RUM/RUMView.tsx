@@ -1,9 +1,13 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { fetchWithAuth } from '@/lib/api';
+import { useTheme } from '@/context/ThemeContext';
 
 export function RUMView() {
+  const router = useRouter();
+  const { tokens: t } = useTheme();
   const [metrics, setMetrics] = useState<any[]>([]);
   const [errors, setErrors] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -43,22 +47,31 @@ export function RUMView() {
   const lcp = getMetricAvg('LCP');
   const cls = getMetricAvg('CLS');
   const pageViews = getMetricCount('page_view');
-  
+
   // Format based on Datadog thresholds
-  const lcpColor = lcp === 0 ? 'var(--text-secondary)' : lcp < 2500 ? 'var(--status-green)' : lcp < 4000 ? 'var(--status-yellow)' : 'var(--status-red)';
-  const clsColor = cls === 0 ? 'var(--text-secondary)' : cls < 0.1 ? 'var(--status-green)' : cls < 0.25 ? 'var(--status-yellow)' : 'var(--status-red)';
+  const lcpColor = lcp === 0 ? t.text2 : lcp < 2500 ? t.green : lcp < 4000 ? t.amber : t.red;
+  const clsColor = cls === 0 ? t.text2 : cls < 0.1 ? t.green : cls < 0.25 ? t.amber : t.red;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', height: '100%', overflow: 'auto' }}>
-      
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'auto' }}>
+
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
         <div>
-          <h2 style={{ fontSize: '24px', fontWeight: 600, marginBottom: '8px' }}>Real User Monitoring</h2>
-          <p style={{ color: 'var(--text-secondary)' }}>End-to-end visibility into user journeys, web vitals, and frontend errors.</p>
+          <h2 style={{ fontSize: '26px', fontWeight: 700, margin: '0 0 8px' }}>Real User Monitoring</h2>
+          <p style={{ color: t.text2, fontSize: '14.5px' }}>End-to-end visibility into user journeys, web vitals, and frontend errors.</p>
         </div>
         <div style={{ display: 'flex', gap: '12px' }}>
-          <select className="input-field" style={{ padding: '8px 12px' }}>
+          <select
+            style={{
+              background: t.panelBg,
+              border: '1px solid ' + t.panelBorder,
+              color: t.text1,
+              padding: '9px 14px',
+              borderRadius: '10px',
+              fontSize: '13px',
+            }}
+          >
             <option>Last 24 Hours</option>
             <option>Last 7 Days</option>
           </select>
@@ -66,45 +79,64 @@ export function RUMView() {
       </div>
 
       {loading ? (
-        <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-secondary)' }}>Loading Real User Monitoring data...</div>
+        <div style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>Loading Real User Monitoring data...</div>
       ) : (
-        <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
-          
-          {/* Web Vitals Overview */}
-          <div className="glass-panel" style={{ flex: '1 1 300px', padding: '24px' }}>
-            <h3 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '24px' }}>Core Web Vitals</h3>
-            
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+
+          <div style={{ display: 'flex', gap: '18px', marginBottom: '18px', flexWrap: 'wrap' }}>
+
+            {/* Web Vitals Overview */}
+            <div
+              style={{
+                flex: '1 1 300px',
+                padding: '24px',
+                borderRadius: '20px',
+                background: t.panelBg,
+                border: '1px solid ' + t.panelBorder,
+                backdropFilter: 'blur(30px) saturate(180%)',
+                boxShadow: t.shadow,
+              }}
+            >
+              <h3 style={{ fontSize: '16px', fontWeight: 700, margin: '0 0 20px' }}>Core Web Vitals</h3>
+
               <div>
-                <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '4px' }}>Largest Contentful Paint (LCP)</div>
-                <div style={{ fontSize: '32px', fontWeight: 700, color: lcpColor }}>
+                <div style={{ fontSize: '13px', color: t.text2, marginBottom: '6px' }}>Largest Contentful Paint (LCP)</div>
+                <div style={{ fontSize: '30px', fontWeight: 700, color: lcpColor }}>
                   {lcp === 0 ? '--' : `${(lcp / 1000).toFixed(2)}s`}
                 </div>
-                <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>Target: &lt; 2.5s</div>
+                <div style={{ fontSize: '12px', color: t.text2 }}>Target: &lt; 2.5s</div>
               </div>
 
-              <div>
-                <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '4px' }}>Cumulative Layout Shift (CLS)</div>
-                <div style={{ fontSize: '32px', fontWeight: 700, color: clsColor }}>
+              <div style={{ marginTop: '20px', paddingTop: '20px', borderTop: '1px solid ' + t.panelBorder }}>
+                <div style={{ fontSize: '13px', color: t.text2, marginBottom: '6px' }}>Cumulative Layout Shift (CLS)</div>
+                <div style={{ fontSize: '30px', fontWeight: 700, color: clsColor }}>
                   {cls === 0 ? '--' : cls.toFixed(3)}
                 </div>
-                <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>Target: &lt; 0.1</div>
+                <div style={{ fontSize: '12px', color: t.text2 }}>Target: &lt; 0.1</div>
               </div>
             </div>
-          </div>
 
-          {/* Session Funnel */}
-          <div className="glass-panel" style={{ flex: '1 1 300px', padding: '24px' }}>
-            <h3 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '24px' }}>User Sessions</h3>
-            
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '16px', borderBottom: '1px solid var(--border-color)' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Total Page Views</span>
-                <span style={{ fontWeight: 600, fontSize: '20px' }}>{pageViews}</span>
+            {/* Session Funnel */}
+            <div
+              style={{
+                flex: '1 1 300px',
+                padding: '24px',
+                borderRadius: '20px',
+                background: t.panelBg,
+                border: '1px solid ' + t.panelBorder,
+                backdropFilter: 'blur(30px) saturate(180%)',
+                boxShadow: t.shadow,
+              }}
+            >
+              <h3 style={{ fontSize: '16px', fontWeight: 700, margin: '0 0 20px' }}>User Sessions</h3>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '16px', borderBottom: '1px solid ' + t.panelBorder, marginBottom: '16px' }}>
+                <span style={{ color: t.text2, fontSize: '13.5px' }}>Total Page Views</span>
+                <span style={{ fontWeight: 700, fontSize: '20px' }}>{pageViews}</span>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '16px', borderBottom: '1px solid var(--border-color)' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Sessions with Errors</span>
-                <span style={{ fontWeight: 600, fontSize: '20px', color: errors.length > 0 ? 'var(--status-red)' : 'var(--status-green)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: t.text2, fontSize: '13.5px' }}>Sessions with Errors</span>
+                <span style={{ fontWeight: 700, fontSize: '20px', color: errors.length > 0 ? t.red : t.green }}>
                   {errors.length > 0 ? errors.length : 0}
                 </span>
               </div>
@@ -112,38 +144,70 @@ export function RUMView() {
           </div>
 
           {/* Recent Frontend Errors */}
-          <div className="glass-panel" style={{ flex: '1 1 100%', padding: '0', display: 'flex', flexDirection: 'column' }}>
-            <div style={{ padding: '24px', borderBottom: '1px solid var(--border-color)' }}>
-              <h3 style={{ fontSize: '16px', fontWeight: 600 }}>Recent Javascript Errors</h3>
+          <div
+            style={{
+              borderRadius: '20px',
+              overflow: 'hidden',
+              background: t.panelBg,
+              border: '1px solid ' + t.panelBorder,
+              backdropFilter: 'blur(30px) saturate(180%)',
+              boxShadow: t.shadow,
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+          >
+            <div style={{ padding: '22px 24px 6px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 700, margin: 0 }}>Recent JavaScript Errors</h3>
             </div>
-            
+
             <div style={{ overflowX: 'auto' }}>
               {errors.length === 0 ? (
-                <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-secondary)' }}>No frontend Javascript errors detected.</div>
+                <div style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>No frontend Javascript errors detected.</div>
               ) : (
                 <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
                   <thead>
-                    <tr style={{ background: 'rgba(0,0,0,0.2)' }}>
-                      <th style={{ padding: '16px', fontWeight: 500, color: 'var(--text-secondary)', fontSize: '13px' }}>Timestamp</th>
-                      <th style={{ padding: '16px', fontWeight: 500, color: 'var(--text-secondary)', fontSize: '13px' }}>Path</th>
-                      <th style={{ padding: '16px', fontWeight: 500, color: 'var(--text-secondary)', fontSize: '13px' }}>Error Message</th>
-                      <th style={{ padding: '16px', fontWeight: 500, color: 'var(--text-secondary)', fontSize: '13px' }}>User Agent</th>
+                    <tr>
+                      <th style={{ padding: '16px 24px', fontWeight: 500, color: t.text2, fontSize: '13px' }}>Timestamp</th>
+                      <th style={{ padding: '16px', fontWeight: 500, color: t.text2, fontSize: '13px' }}>Path</th>
+                      <th style={{ padding: '16px', fontWeight: 500, color: t.text2, fontSize: '13px' }}>Error Message</th>
+                      <th style={{ padding: '16px', fontWeight: 500, color: t.text2, fontSize: '13px' }}>User Agent</th>
+                      <th style={{ padding: '16px 24px', fontWeight: 500, color: t.text2, fontSize: '13px' }}>Backend Trace</th>
                     </tr>
                   </thead>
                   <tbody>
                     {errors.map((err, i) => (
-                      <tr key={i} style={{ borderTop: '1px solid var(--border-color)' }}>
-                        <td style={{ padding: '16px', fontSize: '13px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                      <tr key={i} style={{ borderTop: '1px solid ' + t.panelBorder }}>
+                        <td style={{ padding: '16px 24px', fontSize: '13px', color: t.text2, whiteSpace: 'nowrap' }}>
                           {new Date(err.timestamp).toLocaleString()}
                         </td>
                         <td style={{ padding: '16px', fontSize: '13px', fontFamily: 'monospace' }}>
                           {err.path}
                         </td>
-                        <td style={{ padding: '16px', color: 'var(--status-red)', fontWeight: 500, fontSize: '13px' }}>
+                        <td style={{ padding: '16px', color: t.red, fontWeight: 500, fontSize: '13px' }}>
                           {err.error_msg}
                         </td>
-                        <td style={{ padding: '16px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                        <td style={{ padding: '16px', fontSize: '12px', color: t.text2 }}>
                           {err.user_agent?.length > 40 ? err.user_agent.substring(0, 40) + '...' : err.user_agent}
+                        </td>
+                        <td style={{ padding: '16px 24px' }}>
+                          {err.trace_id ? (
+                            <button
+                              onClick={() => router.push(`/traces?trace=${err.trace_id}`)}
+                              style={{
+                                fontSize: '12px',
+                                padding: '6px 12px',
+                                background: 'transparent',
+                                border: '1px solid ' + t.panelBorder,
+                                borderRadius: '8px',
+                                color: t.text1,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              View Trace
+                            </button>
+                          ) : (
+                            <span style={{ fontSize: '12px', color: t.text2 }}>—</span>
+                          )}
                         </td>
                       </tr>
                     ))}

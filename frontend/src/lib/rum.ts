@@ -1,7 +1,27 @@
-export function initRUM() {
+import { getRUMTraceContext, rotateRUMTrace, getTraceparentHeader } from './traceContext';
+
+export interface RUMConfig {
+  // Fraction of sessions to capture, 0.0-1.0. Defaults to NEXT_PUBLIC_RUM_SAMPLE_RATE
+  // if set, else 1.0 (every session) - matching Datadog's sessionSampleRate model:
+  // the sampling decision is made once per session, not per event, so a sampled-in
+  // session sends all its data and a sampled-out session sends none at all. Without
+  // this lever, RUM ingest cost/volume scales linearly with traffic with no way to
+  // control it short of removing the SDK entirely.
+  sampleRate?: number;
+}
+
+export function initRUM(config: RUMConfig = {}) {
   if (typeof window === 'undefined') return;
   if ((window as any).__PULSETRACE_RUM_INIT__) return;
   (window as any).__PULSETRACE_RUM_INIT__ = true;
+
+  const envRate = process.env.NEXT_PUBLIC_RUM_SAMPLE_RATE;
+  const rawRate = config.sampleRate ?? (envRate !== undefined ? parseFloat(envRate) : 1.0);
+  const sampleRate = Number.isFinite(rawRate) ? Math.min(Math.max(rawRate, 0), 1) : 1.0;
+
+  // Sampled-out sessions register nothing: no listeners, no timers, no network
+  // calls - genuinely zero overhead/ingest, not just "collect but don't send."
+  if (Math.random() >= sampleRate) return;
 
   const sessionId = Math.random().toString(36).substring(2, 15);
   const events: any[] = [];
@@ -16,7 +36,7 @@ export function initRUM() {
     try {
       await fetch('/api/v1/rum/ingest', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'traceparent': getTraceparentHeader() },
         body: JSON.stringify(batch),
         keepalive: true
       });
@@ -28,21 +48,26 @@ export function initRUM() {
   };
 
   const enqueue = (event: any) => {
+    const { traceId, spanId } = getRUMTraceContext();
     events.push({
       session_id: sessionId,
       path: window.location.pathname,
       user_agent: navigator.userAgent,
+      trace_id: traceId,
+      span_id: spanId,
       ...event
     });
     if (events.length >= 10) flush();
   };
 
-  // 1. Page Views
+  // 1. Page Views - each page view gets a fresh trace_id, shared with every API
+  // call fetchWithAuth makes while that page is active (see lib/traceContext.ts).
   enqueue({ type: 'page_view' });
   let lastPath = window.location.pathname;
   setInterval(() => {
     if (lastPath !== window.location.pathname) {
       lastPath = window.location.pathname;
+      rotateRUMTrace();
       enqueue({ type: 'page_view' });
     }
   }, 1000);
@@ -63,7 +88,7 @@ export function initRUM() {
     });
   });
 
-  // 3. Web Vitals (Simulated for this demo, or we can use native PerformanceObserver)
+  // 3. Web Vitals via the native PerformanceObserver API
   try {
     const observer = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {

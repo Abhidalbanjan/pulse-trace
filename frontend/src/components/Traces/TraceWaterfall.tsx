@@ -1,13 +1,17 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { fetchWithAuth } from '@/lib/api';
+import { useTheme } from '@/context/ThemeContext';
 
 interface TraceWaterfallProps {
   traceId: string;
 }
 
 export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
+  const { tokens: t } = useTheme();
+  const router = useRouter();
   const [traceData, setTraceData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -58,20 +62,28 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
     return `${micros}µs`;
   };
 
-  if (loading) return <div className="glass-panel" style={{ padding: '48px', textAlign: 'center' }}>Loading Trace Waterfall...</div>;
-  if (error || !traceData) return <div className="glass-panel" style={{ padding: '48px', textAlign: 'center', color: 'var(--status-red)' }}>{error || 'Failed to load trace'}</div>;
+  const cardStyle: React.CSSProperties = {
+    borderRadius: '20px',
+    background: t.panelBg,
+    border: '1px solid ' + t.panelBorder,
+    backdropFilter: 'blur(30px) saturate(180%)',
+    boxShadow: t.shadow,
+  };
+
+  if (loading) return <div style={{ ...cardStyle, padding: '48px', textAlign: 'center', color: t.text2 }}>Loading Trace Waterfall...</div>;
+  if (error || !traceData) return <div style={{ ...cardStyle, padding: '48px', textAlign: 'center', color: t.red }}>{error || 'Failed to load trace'}</div>;
 
   const minStartTime = traceData.spans[0]?.startTime || 0;
   const maxEndTime = Math.max(...traceData.spans.map((s: any) => s.startTime + s.duration));
   const totalDuration = maxEndTime - minStartTime;
 
   return (
-    <div style={{ display: 'flex', gap: '24px', height: '100%', overflow: 'hidden' }}>
-      
+    <div style={{ display: 'flex', gap: '18px', flex: 1, minHeight: 0, minWidth: 0, height: '100%', overflow: 'hidden' }}>
+
       {/* Flame Graph View */}
-      <div className="glass-panel" style={{ flex: 2, overflow: 'auto', padding: '24px' }}>
-        <h3 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '24px' }}>Trace Timeline: {traceId.substring(0, 8)}</h3>
-        
+      <div style={{ ...cardStyle, flex: 2, minWidth: 0, overflowY: 'auto', padding: '24px' }}>
+        <h3 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '24px', color: t.text1 }}>Trace Timeline: {traceId.substring(0, 8)}</h3>
+
         <div style={{ position: 'relative', width: '100%' }}>
           {traceData.spans.map((span: any, index: number) => {
             const serviceName = traceData.processes[span.processID]?.serviceName || 'Unknown';
@@ -81,40 +93,40 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
             const isSelected = selectedSpan?.spanID === span.spanID;
 
             return (
-              <div 
-                key={span.spanID} 
+              <div
+                key={span.spanID}
                 onClick={() => handleSpanClick(span)}
-                style={{ 
-                  marginBottom: '4px', 
+                style={{
+                  marginBottom: '4px',
                   position: 'relative',
                   cursor: 'pointer',
                   opacity: isSelected ? 1 : 0.85
                 }}
               >
                 {/* Background Track */}
-                <div style={{ 
-                  width: '100%', height: '28px', 
-                  background: isSelected ? 'rgba(255,255,255,0.08)' : 'transparent',
-                  borderRadius: '4px', position: 'absolute', top: 0, left: 0 
+                <div style={{
+                  width: '100%', height: '28px',
+                  background: isSelected ? (t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)') : 'transparent',
+                  borderRadius: '6px', position: 'absolute', top: 0, left: 0
                 }} />
-                
+
                 {/* Span Bar */}
                 <div style={{
                   position: 'relative',
                   left: `${offsetPercentage}%`,
                   width: `${widthPercentage}%`,
                   height: '28px',
-                  background: hasError ? 'var(--status-red)' : 'var(--accent-blue)',
-                  borderRadius: '4px',
+                  background: hasError ? t.red : `linear-gradient(90deg, ${t.accent}, ${t.accent2})`,
+                  borderRadius: '6px',
                   display: 'flex',
                   alignItems: 'center',
                   padding: '0 8px',
                   boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
                   transition: 'all 0.2s',
-                  border: isSelected ? '1px solid white' : '1px solid transparent',
+                  border: isSelected ? '2px solid #fff' : '2px solid transparent',
                   overflow: 'hidden'
                 }}>
-                  <span style={{ color: 'white', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+                  <span style={{ color: '#fff', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
                     {serviceName} : {span.operationName}
                   </span>
                 </div>
@@ -125,53 +137,74 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
       </div>
 
       {/* Details & Correlated Logs View */}
-      <div className="glass-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div style={{ ...cardStyle, flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {selectedSpan ? (
           <>
-            <div style={{ padding: '24px', borderBottom: '1px solid var(--border-color)' }}>
-              <h4 style={{ fontSize: '18px', fontWeight: 600, marginBottom: '8px' }}>Span Details</h4>
-              <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                <strong style={{ color: 'white' }}>Service:</strong> {traceData.processes[selectedSpan.processID]?.serviceName}
+            <div style={{ padding: '22px', borderBottom: '1px solid ' + t.panelBorder }}>
+              <h4 style={{ fontSize: '18px', fontWeight: 600, marginBottom: '8px', color: t.text1 }}>Span Details</h4>
+              <p style={{ fontSize: '14px', color: t.text2, marginBottom: '4px' }}>
+                <strong style={{ color: t.text1 }}>Service:</strong> {traceData.processes[selectedSpan.processID]?.serviceName}
               </p>
-              <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                <strong style={{ color: 'white' }}>Operation:</strong> {selectedSpan.operationName}
+              <p style={{ fontSize: '14px', color: t.text2, marginBottom: '4px' }}>
+                <strong style={{ color: t.text1 }}>Operation:</strong> {selectedSpan.operationName}
               </p>
-              <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>
-                <strong style={{ color: 'white' }}>Duration:</strong> {formatDuration(selectedSpan.duration)}
+              <p style={{ fontSize: '14px', color: t.text2, marginBottom: '12px' }}>
+                <strong style={{ color: t.text1 }}>Duration:</strong> {formatDuration(selectedSpan.duration)}
               </p>
-              
+
+              <button
+                onClick={() => {
+                  const svc = traceData.processes[selectedSpan.processID]?.serviceName;
+                  router.push(`/profiler?service=${encodeURIComponent(svc)}&spanId=${encodeURIComponent(selectedSpan.spanID)}`);
+                }}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  fontSize: '12px',
+                  padding: '7px 13px',
+                  background: 'transparent',
+                  border: '1px solid ' + t.panelBorder,
+                  borderRadius: '8px',
+                  color: t.accent,
+                  cursor: 'pointer'
+                }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>speed</span>
+                View Profile for this Span
+              </button>
+
               <div style={{ marginTop: '16px' }}>
-                <h5 style={{ fontSize: '12px', textTransform: 'uppercase', color: 'var(--text-secondary)', marginBottom: '8px' }}>Tags</h5>
+                <h5 style={{ fontSize: '12px', textTransform: 'uppercase', color: t.text2, marginBottom: '8px' }}>Tags</h5>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                  {selectedSpan.tags?.map((t: any, i: number) => (
-                    <span key={i} style={{ fontSize: '11px', background: 'rgba(255,255,255,0.1)', padding: '4px 8px', borderRadius: '4px' }}>
-                      <span style={{ color: 'var(--accent-blue)' }}>{t.key}:</span> {t.value?.toString()}
+                  {selectedSpan.tags?.map((tag: any, i: number) => (
+                    <span key={i} style={{ fontSize: '11px', background: t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)', padding: '4px 8px', borderRadius: '4px', color: t.text1 }}>
+                      <span style={{ color: t.accent }}>{tag.key}:</span> {tag.value?.toString()}
                     </span>
                   ))}
                 </div>
               </div>
             </div>
 
-            <div style={{ padding: '24px', flex: 1, overflow: 'auto' }}>
-              <h4 style={{ fontSize: '18px', fontWeight: 600, marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span>▤</span> Correlated Logs
+            <div style={{ padding: '22px', flex: 1, overflow: 'auto' }}>
+              <h4 style={{ fontSize: '18px', fontWeight: 600, marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', color: t.text1 }}>
+                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>subject</span> Correlated Logs
               </h4>
               {correlatedLogs.length === 0 ? (
-                <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>No logs found for this exact trace ID in Quickwit.</p>
+                <p style={{ fontSize: '13px', color: t.text2 }}>No logs found for this exact trace ID in Quickwit.</p>
               ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                   {correlatedLogs.map((log: any, i: number) => (
-                    <div key={i} style={{ 
-                      background: 'rgba(0,0,0,0.3)', 
-                      border: '1px solid var(--border-color)',
-                      padding: '12px',
+                    <div key={i} style={{
+                      background: t.dark ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.04)',
+                      padding: '10px 12px',
                       borderRadius: '8px',
-                      fontSize: '12px',
+                      fontSize: '11.5px',
                       fontFamily: 'monospace'
                     }}>
-                      <span style={{ color: 'var(--status-green)', marginRight: '8px' }}>[{log.level || 'INFO'}]</span>
-                      <span style={{ color: 'var(--text-secondary)', marginRight: '8px' }}>{new Date(log.timestamp).toLocaleTimeString()}</span>
-                      <span style={{ color: 'white' }}>{log.message}</span>
+                      <span style={{ color: log.level === 'ERROR' ? t.red : t.green, marginRight: '8px' }}>[{log.level || 'INFO'}]</span>
+                      <span style={{ color: t.text2, marginRight: '8px' }}>{new Date(log.timestamp).toLocaleTimeString()}</span>
+                      <span style={{ color: t.text1 }}>{log.message}</span>
                     </div>
                   ))}
                 </div>
@@ -179,7 +212,7 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
             </div>
           </>
         ) : (
-          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+          <div style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>
             Select a span in the flame graph to view details and correlated logs.
           </div>
         )}

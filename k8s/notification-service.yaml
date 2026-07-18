@@ -31,12 +31,29 @@ spec:
                 configMapKeyRef:
                   name: pulsetrace-config
                   key: OTEL_EXPORTER_OTLP_ENDPOINT
-            # Uncomment and populate to activate real channels:
-            # - name: SLACK_WEBHOOK_URL
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: pulsetrace-secrets
-            #       key: SLACK_WEBHOOK_URL
+            # Empty values are fine — that channel is just skipped (see
+            # notification_worker.go); the always-on log channel still fires.
+            # Populate k8s/secret.yaml to activate Slack/email for real.
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: SLACK_WEBHOOK_URL
+            - name: SMTP_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: SMTP_HOST
+            - name: SMTP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: SMTP_USERNAME
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: SMTP_PASSWORD
           resources:
             requests:
               cpu: "50m"

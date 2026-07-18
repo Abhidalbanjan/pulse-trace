@@ -19,5 +19,17 @@ data:
   LOG_SERVICE_URL: "http://log-service:8081"
   ALERT_SERVICE_URL: "http://alert-service:8082"
   CORRELATION_SERVICE_URL: "http://correlation-service:8083"
+  TOPOLOGY_SERVICE_URL: "http://topology-service:8084"
+  ACTION_SERVICE_URL: "http://action-service:8085"
+  # ClickHouse (non-secret parts) — used by gateway and correlation-service
+  # (anomaly detector queries it directly; see anomaly_detector.go)
+  CLICKHOUSE_URL: "http://clickhouse:8123"
+  CLICKHOUSE_USER: "pulsetrace"
+  # Neo4j / Redis (topology-service)
+  NEO4J_URI: "bolt://neo4j:7687"
+  REDIS_ADDR: "redis:6379"
   # Causal AI defaults — see k8s/secret.yaml for ANTHROPIC_API_KEY.
   CAUSAL_MODEL: "claude-opus-4-7"
+  # action-service remediates deployments in THIS namespace, not its own —
+  # point it at wherever your monitored services actually run.
+  K8S_TARGET_NAMESPACE: "pulsetrace"

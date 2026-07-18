@@ -40,6 +40,41 @@ spec:
                 configMapKeyRef:
                   name: pulsetrace-config
                   key: CORRELATION_SERVICE_URL
+            - name: TOPOLOGY_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: TOPOLOGY_SERVICE_URL
+            - name: ACTION_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: ACTION_SERVICE_URL
+            - name: CLICKHOUSE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: CLICKHOUSE_URL
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: CLICKHOUSE_USER
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: CLICKHOUSE_PASSWORD
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: JWT_SECRET
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: DATABASE_URL
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               valueFrom:
                 configMapKeyRef:

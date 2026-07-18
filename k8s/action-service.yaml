@@ -1,0 +1,100 @@
+# action-service is the auto-remediation engine (RESTART_PODS/SCALE/ROLLBACK —
+# see action-service/internal/k8s/operator.go). It needs its own ServiceAccount
+# and explicit RBAC grants to actually touch Deployments/ReplicaSets in the
+# cluster; without these it silently falls back to MOCK mode (logs the action,
+# changes nothing) rather than failing loudly, so it's easy to not notice this
+# is misconfigured. The Role below is scoped to the "pulsetrace" namespace to
+# match K8S_TARGET_NAMESPACE in configmap.yaml — if you point that at a
+# different namespace, update roleRef/namespace here to match, or switch to a
+# ClusterRole + ClusterRoleBinding if action-service needs to remediate
+# workloads across multiple namespaces.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: action-service
+  namespace: pulsetrace
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: action-service-remediator
+  namespace: pulsetrace
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: action-service-remediator-binding
+  namespace: pulsetrace
+subjects:
+  - kind: ServiceAccount
+    name: action-service
+    namespace: pulsetrace
+roleRef:
+  kind: Role
+  name: action-service-remediator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: action-service
+  namespace: pulsetrace
+  labels:
+    app: action-service
+    app.kubernetes.io/part-of: pulsetrace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: action-service
+  template:
+    metadata:
+      labels:
+        app: action-service
+    spec:
+      serviceAccountName: action-service
+      containers:
+        - name: action-service
+          image: pulse-trace-action-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8085
+          env:
+            - name: K8S_TARGET_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: K8S_TARGET_NAMESPACE
+          readinessProbe:
+            httpGet:
+              path: /api/v1/actions/status
+              port: 8085
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: action-service
+  namespace: pulsetrace
+spec:
+  selector:
+    app: action-service
+  ports:
+    - port: 8085
+      targetPort: 8085

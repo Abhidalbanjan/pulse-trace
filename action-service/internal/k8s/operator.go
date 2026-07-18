@@ -24,6 +24,16 @@ type Operator struct {
 }
 
 func NewOperator() *Operator {
+	// K8S_TARGET_NAMESPACE is the namespace this operator remediates deployments
+	// in — i.e. where the *customer's* monitored services actually run, which
+	// is essentially never "default" in a real deployment. This was previously
+	// hardcoded to "default", so in any real cluster this operator would only
+	// ever be able to see deployments in a namespace nothing runs in.
+	namespace := os.Getenv("K8S_TARGET_NAMESPACE")
+	if namespace == "" {
+		namespace = "default"
+	}
+
 	var config *rest.Config
 	var err error
 
@@ -37,19 +47,19 @@ func NewOperator() *Operator {
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
 			log.Printf("[K8s Operator] WARNING: No valid kubeconfig found: %v. Running in MOCK mode.", err)
-			return &Operator{namespace: "default"}
+			return &Operator{namespace: namespace}
 		}
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		log.Printf("[K8s Operator] WARNING: Failed to create clientset: %v. Running in MOCK mode.", err)
-		return &Operator{namespace: "default"}
+		return &Operator{namespace: namespace}
 	}
 
 	return &Operator{
 		clientset: clientset,
-		namespace: "default", // You can make this configurable
+		namespace: namespace,
 	}
 }
 

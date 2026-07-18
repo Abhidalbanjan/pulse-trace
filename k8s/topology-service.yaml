@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: topology-service
+  namespace: pulsetrace
+  labels:
+    app: topology-service
+    app.kubernetes.io/part-of: pulsetrace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: topology-service
+  template:
+    metadata:
+      labels:
+        app: topology-service
+    spec:
+      containers:
+        - name: topology-service
+          image: pulse-trace-topology-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8084
+          env:
+            - name: PORT
+              value: "8084"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: DATABASE_URL
+            - name: NEO4J_URI
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: NEO4J_URI
+            - name: NEO4J_USERNAME
+              value: "neo4j"
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: NEO4J_PASSWORD
+            - name: REDIS_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: REDIS_ADDR
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: KAFKA_BROKERS
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+            # Shared with correlation-service — must be identical on both.
+            - name: PLAYBOOK_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: PLAYBOOK_HMAC_SECRET
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8084
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8084
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: topology-service
+  namespace: pulsetrace
+spec:
+  selector:
+    app: topology-service
+  ports:
+    - port: 8084
+      targetPort: 8084

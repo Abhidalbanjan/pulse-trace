@@ -47,6 +47,34 @@ spec:
                 configMapKeyRef:
                   name: pulsetrace-config
                   key: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: TOPOLOGY_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: TOPOLOGY_SERVICE_URL
+            # Used by the anomaly detector to poll real per-service RED metrics
+            # directly from ClickHouse — see anomaly_detector.go.
+            - name: CLICKHOUSE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: CLICKHOUSE_URL
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: CLICKHOUSE_USER
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: CLICKHOUSE_PASSWORD
+            # Shared with topology-service — must be identical on both.
+            - name: PLAYBOOK_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: PLAYBOOK_HMAC_SECRET
             # Causal AI — empty ANTHROPIC_API_KEY falls back to rule-based analyzer.
             - name: ANTHROPIC_API_KEY
               valueFrom:

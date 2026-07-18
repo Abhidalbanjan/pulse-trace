@@ -11,7 +11,10 @@ import (
 func main() {
 	r := gin.Default()
 
-	// Initialize Kubernetes Operator stub
+	// Initialize the Kubernetes Operator. It runs in MOCK mode (logs actions
+	// instead of calling the cluster) only when no in-cluster or ~/.kube/config
+	// credentials are found — see k8s.NewOperator. RESTART_PODS, SCALE, and
+	// ROLLBACK are real client-go calls when a real cluster is reachable.
 	operator := k8s.NewOperator()
 	actionHandler := handler.NewActionHandler(operator)
 

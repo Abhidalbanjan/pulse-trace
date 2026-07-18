@@ -1,11 +1,25 @@
-FROM golang:1.21-alpine
+# ── Build stage ──────────────────────────────────────────────────────────────
+FROM golang:1.25-alpine3.21 AS builder
 
 WORKDIR /app
-COPY go.mod go.sum ./
+
+# Copy the entire action-service module. Build context is the repo root (see
+# docker-compose.yml / .github/workflows/ci.yml) for consistency with every
+# other service, even though action-service itself has no shared/ dependency.
+COPY action-service/ .
+
 RUN apk add --no-cache git
 RUN go mod download
-COPY . .
-RUN go build -o main ./cmd/main.go
+
+RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/action-service ./cmd
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM alpine:3.19
+
+RUN apk --no-cache add ca-certificates tzdata
+
+COPY --from=builder /bin/action-service /bin/action-service
 
 EXPOSE 8085
-CMD ["./main"]
+
+ENTRYPOINT ["/bin/action-service"]

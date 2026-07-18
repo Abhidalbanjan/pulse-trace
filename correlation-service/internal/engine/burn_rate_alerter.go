@@ -62,37 +62,10 @@ func (b *BurnRateAlerter) Evaluate(ctx context.Context, def *models.SLODefinitio
 		return // no data yet
 	}
 
-	// Allowed error budget as a fraction of total time
-	allowedErrorRate := (100.0 - def.SLOTarget) / float64(def.WindowDays)
-	if allowedErrorRate <= 0 {
+	burnRate, budgetRemainingPct, ok := computeBurnRate(currentSLI, def.SLOTarget, def.WindowDays)
+	if !ok {
 		return
 	}
-
-	// Actual error rate expressed per day
-	actualErrorRate := (100.0 - currentSLI)
-
-	// Remaining budget percentage
-	errorBudgetTotal := 100.0 - def.SLOTarget          // e.g. 0.1% for 99.9% SLO
-	errorBudgetUsed := 100.0 - currentSLI              // actual error percentage
-	budgetRemainingPct := 0.0
-	if errorBudgetTotal > 0 {
-		budgetRemainingPct = ((errorBudgetTotal - errorBudgetUsed) / errorBudgetTotal) * 100.0
-		if budgetRemainingPct < 0 {
-			budgetRemainingPct = 0
-		}
-		if budgetRemainingPct > 100 {
-			budgetRemainingPct = 100
-		}
-	}
-
-	// Calculate burn rate: how many × faster than expected are we burning budget?
-	// Expected daily burn = errorBudgetTotal / windowDays
-	// Actual daily burn = errorBudgetUsed (rough proxy from current window SLI)
-	expectedDailyBurn := errorBudgetTotal / float64(def.WindowDays)
-	if expectedDailyBurn <= 0 {
-		return
-	}
-	burnRate := actualErrorRate / (errorBudgetTotal) // normalized burn rate
 
 	for _, threshold := range DefaultBurnRateThresholds {
 		if burnRate >= threshold.Multiplier {
@@ -100,6 +73,47 @@ func (b *BurnRateAlerter) Evaluate(ctx context.Context, def *models.SLODefinitio
 			break // only fire the highest severity
 		}
 	}
+}
+
+// computeBurnRate implements the Google SRE Handbook burn-rate model as a pure
+// function (no I/O), so the math can be unit tested directly without needing
+// a real Postgres-backed repository or RabbitMQ publisher.
+//
+// Burn rate = (actual error rate) / (allowed error rate)
+// allowed error rate = (100 - slo_target) / window_days
+// actual error rate  = (100 - current_sli)
+//
+// ok is false when there isn't a meaningful budget to burn against (e.g. a
+// 100% SLO target or a zero/negative window), in which case the caller should
+// skip evaluation entirely rather than alert on a divide-by-zero artifact.
+func computeBurnRate(currentSLI, sloTarget float64, windowDays int) (burnRate, budgetRemainingPct float64, ok bool) {
+	if windowDays <= 0 {
+		return 0, 0, false
+	}
+
+	allowedErrorRate := (100.0 - sloTarget) / float64(windowDays)
+	if allowedErrorRate <= 0 {
+		return 0, 0, false
+	}
+
+	actualErrorRate := 100.0 - currentSLI
+
+	errorBudgetTotal := 100.0 - sloTarget // e.g. 0.1% for 99.9% SLO
+	errorBudgetUsed := 100.0 - currentSLI // actual error percentage
+	if errorBudgetTotal <= 0 {
+		return 0, 0, false
+	}
+
+	budgetRemainingPct = ((errorBudgetTotal - errorBudgetUsed) / errorBudgetTotal) * 100.0
+	if budgetRemainingPct < 0 {
+		budgetRemainingPct = 0
+	}
+	if budgetRemainingPct > 100 {
+		budgetRemainingPct = 100
+	}
+
+	burnRate = actualErrorRate / errorBudgetTotal // normalized burn rate
+	return burnRate, budgetRemainingPct, true
 }
 
 // fireAlert persists a budget alert and publishes a notification.

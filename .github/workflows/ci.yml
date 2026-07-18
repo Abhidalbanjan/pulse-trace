@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Each Go service is built/vetted/tested as its own isolated module (GOWORK=off),
+# the same way its Dockerfile builds it — not through the repo-root go.work
+# workspace. This keeps CI honest about what actually ships, and avoids
+# workspace-vs-vendor conflicts (gateway-service builds with -mod=vendor from
+# its own gitignored vendor/ directory; every other service resolves modules
+# normally). shared/ is included because it has its own go.mod and tests.
+jobs:
+  go-services:
+    name: go / ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - action-service
+          - alert-service
+          - correlation-service
+          - gateway-service
+          - log-service
+          - notification-service
+          - shared
+          - topology-service
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: ${{ matrix.service }}/go.sum
+
+      - name: Download dependencies
+        working-directory: ${{ matrix.service }}
+        run: go mod download
+
+      - name: Vet
+        working-directory: ${{ matrix.service }}
+        run: go vet ./...
+
+      - name: Build
+        working-directory: ${{ matrix.service }}
+        run: go build ./...
+
+      - name: Test (with coverage)
+        working-directory: ${{ matrix.service }}
+        run: go test ./... -race -coverprofile=coverage.out
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+  docker-build:
+    name: docker build / ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: [go-services]
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - action-service
+          - alert-service
+          - correlation-service
+          - gateway-service
+          - log-service
+          - notification-service
+          - topology-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.service }} image
+        run: docker build -f ${{ matrix.service }}/Dockerfile -t pulsetrace/${{ matrix.service }}:ci .

@@ -90,6 +90,7 @@ func main() {
 	alertServiceURL := getEnv("ALERT_SERVICE_URL", "http://localhost:8082")
 	correlationServiceURL := getEnv("CORRELATION_SERVICE_URL", "http://localhost:8083")
 	topologyServiceURL := getEnv("TOPOLOGY_SERVICE_URL", "http://localhost:8084")
+	actionServiceURL := getEnv("ACTION_SERVICE_URL", "http://localhost:8085")
 	otelCollectorHTTPURL := getEnv("OTEL_COLLECTOR_HTTP_URL", "http://localhost:4318")
 
 	quickwitURL := getEnv("QUICKWIT_URL", "http://pulsetrace-quickwit:7280")
@@ -101,6 +102,7 @@ func main() {
 		{Prefix: "/api/v1/incidents", Upstream: correlationServiceURL},
 		{Prefix: "/api/v1/slo", Upstream: correlationServiceURL},
 		{Prefix: "/api/v1/topology/", Upstream: topologyServiceURL},
+		{Prefix: "/api/v1/actions", Upstream: actionServiceURL},
 		{Prefix: "/api/v1/profiler/", Upstream: pyroscopeURL},
 		{Prefix: "/api/v1/search/", Upstream: quickwitURL},
 		{Prefix: "/api/traces", Upstream: jaegerURL},

@@ -441,6 +441,23 @@ services:
       - otel-collector
       - redis
 
+  # ── Action Service (Auto-Remediation Engine) ────────────────────────────────────
+  # Previously built but never wired into docker-compose, so RESTART_PODS/SCALE/
+  # ROLLBACK (see action-service/internal/k8s/operator.go) had no reachable
+  # instance in local dev. Runs in MOCK mode automatically if no ~/.kube/config
+  # or in-cluster credentials are present — safe to run without a real cluster.
+  action-service:
+    build:
+      context: .
+      dockerfile: action-service/Dockerfile
+    container_name: pulsetrace-action-service
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    volumes:
+      # Mount the host kubeconfig read-only so the operator can act on a real
+      # cluster if one is configured; harmless (falls back to MOCK mode) if not.
+      - ${HOME}/.kube:/root/.kube:ro
 
   # ── MinIO (S3 Cold Tier Emulator) ────────────────────────────────────────────
   minio:

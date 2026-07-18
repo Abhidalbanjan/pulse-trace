@@ -78,10 +78,20 @@ export default function ConversationalSRE() {
           onExecute: async () => {
              alert(`Executing ${data.actionCard.type} on ${data.actionCard.target}...`);
              try {
-                const actRes = await fetchWithAuth('/api/v1/action', {
+                // action-service's ExecuteRequest expects {action_type, target,
+                // parameters} (see action-service/internal/handler) — previously
+                // this posted the actionCard's own {title, description,
+                // actionLabel, type, target} shape as-is to a route the gateway
+                // didn't even proxy, so this call always 404'd silently before
+                // the fake-success catch block masked it. Both are fixed now.
+                const actRes = await fetchWithAuth('/api/v1/actions/execute', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(data.actionCard)
+                  body: JSON.stringify({
+                    action_type: data.actionCard.type,
+                    target: data.actionCard.target,
+                    parameters: data.actionCard.parameters || {},
+                  })
                 });
                 if (actRes.ok) {
                   alert('Action executed successfully by PulseTrace Operator.');

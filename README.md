@@ -1,8 +1,8 @@
 # PulseTrace — Distributed Observability & Incident Monitoring Platform
 
-A production-grade, event-driven observability platform for microservices, built entirely in Go.
+A production-grade, event-driven observability platform for microservices, built with Go and Next.js.
 
-> Think mini-Datadog / mini-Grafana — built from scratch, with analytical-grade telemetry storage, multi-cloud cold tiering, and AI-driven root cause analysis.
+> Think mini-Datadog / mini-Grafana — built from scratch, with analytical-grade telemetry storage, multi-cloud cold tiering, AI-driven root cause analysis, and full-stack APM features (Traces, Profiling, RUM, Synthetics).
 
 ---
 
@@ -66,10 +66,12 @@ A production-grade, event-driven observability platform for microservices, built
 
 | Component                  | Responsibility                                                                          |
 |----------------------------|-----------------------------------------------------------------------------------------|
-| `gateway-service`          | Reverse proxy, W3C trace context propagation, OTLP gRPC/HTTP passthrough, RBAC         |
+| `gateway-service`          | Reverse proxy, W3C trace context, OTLP passthrough, RBAC, Synthetics engine, RUM endpoint |
 | `log-service`              | Ingest logs → publish to Kafka; batch consumer writes to ClickHouse; serves query API  |
 | `alert-service`            | Consume `logs` topic, create alerts for ERROR/FATAL, publish to `alerts` topic          |
 | `correlation-service`      | Consume `alerts`, group into incidents, infer root cause, SLO burn rate engine          |
+| `topology-service`         | Auto-discovers service dependencies and maintains ownership Catalog in Neo4j              |
+| `frontend`                 | Next.js React dashboard for Logs, Traces, Profiling, RUM, Catalog, and Synthetics       |
 | `notification-service`     | Consume RabbitMQ, dispatch to Slack / email / log                                       |
 | `shared`                   | Models, DB pools (Postgres + ClickHouse), Kafka, RabbitMQ, OTel middleware              |
 | ClickHouse                 | Column-oriented analytical store for high-volume logs (hot SSD tier)                   |
@@ -78,8 +80,9 @@ A production-grade, event-driven observability platform for microservices, built
 | PostgreSQL                 | Persistent storage for alerts, incidents, SLO definitions, and SLI snapshots           |
 | Kafka                      | Event bus: `logs` and `alerts` topics                                                   |
 | RabbitMQ                   | Notification pipeline with dead-letter queue                                            |
-| OTel Collector             | Receives OTLP spans from all services, forwards to Jaeger                               |
+| OTel Collector             | Receives OTLP spans from all services, forwards to Jaeger and ClickHouse                |
 | Jaeger                     | Distributed trace visualization                                                         |
+| Pyroscope                  | Continuous CPU and Memory profiling for Go microservices                                |
 | Prometheus                 | Metrics scraping from OTel Collector                                                    |
 | Grafana                    | Pre-provisioned dashboards for traces and metrics                                       |
 
@@ -598,8 +601,10 @@ pulsetrace/
 | Relational DB         | PostgreSQL 16 (alerts, incidents, SLO metadata)           |
 | Message broker        | Apache Kafka (Sarama)                                     |
 | Notification queue    | RabbitMQ 3.13 (amqp091-go) with DLQ                      |
-| Distributed tracing   | OpenTelemetry SDK + Jaeger                                |
-| Metrics               | Prometheus + Grafana                                      |
+| Distributed tracing   | OpenTelemetry SDK + Jaeger + ClickHouse                                   |
+| Continuous Profiling  | Grafana Pyroscope                                                         |
+| Metrics               | Prometheus + Grafana                                                      |
+| Frontend              | React, Next.js, TypeScript                                                |
 | Causal AI             | LangChain Go (Anthropic Claude / OpenAI / Gemini / Ollama)|
 | Containers            | Docker + Compose                                          |
 | Orchestration         | Kubernetes (Deployments, HPA, Ingress)                    |
@@ -617,3 +622,5 @@ pulsetrace/
 - [x] **Week 3** — Pluggable AI adapters, dynamic log detail leveling, burn rate alerting
 - [x] **Week 4** — Zero-egress hybrid architecture, ClickHouse cluster sharding, PII sanitizer pipeline
 - [x] **Week 5** — Auto-Topology Discovery (OTLP/HTTP traces receiver), Redis caching, AI self-healing playbooks (HMAC-SHA256 signature verification, Postgres/Kubernetes executions)
+- [x] **Week 6** — Frontend dashboard (Next.js) foundation
+- [x] **Week 7 (APM Parity)** — Distributed Trace Analytics (ClickHouse P99), Continuous Profiling (Pyroscope), Real User Monitoring (Web Vitals SDK), Dynamic Service Catalog (Neo4j), End-to-End Synthetic Monitoring (Postgres state + Go worker).

@@ -13,6 +13,7 @@ import (
 	"github.com/pulsetrace/correlation-service/internal/engine"
 	"github.com/pulsetrace/correlation-service/internal/handler"
 	"github.com/pulsetrace/correlation-service/internal/llm"
+	"github.com/pulsetrace/correlation-service/internal/query"
 	"github.com/pulsetrace/correlation-service/internal/repository"
 	"github.com/pulsetrace/shared/causal"
 	"github.com/pulsetrace/shared/client"
@@ -147,7 +148,16 @@ func main() {
 	}()
 
 	// ── LLM Chat Handler ──────────────────────────────────────────────────────
-	chatHandler := handler.NewChatHandler(ollamaProvider)
+	// gatewayURL lets the chat handler's natural-language query experience
+	// run real queries (search_logs/search_traces/query_metric) against
+	// gateway-service's existing endpoints instead of the LLM ever
+	// fabricating telemetry numbers — see internal/query/executor.go.
+	gatewayURL := os.Getenv("GATEWAY_URL")
+	if gatewayURL == "" {
+		gatewayURL = "http://gateway:8080"
+	}
+	queryExecutor := query.NewExecutor(gatewayURL)
+	chatHandler := handler.NewChatHandler(ollamaProvider, queryExecutor)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()

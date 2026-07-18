@@ -52,6 +52,14 @@ spec:
                 configMapKeyRef:
                   name: pulsetrace-config
                   key: TOPOLOGY_SERVICE_URL
+            # Natural-language query experience: lets the chat handler run
+            # real search_logs/search_traces/query_metric tool calls against
+            # gateway-service instead of the LLM inventing telemetry numbers.
+            - name: GATEWAY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: GATEWAY_URL
             # Used by the anomaly detector to poll real per-service RED metrics
             # directly from ClickHouse — see anomaly_detector.go.
             - name: CLICKHOUSE_URL

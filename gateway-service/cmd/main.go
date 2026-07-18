@@ -103,6 +103,11 @@ func main() {
 		{Prefix: "/api/v1/alerts", Upstream: alertServiceURL},
 		{Prefix: "/api/v1/incidents", Upstream: correlationServiceURL},
 		{Prefix: "/api/v1/slo", Upstream: correlationServiceURL},
+		// Previously missing entirely - the homepage's "AI SRE" chat page
+		// (frontend/src/app/page.tsx) has always POSTed to /api/v1/chat, but
+		// with no route for it here, every request 404'd at the gateway and
+		// never reached correlation-service's ChatHandler.
+		{Prefix: "/api/v1/chat", Upstream: correlationServiceURL},
 		{Prefix: "/api/v1/topology/", Upstream: topologyServiceURL},
 		{Prefix: "/api/v1/actions", Upstream: actionServiceURL},
 		{Prefix: "/api/v1/profiler/", Upstream: pyroscopeURL},

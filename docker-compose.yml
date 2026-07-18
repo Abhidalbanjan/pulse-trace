@@ -290,6 +290,11 @@ services:
       QUICKWIT_URL: http://quickwit:7280
       HYBRID_MODE: "true"
       CONTROL_PLANE_URL: http://gateway:8080/api/v1/control-plane/incidents
+      # Lets the chat handler's natural-language query experience run real
+      # search_logs/search_traces/query_metric tool calls against
+      # gateway-service's own endpoints (auth-scoped by the asking user's
+      # forwarded bearer token) instead of the LLM inventing numbers.
+      GATEWAY_URL: http://gateway:8080
       PORT: "8083"
       # Used by the anomaly detector to poll real per-service RED metrics directly
       # from ClickHouse (queried directly rather than via gateway's authenticated

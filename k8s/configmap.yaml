@@ -21,6 +21,10 @@ data:
   CORRELATION_SERVICE_URL: "http://correlation-service:8083"
   TOPOLOGY_SERVICE_URL: "http://topology-service:8084"
   ACTION_SERVICE_URL: "http://action-service:8085"
+  # Used by correlation-service's chat handler to run real search_logs/
+  # search_traces/query_metric tool calls (natural-language query experience)
+  # against gateway-service's own endpoints instead of the LLM inventing data.
+  GATEWAY_URL: "http://gateway:8080"
   # ClickHouse (non-secret parts) — used by gateway and correlation-service
   # (anomaly detector queries it directly; see anomaly_detector.go)
   CLICKHOUSE_URL: "http://clickhouse:8123"

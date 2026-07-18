@@ -6,6 +6,7 @@ import { RolesPanel } from './RolesPanel';
 import { PoliciesPanel } from './PoliciesPanel';
 import { AuditLogPanel } from './AuditLogPanel';
 import { RateLimitsPanel } from './RateLimitsPanel';
+import { AlertRulesPanel } from './AlertRulesPanel';
 import { useTheme } from '@/context/ThemeContext';
 
 export function SettingsView() {
@@ -348,33 +349,27 @@ export function SettingsView() {
 
         {activeTab === 'alerts' && (
            <div>
-             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '28px', gap: '16px', flexWrap: 'wrap' }}>
-              <div>
-                <h3 style={{ fontSize: '19px', fontWeight: 700, margin: '0 0 8px', color: t.text1 }}>Alert Channels</h3>
-                <p style={{ color: t.text2, fontSize: '13.5px', maxWidth: '520px', lineHeight: 1.6 }}>Configure where PulseTrace sends incident alerts.</p>
-              </div>
-              <button style={primaryBtnStyle}>+ Add Channel</button>
-            </div>
+             <AlertRulesPanel />
 
-             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
-                <div style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '24px', borderRadius: '12px', border: '1px solid ' + t.panelBorder }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}>
-                    <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', color: t.text1 }}>
+             <div style={{ marginTop: '40px', paddingTop: '32px', borderTop: '1px solid ' + t.panelBorder }}>
+               <h3 style={{ fontSize: '16px', fontWeight: 700, margin: '0 0 8px', color: t.text1 }}>Alert Channels</h3>
+               <p style={{ color: t.text2, fontSize: '13px', maxWidth: '560px', lineHeight: 1.6, marginBottom: '20px' }}>
+                 Where matched alert rules are delivered. Configured via environment variables on notification-service — set these and redeploy to change delivery, there is no in-app channel editor yet.
+               </p>
+               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                  <div style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '24px', borderRadius: '12px', border: '1px solid ' + t.panelBorder }}>
+                    <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', color: t.text1, marginBottom: '12px' }}>
                       <span style={{ color: '#E01E5A' }}>#</span> Slack
                     </div>
-                    <span style={{ color: t.green, fontSize: '12px' }}>Connected</span>
+                    <p style={{ color: t.text2, fontSize: '13px' }}>Set <code>SLACK_WEBHOOK_URL</code> on notification-service to enable.</p>
                   </div>
-                  <p style={{ color: t.text2, fontSize: '13px' }}>Sending critical alerts to #eng-oncall</p>
-                </div>
-                <div style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '24px', borderRadius: '12px', border: '1px solid ' + t.panelBorder }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}>
-                    <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', color: t.text1 }}>
-                      <span style={{ color: t.green }}>✉</span> PagerDuty
+                  <div style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '24px', borderRadius: '12px', border: '1px solid ' + t.panelBorder }}>
+                    <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', color: t.text1, marginBottom: '12px' }}>
+                      <span style={{ color: t.green }}>✉</span> Email (SMTP)
                     </div>
-                    <span style={{ color: t.text2, fontSize: '12px' }}>Not Configured</span>
+                    <p style={{ color: t.text2, fontSize: '13px' }}>Set <code>SMTP_HOST</code>, <code>SMTP_USERNAME</code>, <code>SMTP_PASSWORD</code> on notification-service to enable.</p>
                   </div>
-                  <p style={{ color: t.text2, fontSize: '13px' }}>Trigger on-call escalations.</p>
-                </div>
+               </div>
              </div>
            </div>
         )}

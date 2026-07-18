@@ -127,6 +127,11 @@ func main() {
 	anomalyDetector := engine.NewAnomalyDetector(topoClient)
 	go anomalyDetector.Start(ctx)
 
+	// ── User-Defined Alert Rules ──────────────────────────────────────────────
+	alertRuleRepo := repository.NewAlertRuleRepository(pool)
+	alertRuleEvaluator := engine.NewAlertRuleEvaluator(alertRuleRepo, publisher)
+	go alertRuleEvaluator.Start(ctx)
+
 	// ── Kafka consumer (alerts topic) ─────────────────────────────────────────
 	cg, err := kafka.NewConsumerGroup(groupID, []string{alertsTopic}, correlator.Handle)
 	if err != nil {

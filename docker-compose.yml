@@ -112,6 +112,7 @@ services:
       - ./gateway-service/migrations/005_scope_editor_permissions.sql:/docker-entrypoint-initdb.d/011_scope_editor_permissions.sql
       - ./gateway-service/migrations/006_create_audit_log.sql:/docker-entrypoint-initdb.d/012_create_audit_log.sql
       - ./gateway-service/migrations/007_create_rate_limit_rules.sql:/docker-entrypoint-initdb.d/013_create_rate_limit_rules.sql
+      - ./gateway-service/migrations/008_create_alert_rules.sql:/docker-entrypoint-initdb.d/014_create_alert_rules.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pulsetrace"]
       interval: 5s

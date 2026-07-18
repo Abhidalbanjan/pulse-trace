@@ -80,6 +80,7 @@ func main() {
 		{Name: "default", PathPrefixes: []string{"/"}, Limit: 600, Window: time.Minute},
 	})
 	rateLimitRuleHandler := handler.NewRateLimitRuleHandler(authHandler.GetDB(), rateLimiter)
+	alertRuleHandler := handler.NewAlertRuleHandler(authHandler.GetDB())
 	rateLimitRuleHandler.StartPolling(ctx, 5*time.Second)
 	rumHandler := handler.NewRUMHandler(clickhouseURL)
 	syntheticsHandler := handler.NewSyntheticsHandler(clickhouseURL, authHandler.GetDB())
@@ -152,6 +153,13 @@ func main() {
 		mux.HandleFunc("POST /api/v1/admin/rate-limits", rateLimitRuleHandler.CreateRateLimitRule)
 		mux.HandleFunc("PUT /api/v1/admin/rate-limits/{id}", rateLimitRuleHandler.UpdateRateLimitRule)
 		mux.HandleFunc("DELETE /api/v1/admin/rate-limits/{id}", rateLimitRuleHandler.DeleteRateLimitRule)
+
+		// User-defined alert rules: DB-backed, evaluated by correlation-service's
+		// AlertRuleEvaluator (polls this same table directly), no redeploy needed.
+		mux.HandleFunc("GET /api/v1/admin/alert-rules", alertRuleHandler.ListAlertRules)
+		mux.HandleFunc("POST /api/v1/admin/alert-rules", alertRuleHandler.CreateAlertRule)
+		mux.HandleFunc("PUT /api/v1/admin/alert-rules/{id}", alertRuleHandler.UpdateAlertRule)
+		mux.HandleFunc("DELETE /api/v1/admin/alert-rules/{id}", alertRuleHandler.DeleteAlertRule)
 	}
 
 	// Analytics APIs (powered by ClickHouse)

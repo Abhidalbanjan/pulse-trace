@@ -37,3 +37,8 @@ docker_related_config.xml
 /correlation-service/vendor/
 /notification-service/vendor/
 /topology-service/vendor/
+
+# Orphaned `go work vendor` snapshot — no Dockerfile, Makefile, or script in
+# this repo builds from it (gateway-service uses its own /gateway-service/vendor/
+# instead, see above). Removed from tracking; keep it from coming back.
+/vendor/

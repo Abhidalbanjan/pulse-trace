@@ -14,11 +14,20 @@ const (
 )
 
 // LogEntry represents a structured log event emitted by a microservice.
+//
+// ServiceName's json tag is "service_name", not the "service" used by the
+// public ingestion API (CreateLogRequest below) — this is what actually gets
+// marshaled and published to Kafka, which Quickwit's native Kafka source
+// indexes verbatim. It must match quickwit/logs-index.yaml's mapped field
+// name ("service_name", fast:true) and what the frontend's log explorer
+// aggregates on (ExplorerView.tsx's service_counts terms aggregation), or
+// that field silently never gets populated — which is exactly what was
+// happening before this fix, since this previously said json:"service".
 type LogEntry struct {
 	TenantID    string    `json:"tenant_id,omitempty" db:"tenant_id"`
 	TenantTier  string    `json:"tenant_tier,omitempty" db:"tenant_tier"`
 	ID          string    `json:"id" db:"id"`
-	ServiceName string    `json:"service" db:"service_name"`
+	ServiceName string    `json:"service_name" db:"service_name"`
 	Level       LogLevel  `json:"level" db:"level"`
 	Message     string    `json:"message" db:"message"`
 	TraceID     string    `json:"trace_id,omitempty" db:"trace_id"`

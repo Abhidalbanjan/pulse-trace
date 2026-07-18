@@ -66,7 +66,11 @@ func main() {
 
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
-	logHandler := handler.NewLogHandler(producer)
+	quickwitURL := os.Getenv("QUICKWIT_URL")
+	if quickwitURL == "" {
+		quickwitURL = "http://quickwit:7280"
+	}
+	logHandler := handler.NewLogHandler(producer, quickwitURL)
 
 	mux := http.NewServeMux()
 	logHandler.RegisterRoutes(mux)

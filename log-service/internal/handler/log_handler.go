@@ -1,10 +1,13 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,8 +24,9 @@ import (
 )
 
 const (
-	logsTopic   = "logs"
-	serviceName = "log-service"
+	logsTopic     = "logs"
+	serviceName   = "log-service"
+	quickwitIndex = "pulsetrace-logs" // must match quickwit/logs-index.yaml's index_id
 )
 
 // LogHandler exposes HTTP endpoints for log ingestion and querying.
@@ -34,16 +38,25 @@ type LogHandler struct {
 	flushInterval time.Duration
 	workersWg     sync.WaitGroup
 	closeChan     chan struct{}
+
+	// quickwitURL backs ListLogs/GetLog. Log search itself runs through
+	// Quickwit's native Kafka source (see quickwit/logs-index.yaml) — these
+	// two endpoints are a server-side query convenience for API consumers who
+	// shouldn't need to know Quickwit exists, not the ingestion path.
+	quickwitURL string
+	httpClient  *http.Client
 }
 
 // NewLogHandler creates a handler with high-performance buffered queue and worker pool.
-func NewLogHandler(producer *kafka.Producer) *LogHandler {
+func NewLogHandler(producer *kafka.Producer, quickwitURL string) *LogHandler {
 	h := &LogHandler{
 		producer:      producer,
 		logQueue:      make(chan *models.LogEntry, 100000), // 100k buffered elements shock absorber
 		batchSize:     2000,                               // bulk pgx/kafka batch threshold
 		flushInterval: 100 * time.Millisecond,             // maximum latency threshold
 		closeChan:     make(chan struct{}),
+		quickwitURL:   quickwitURL,
+		httpClient:    &http.Client{Timeout: 10 * time.Second},
 	}
 
 	// Spin up 8 concurrent high-throughput ingestion workers
@@ -221,12 +234,163 @@ func (h *LogHandler) Close() {
 	log.Println("log-service log handler shutdown complete.")
 }
 
-func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, models.Fail("Log search is now powered natively by Quickwit. Please query the Quickwit search API directly."))
+// quickwitSearchRequest mirrors the subset of Quickwit's search API this
+// handler uses. See https://quickwit.io/docs/reference/rest-api for the
+// full shape; max_hits/sort_by_field/query are all it needs here.
+type quickwitSearchRequest struct {
+	Query       string `json:"query"`
+	MaxHits     int    `json:"max_hits"`
+	SortByField string `json:"sort_by_field,omitempty"`
 }
 
+type quickwitSearchResponse struct {
+	Hits []json.RawMessage `json:"hits"`
+}
+
+// buildLogQuery translates ListLogs' query params into a Quickwit query
+// string. Every clause is deliberately quoted/escaped rather than
+// concatenated raw, since these values come straight from the request.
+func buildLogQuery(r *http.Request, tenantID string) string {
+	clauses := []string{fmt.Sprintf("tenant_id:%q", tenantID)}
+
+	if svc := r.URL.Query().Get("service"); svc != "" {
+		clauses = append(clauses, fmt.Sprintf("service_name:%q", svc))
+	}
+	if level := r.URL.Query().Get("level"); level != "" {
+		clauses = append(clauses, fmt.Sprintf("level:%q", strings.ToUpper(level)))
+	}
+	if traceID := r.URL.Query().Get("trace_id"); traceID != "" {
+		clauses = append(clauses, fmt.Sprintf("trace_id:%q", traceID))
+	}
+	if q := r.URL.Query().Get("q"); q != "" {
+		clauses = append(clauses, fmt.Sprintf("message:%q", q))
+	}
+
+	return strings.Join(clauses, " AND ")
+}
+
+// ListLogs searches recent logs via Quickwit, scoped to the caller's tenant.
+//
+//	GET /api/v1/logs?service=&level=&trace_id=&q=&limit=
+func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
+	tracer := otel.Tracer(serviceName)
+	ctx, span := tracer.Start(r.Context(), "log.list")
+	defer span.End()
+
+	if h.quickwitURL == "" {
+		writeJSON(w, http.StatusServiceUnavailable, models.Fail("log search is not configured (QUICKWIT_URL unset)"))
+		return
+	}
+
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+
+	req := quickwitSearchRequest{
+		Query:       buildLogQuery(r, tenantID),
+		MaxHits:     limit,
+		SortByField: "-timestamp",
+	}
+
+	hits, err := h.searchQuickwit(ctx, req)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "quickwit search failed")
+		log.Printf("log-service: ListLogs search failed: %v", err)
+		writeJSON(w, http.StatusBadGateway, models.Fail("log search backend unavailable: "+err.Error()))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.OK(hits))
+}
+
+// GetLog fetches a single log entry by ID via Quickwit.
+//
+//	GET /api/v1/logs/{id}
 func (h *LogHandler) GetLog(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, models.Fail("Log search is now powered natively by Quickwit. Please query the Quickwit search API directly."))
+	tracer := otel.Tracer(serviceName)
+	ctx, span := tracer.Start(r.Context(), "log.get")
+	defer span.End()
+
+	if h.quickwitURL == "" {
+		writeJSON(w, http.StatusServiceUnavailable, models.Fail("log search is not configured (QUICKWIT_URL unset)"))
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, models.Fail("log id is required"))
+		return
+	}
+
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	req := quickwitSearchRequest{
+		Query:   fmt.Sprintf("id:%q AND tenant_id:%q", id, tenantID),
+		MaxHits: 1,
+	}
+
+	hits, err := h.searchQuickwit(ctx, req)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "quickwit search failed")
+		log.Printf("log-service: GetLog search failed: %v", err)
+		writeJSON(w, http.StatusBadGateway, models.Fail("log search backend unavailable: "+err.Error()))
+		return
+	}
+
+	if len(hits) == 0 {
+		writeJSON(w, http.StatusNotFound, models.Fail("log not found"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.OK(hits[0]))
+}
+
+// searchQuickwit posts a search request to Quickwit's REST API and returns
+// the raw hit documents.
+func (h *LogHandler) searchQuickwit(ctx context.Context, sreq quickwitSearchRequest) ([]json.RawMessage, error) {
+	body, err := json.Marshal(sreq)
+	if err != nil {
+		return nil, fmt.Errorf("marshal search request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/%s/search", strings.TrimRight(h.quickwitURL, "/"), quickwitIndex)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build search request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := h.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("call quickwit: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil // index not created yet / no data ingested
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("quickwit returned status %d", resp.StatusCode)
+	}
+
+	var sresp quickwitSearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sresp); err != nil {
+		return nil, fmt.Errorf("decode quickwit response: %w", err)
+	}
+	return sresp.Hits, nil
 }
 
 // Health is a simple liveness probe.

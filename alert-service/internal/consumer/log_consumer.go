@@ -11,7 +11,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/pulsetrace/alert-service/internal/repository"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/models"
 	"github.com/pulsetrace/shared/telemetry"
@@ -28,15 +27,23 @@ var alertLevels = map[models.LogLevel]bool{
 	models.LogLevelFatal: true,
 }
 
+// alertStore is the subset of the alert repository the consumer needs. Depending
+// on the interface (rather than the concrete *repository.AlertRepository) lets
+// the alerting-decision logic — which levels create an alert, FATAL force-keep,
+// error propagation — be unit-tested with a fake, no database required.
+type alertStore interface {
+	Insert(ctx context.Context, entry *models.LogEntry) (*models.Alert, error)
+}
+
 // LogConsumer processes log events from Kafka and creates alerts for
 // ERROR and FATAL entries, then publishes them to the alerts topic for
 // the correlation engine to consume.
 type LogConsumer struct {
-	repo     *repository.AlertRepository
+	repo     alertStore
 	producer *kafka.Producer // may be nil — degrades gracefully
 }
 
-func NewLogConsumer(repo *repository.AlertRepository, producer *kafka.Producer) *LogConsumer {
+func NewLogConsumer(repo alertStore, producer *kafka.Producer) *LogConsumer {
 	return &LogConsumer{repo: repo, producer: producer}
 }
 

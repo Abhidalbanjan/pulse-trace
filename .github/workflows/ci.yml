@@ -30,6 +30,25 @@ jobs:
           - topology-service
     env:
       GOWORK: "off"
+      # Ephemeral Postgres for the DB-backed tests (schema-migration runner and
+      # the gateway from-scratch provisioning test). Tests isolate themselves in
+      # throwaway schemas and skip when DATABASE_URL is unset, so services that
+      # don't touch Postgres are unaffected.
+      DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@localhost:5432/pulsetrace?sslmode=disable
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pulsetrace
+          POSTGRES_PASSWORD: pulsetrace_secret
+          POSTGRES_DB: pulsetrace
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pulsetrace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 

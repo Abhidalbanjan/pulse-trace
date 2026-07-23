@@ -15,6 +15,13 @@ import (
 type Route struct {
 	Prefix   string
 	Upstream string
+	// Rewrite, if set, transforms the incoming request path before it's
+	// forwarded upstream. Most routes forward the original path unchanged
+	// (the upstream service already registers handlers matching the exact
+	// gateway-facing path), but some upstreams have a different path shape -
+	// e.g. Quickwit's search API is /api/v1/{index}/search, while the
+	// frontend calls /api/v1/search/{index}/search through the gateway.
+	Rewrite func(path string) string
 }
 
 // Router is a simple reverse proxy that forwards requests based on path prefix.
@@ -39,11 +46,15 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 
 			proxy := httputil.NewSingleHostReverseProxy(target)
+			rewrite := route.Rewrite
 
 			proxy.Director = func(r *http.Request) {
 				r.URL.Scheme = target.Scheme
 				r.URL.Host = target.Host
 				r.Host = target.Host
+				if rewrite != nil {
+					r.URL.Path = rewrite(r.URL.Path)
+				}
 				if _, ok := r.Header["User-Agent"]; !ok {
 					r.Header.Set("User-Agent", "PulseTrace-Gateway/1.0")
 				}

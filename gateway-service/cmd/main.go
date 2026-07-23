@@ -10,6 +10,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -111,7 +112,13 @@ func main() {
 		{Prefix: "/api/v1/topology/", Upstream: topologyServiceURL},
 		{Prefix: "/api/v1/actions", Upstream: actionServiceURL},
 		{Prefix: "/api/v1/profiler/", Upstream: pyroscopeURL},
-		{Prefix: "/api/v1/search/", Upstream: quickwitURL},
+		// Quickwit's real search API is /api/v1/{index}/search, not
+		// /api/v1/search/{index}/search - the frontend's gateway-facing path has
+		// an extra "search" segment used purely to route here, so it must be
+		// stripped (and /api/v1 re-added) before forwarding upstream.
+		{Prefix: "/api/v1/search/", Upstream: quickwitURL, Rewrite: func(p string) string {
+			return "/api/v1" + strings.TrimPrefix(p, "/api/v1/search")
+		}},
 		{Prefix: "/api/traces", Upstream: jaegerURL},
 		{Prefix: "/api/services", Upstream: jaegerURL},
 		{Prefix: "/v1/traces", Upstream: otelCollectorHTTPURL},

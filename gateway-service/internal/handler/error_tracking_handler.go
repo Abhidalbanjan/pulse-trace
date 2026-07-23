@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -106,7 +107,11 @@ func (h *ErrorTrackingHandler) ListErrorGroups(w http.ResponseWriter, r *http.Re
 			Operation     string `json:"operation"`
 			Message       string `json:"message"`
 			SampleMessage string `json:"sample_message"`
-			Occurrences   int64  `json:"occurrences"`
+			// ClickHouse's native JSON format serializes UInt64 as a JSON string
+			// (avoids precision loss for values >2^53 in JS clients), not a number
+			// literal - decoding straight into int64 fails the instant any error
+			// data exists at all.
+			Occurrences   string `json:"occurrences"`
 			FirstSeen     string `json:"first_seen"`
 			LastSeen      string `json:"last_seen"`
 			SampleTraceID string `json:"sample_trace_id"`
@@ -124,13 +129,14 @@ func (h *ErrorTrackingHandler) ListErrorGroups(w http.ResponseWriter, r *http.Re
 	for _, d := range result.Data {
 		fp := fingerprint(d.Service, d.Operation, d.Message)
 		fingerprints = append(fingerprints, fp)
+		occurrences, _ := strconv.ParseInt(d.Occurrences, 10, 64)
 		groups = append(groups, errorGroupRow{
 			Fingerprint:   fp,
 			Service:       d.Service,
 			Operation:     d.Operation,
 			Message:       d.Message,
 			SampleMessage: d.SampleMessage,
-			Occurrences:   d.Occurrences,
+			Occurrences:   occurrences,
 			FirstSeen:     d.FirstSeen,
 			LastSeen:      d.LastSeen,
 			SampleTraceID: d.SampleTraceID,

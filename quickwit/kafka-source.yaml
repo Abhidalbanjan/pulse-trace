@@ -3,19 +3,28 @@ source_id: kafka-logs-source
 source_type: kafka
 params:
   topic: logs
-  client_id: quickwit-consumer
-  bootstrap_servers:
-    - kafka:29092
-  enable.auto.commit: true
+  # Quickwit 0.8's Kafka source only recognizes topic/client_log_level/client_params/
+  # enable_backfill_mode at the top level - bootstrap_servers/client_id/enable.auto.commit
+  # aren't real fields there. Native librdkafka settings (including the required
+  # bootstrap.servers) go under client_params instead.
+  client_params:
+    bootstrap.servers: kafka:29092
+    client.id: quickwit-consumer
+    enable.auto.commit: true
 transform:
-  # Use Vector Remap Language (VRL) to parse both JSON and unstructured Syslog via Grok
-  vrl: |
+  # Use Vector Remap Language (VRL) to parse both JSON and unstructured Syslog via Grok.
+  # Quickwit 0.8's source transform schema names this field `script`, not `vrl` -
+  # the old field name silently failed source creation (masked by `|| true` in the
+  # quickwit-setup init container), so log ingestion into Quickwit never worked.
+  script: |
     # By default, Kafka payloads arrive in a 'message' field in Quickwit VRL.
     if starts_with(string!(.message), "{") {
       # It's JSON from our log-service.
       parsed, err = parse_json(.message)
       if err == null {
-        . = merge(., parsed)
+        # merge() is fallible here specifically because `parsed` is inferred as
+        # possibly-non-object (any valid JSON value, not just an object).
+        ., merge_err = merge(., parsed)
       }
     } else {
       # It's an unstructured syslog message, parse with grok
@@ -23,10 +32,11 @@ transform:
       grok_pattern = "%{SYSLOGTIMESTAMP:timestamp} %{SYSLOGHOST:service_name} %{DATA:level} %{GREEDYDATA:message}"
       parsed, err = parse_grok(.message, grok_pattern)
       if err == null {
+        # parse_grok's result is always a known object, so merge() is infallible here.
         . = merge(., parsed)
       }
     }
-    
+
     # Ensure timestamp is a valid datetime for the timestamp_field
     if exists(.timestamp) == false {
        .timestamp = now()

@@ -2,9 +2,11 @@ package handler
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -77,7 +79,24 @@ func (h *LogHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", h.Health)
 }
 
-// IngestLog accepts a structured log entry, enqueues it, and responds immediately.
+// IngestLog accepts either a single structured log entry or a JSON array of
+// entries, enqueues them, and responds immediately.
+//
+// Two things matter in practice because of how the Vector edge agent
+// (vector/vector.toml) forwards logs here:
+//   - Batching: Vector batches up to 5000 events per HTTP POST for ingest
+//     efficiency, so its request bodies arrive as a JSON array, not a lone
+//     object. This endpoint previously only accepted a single object, so
+//     every batched request 400'd.
+//   - Compression: Vector's sink is configured with `compression = "gzip"`,
+//     so those request bodies are gzip-compressed with a `Content-Encoding:
+//     gzip` header. Nothing in the gateway proxy chain or here decompressed
+//     it, so json.Unmarshal was handed raw gzip bytes and failed instantly
+//     ("invalid character '\x1f'" - the gzip magic byte).
+//
+// Both silently dropped every log Vector ever forwarded (its HTTP sink
+// doesn't retry 400s) - logs sent through the edge agent never reached
+// Kafka/Quickwit at all.
 //
 //	POST /api/v1/logs
 func (h *LogHandler) IngestLog(w http.ResponseWriter, r *http.Request) {
@@ -85,36 +104,46 @@ func (h *LogHandler) IngestLog(w http.ResponseWriter, r *http.Request) {
 	_, span := tracer.Start(r.Context(), "log.ingest")
 	defer span.End()
 
-	var req models.CreateLogRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	bodyReader := io.Reader(r.Body)
+	if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
+		gz, err := gzip.NewReader(r.Body)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to decompress gzip request body")
+			writeJSON(w, http.StatusBadRequest, models.Fail("failed to decompress gzip request body: "+err.Error()))
+			return
+		}
+		defer gz.Close()
+		bodyReader = gz
+	}
+
+	body, err := io.ReadAll(bodyReader)
+	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "invalid request body")
-		writeJSON(w, http.StatusBadRequest, models.Fail("invalid request body: "+err.Error()))
+		span.SetStatus(codes.Error, "failed to read request body")
+		writeJSON(w, http.StatusBadRequest, models.Fail("failed to read request body: "+err.Error()))
 		return
 	}
 
-	if req.ServiceName == "" || req.Message == "" || req.Level == "" {
-		span.SetStatus(codes.Error, "missing required fields")
-		writeJSON(w, http.StatusBadRequest, models.Fail("service, level, and message are required"))
-		return
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	var reqs []models.CreateLogRequest
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		if err := json.Unmarshal(trimmed, &reqs); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "invalid request body")
+			writeJSON(w, http.StatusBadRequest, models.Fail("invalid request body: "+err.Error()))
+			return
+		}
+	} else {
+		var single models.CreateLogRequest
+		if err := json.Unmarshal(trimmed, &single); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "invalid request body")
+			writeJSON(w, http.StatusBadRequest, models.Fail("invalid request body: "+err.Error()))
+			return
+		}
+		reqs = []models.CreateLogRequest{single}
 	}
-
-	// Normalize log level to match DB check constraints
-	levelStr := strings.ToUpper(string(req.Level))
-	if levelStr == "WARN" {
-		req.Level = models.LogLevelWarning
-	} else if levelStr == "ERR" {
-		req.Level = models.LogLevelError
-	} else if levelStr == "INF" {
-		req.Level = models.LogLevelInfo
-	} else if levelStr == "DBG" {
-		req.Level = models.LogLevelDebug
-	}
-
-	span.SetAttributes(
-		attribute.String("log.service", req.ServiceName),
-		attribute.String("log.level", string(req.Level)),
-	)
 
 	tenantID := r.Header.Get("X-Tenant-ID")
 	if tenantID == "" {
@@ -125,45 +154,78 @@ func (h *LogHandler) IngestLog(w http.ResponseWriter, r *http.Request) {
 		tenantTier = "standard"
 	}
 
-	// Construct the LogEntry directly
-	entry := &models.LogEntry{
-		ID:          uuid.New().String(),
-		TenantID:    tenantID,
-		TenantTier:  tenantTier,
-		ServiceName: req.ServiceName,
-		Level:       req.Level,
-		Message:     req.Message,
-		TraceID:     req.TraceID,
-		SpanID:      req.SpanID,
-		CreatedAt:   time.Now().UTC(),
-	}
+	span.SetAttributes(attribute.Int("log.batch_size", len(reqs)))
 
-	if req.Timestamp != nil {
-		entry.Timestamp = req.Timestamp.UTC()
-	} else {
-		entry.Timestamp = entry.CreatedAt
-	}
+	entries := make([]*models.LogEntry, 0, len(reqs))
+	for _, req := range reqs {
+		if req.ServiceName == "" || req.Message == "" || req.Level == "" {
+			span.SetStatus(codes.Error, "missing required fields")
+			writeJSON(w, http.StatusBadRequest, models.Fail("service, level, and message are required"))
+			return
+		}
 
-	if len(req.Metadata) > 0 {
-		b, err := json.Marshal(req.Metadata)
-		if err != nil {
-			span.RecordError(err)
-			log.Printf("failed to marshal metadata: %v", err)
+		// Normalize log level to match DB check constraints
+		levelStr := strings.ToUpper(string(req.Level))
+		if levelStr == "WARN" {
+			req.Level = models.LogLevelWarning
+		} else if levelStr == "ERR" {
+			req.Level = models.LogLevelError
+		} else if levelStr == "INF" {
+			req.Level = models.LogLevelInfo
+		} else if levelStr == "DBG" {
+			req.Level = models.LogLevelDebug
+		}
+
+		entry := &models.LogEntry{
+			ID:          uuid.New().String(),
+			TenantID:    tenantID,
+			TenantTier:  tenantTier,
+			ServiceName: req.ServiceName,
+			Level:       req.Level,
+			Message:     req.Message,
+			TraceID:     req.TraceID,
+			SpanID:      req.SpanID,
+			CreatedAt:   time.Now().UTC(),
+		}
+
+		if req.Timestamp != nil {
+			entry.Timestamp = req.Timestamp.UTC()
 		} else {
-			entry.Metadata = string(b)
+			entry.Timestamp = entry.CreatedAt
+		}
+
+		if len(req.Metadata) > 0 {
+			b, err := json.Marshal(req.Metadata)
+			if err != nil {
+				span.RecordError(err)
+				log.Printf("failed to marshal metadata: %v", err)
+			} else {
+				entry.Metadata = string(b)
+			}
+		}
+
+		entries = append(entries, entry)
+	}
+
+	// Enqueue in the high-speed shock-absorber channel
+	enqueued := make([]*models.LogEntry, 0, len(entries))
+	for _, entry := range entries {
+		select {
+		case h.logQueue <- entry:
+			enqueued = append(enqueued, entry)
+		default:
+			span.SetStatus(codes.Error, "ingestion queue full")
+			writeJSON(w, http.StatusServiceUnavailable, models.Fail("ingestion queue is temporarily full under extreme peak load"))
+			return
 		}
 	}
 
-	span.SetAttributes(attribute.String("log.id", entry.ID))
-
-	// Enqueue in the high-speed shock-absorber channel
-	select {
-	case h.logQueue <- entry:
-		writeJSON(w, http.StatusCreated, models.OK(entry))
-	default:
-		span.SetStatus(codes.Error, "ingestion queue full")
-		writeJSON(w, http.StatusServiceUnavailable, models.Fail("ingestion queue is temporarily full under extreme peak load"))
+	if len(enqueued) == 1 {
+		span.SetAttributes(attribute.String("log.id", enqueued[0].ID))
+		writeJSON(w, http.StatusCreated, models.OK(enqueued[0]))
+		return
 	}
+	writeJSON(w, http.StatusCreated, models.OK(enqueued))
 }
 
 // worker loops continuously, draining the queue and flushing batches.

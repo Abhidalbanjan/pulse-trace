@@ -15,11 +15,13 @@ import (
 	"github.com/pulsetrace/correlation-service/internal/llm"
 	"github.com/pulsetrace/correlation-service/internal/query"
 	"github.com/pulsetrace/correlation-service/internal/repository"
+	correlationmigrations "github.com/pulsetrace/correlation-service/migrations"
 	"github.com/pulsetrace/shared/causal"
 	"github.com/pulsetrace/shared/client"
 	"github.com/pulsetrace/shared/db"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/middleware"
+	"github.com/pulsetrace/shared/migrate"
 	"github.com/pulsetrace/shared/rabbitmq"
 	"github.com/pulsetrace/shared/telemetry"
 	"github.com/grafana/pyroscope-go"
@@ -71,6 +73,19 @@ func main() {
 		log.Fatalf("database connection failed: %v", err)
 	}
 	defer pool.Close()
+
+	// Apply this service's schema migrations (incidents, causal fields, SLO
+	// tables, tenant fields) before serving. Uses a short-lived database/sql
+	// handle since the runtime pool is pgx-native.
+	if migDB, err := db.OpenSQLForMigrations(ctx); err != nil {
+		log.Fatalf("correlation-service: could not open db for migrations: %v", err)
+	} else {
+		if err := migrate.Run(ctx, migDB, "correlation", correlationmigrations.FS); err != nil {
+			migDB.Close()
+			log.Fatalf("correlation-service: schema migration failed: %v", err)
+		}
+		migDB.Close()
+	}
 
 	// ── RabbitMQ publisher ────────────────────────────────────────────────────
 	publisher, err := rabbitmq.NewPublisher()

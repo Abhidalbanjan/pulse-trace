@@ -13,9 +13,11 @@ import (
 	"github.com/pulsetrace/alert-service/internal/consumer"
 	"github.com/pulsetrace/alert-service/internal/handler"
 	"github.com/pulsetrace/alert-service/internal/repository"
+	alertmigrations "github.com/pulsetrace/alert-service/migrations"
 	"github.com/pulsetrace/shared/db"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/middleware"
+	"github.com/pulsetrace/shared/migrate"
 	"github.com/pulsetrace/shared/telemetry"
 	"github.com/grafana/pyroscope-go"
 )
@@ -66,6 +68,17 @@ func main() {
 		log.Fatalf("database connection failed: %v", err)
 	}
 	defer pool.Close()
+
+	// Apply this service's schema migrations (the alerts table) before serving.
+	if migDB, err := db.OpenSQLForMigrations(ctx); err != nil {
+		log.Fatalf("alert-service: could not open db for migrations: %v", err)
+	} else {
+		if err := migrate.Run(ctx, migDB, "alert", alertmigrations.FS); err != nil {
+			migDB.Close()
+			log.Fatalf("alert-service: schema migration failed: %v", err)
+		}
+		migDB.Close()
+	}
 
 	// ── Kafka producer (for publishing alerts to correlation engine) ───────────
 	producer, err := kafka.NewProducer()

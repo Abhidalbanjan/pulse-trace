@@ -19,7 +19,9 @@ import (
 	"github.com/pulsetrace/gateway-service/internal/handler"
 	"github.com/pulsetrace/gateway-service/internal/pii"
 	"github.com/pulsetrace/gateway-service/internal/proxy"
+	gatewaymigrations "github.com/pulsetrace/gateway-service/migrations"
 	"github.com/pulsetrace/shared/middleware"
+	"github.com/pulsetrace/shared/migrate"
 	"github.com/pulsetrace/shared/telemetry"
 )
 
@@ -63,6 +65,19 @@ func main() {
 	authHandler, err := auth.NewAuthHandler()
 	if err != nil {
 		log.Printf("gateway-service: auth database connection failed: %v", err)
+	}
+
+	// Apply this service's schema migrations before serving. gateway-service
+	// owns the users/RBAC/deployments/error-tracking/rate-limit/audit tables;
+	// previously these were only created by hand, so a fresh database came up
+	// missing every one of them. Reuse the auth handler's existing lib/pq
+	// connection (multi-statement Exec works natively there).
+	if authHandler != nil && authHandler.GetDB() != nil {
+		if err := migrate.Run(ctx, authHandler.GetDB(), "gateway", gatewaymigrations.FS); err != nil {
+			log.Fatalf("gateway-service: schema migration failed: %v", err)
+		}
+	} else {
+		log.Println("gateway-service: WARNING — no database connection, skipping migrations")
 	}
 	analyticsHandler := handler.NewAnalyticsHandler(clickhouseURL)
 	serviceHandler := handler.NewServiceHandler(clickhouseURL)

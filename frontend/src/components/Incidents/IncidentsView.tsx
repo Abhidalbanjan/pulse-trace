@@ -16,15 +16,24 @@ export function IncidentsView() {
     fetchWithAuth('/api/v1/incidents')
       .then(res => res.json())
       .then(data => {
-        if (data && Array.isArray(data)) {
+        // The API wraps results as { success, data: [...] } (see gateway-service's
+        // models.OK helper) - it never returns a bare array, so the old
+        // `Array.isArray(data)` check here always failed and silently discarded
+        // every incident.
+        const rawIncidents = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : null;
+        if (rawIncidents) {
           // Map backend model to UI fields if necessary, or just use it directly
-          const mappedIncidents = data.map(inc => ({
+          const mappedIncidents = rawIncidents.map((inc: any) => ({
             id: inc.id,
-            title: `Incident in ${inc.service_names?.[0] || 'Unknown'}`,
+            // The API's incident model names this field `services` (see
+            // correlation-service/internal/models), not `service_names` - every
+            // incident rendered as "Incident in Unknown" with no affected-service
+            // chips because this always read undefined.
+            title: `Incident in ${inc.services?.[0] || 'Unknown'}`,
             status: inc.status || 'OPEN',
             severity: inc.severity || 'WARNING',
             started_at: inc.started_at,
-            services_affected: inc.service_names || [],
+            services_affected: inc.services || [],
             root_cause: inc.causal?.chain ? "Causal AI has identified a potential root cause path." : "Awaiting AI analysis.",
             causal_chain: (inc.causal?.chain || []).map((link: any) => ({
                from: link.from_service,

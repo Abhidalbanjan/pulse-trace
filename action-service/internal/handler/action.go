@@ -18,6 +18,9 @@ func NewActionHandler(operator *k8s.Operator) *ActionHandler {
 type ExecuteRequest struct {
 	ActionType string            `json:"action_type"`
 	Target     string            `json:"target"`
+	// Namespace the target deployment lives in. Empty falls back to the operator's
+	// configured default namespace, so single-namespace callers need not set it.
+	Namespace  string            `json:"namespace"`
 	Parameters map[string]string `json:"parameters"`
 }
 
@@ -28,7 +31,7 @@ func (h *ActionHandler) ExecuteAction(c *gin.Context) {
 		return
 	}
 
-	err := h.operator.ExecuteRunbook(req.ActionType, req.Target, req.Parameters)
+	err := h.operator.ExecuteRunbook(req.ActionType, req.Target, req.Namespace, req.Parameters)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

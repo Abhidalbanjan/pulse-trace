@@ -46,3 +46,8 @@ docker_related_config.xml
 # Tool config/output, not project source
 /.claude/
 /graphify-out/
+
+# Real k8s secrets are never committed — deployments edit this in place, so a
+# committed value leaks permanently into git history. Copy k8s/secret.yaml.example
+# to k8s/secret.yaml locally, or sync via External Secrets (k8s/externalsecret.yaml.example).
+/k8s/secret.yaml

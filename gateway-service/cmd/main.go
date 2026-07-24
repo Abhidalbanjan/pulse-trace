@@ -79,6 +79,10 @@ func main() {
 	} else {
 		log.Println("gateway-service: WARNING — no database connection, skipping migrations")
 	}
+	// Per-tenant ingestion keys: the source of truth for which tenant an
+	// ingestion request belongs to. AuthMiddleware resolves the presented key
+	// against this store instead of trusting a client-supplied X-Tenant-ID header.
+	ingestionKeys := auth.NewIngestionKeyStore(authHandler.GetDB())
 	analyticsHandler := handler.NewAnalyticsHandler(clickhouseURL)
 	serviceHandler := handler.NewServiceHandler(clickhouseURL)
 	metricsHandler := handler.NewMetricsHandler(clickhouseURL)
@@ -160,6 +164,14 @@ func main() {
 		mux.HandleFunc("POST /api/v1/admin/users", authHandler.CreateUser)
 		mux.HandleFunc("DELETE /api/v1/admin/users", authHandler.DeleteUser)
 		mux.HandleFunc("PUT /api/v1/admin/users/role", authHandler.UpdateUserRole)
+
+		// Per-tenant ingestion keys: mint/list/revoke the credentials telemetry
+		// agents present so ingestion is attributed to a tenant server-side rather
+		// than from a spoofable header. Admin-gated by RBACEngine.Middleware like
+		// every other /api/v1/admin route.
+		mux.HandleFunc("GET /api/v1/admin/ingestion-keys", ingestionKeys.ListIngestionKeys)
+		mux.HandleFunc("POST /api/v1/admin/ingestion-keys", ingestionKeys.CreateIngestionKey)
+		mux.HandleFunc("DELETE /api/v1/admin/ingestion-keys/{id}", ingestionKeys.RevokeIngestionKey)
 
 		// Dynamic RBAC: role CRUD (permissions e.g. "read"/"write"/"admin"/"*")
 		mux.HandleFunc("GET /api/v1/admin/roles", rbacEngine.ListRoles)
@@ -246,7 +258,7 @@ func main() {
 	chain = rbacEngine.Middleware(chain)
 	chain = pii.PIISanitizerMiddleware(chain)
 	chain = rateLimiter.RateLimit(chain)
-	chain = auth.AuthMiddleware(chain)
+	chain = auth.AuthMiddleware(ingestionKeys)(chain)
 	chain = middleware.RequestLogger(chain)
 	chain = middleware.Tracing(serviceName)(chain)
 	chain = middleware.CORS(chain)

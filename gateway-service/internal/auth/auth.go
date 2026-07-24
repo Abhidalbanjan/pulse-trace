@@ -147,76 +147,133 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(TokenResponse{Token: tokenString, Role: role})
 }
 
-// AuthMiddleware validates the JWT token
-func AuthMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow login, registration, OTLP, control plane, log ingestion (POST), and RUM
-		// ingestion (POST) endpoints without token. RUM specifically must stay
-		// unauthenticated: it captures page views/errors/web-vitals for every visitor,
-		// including anonymous sessions on public pages like /login before sign-in.
-		isLogIngest := r.URL.Path == "/api/v1/logs" && r.Method == http.MethodPost
-		isRUMIngest := r.URL.Path == "/api/v1/rum/ingest" && r.Method == http.MethodPost
-		if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/api/v1/auth/register" || r.URL.Path == "/healthz" ||
-			r.URL.Path == "/api/v1/auth/sso/login" || r.URL.Path == "/api/v1/auth/sso/callback" ||
-			strings.HasPrefix(r.URL.Path, "/v1/traces") || strings.HasPrefix(r.URL.Path, "/v1/metrics") || strings.HasPrefix(r.URL.Path, "/v1/logs") ||
-			strings.HasPrefix(r.URL.Path, "/api/v1/topology/agent-config") || r.URL.Path == "/api/v1/control-plane/incidents" || isLogIngest || isRUMIngest {
+const (
+	defaultTenantID   = "default"
+	defaultTenantTier = "standard"
+)
 
-			// For unauthenticated telemetry endpoints, propagate tenant headers if provided in request
-			if isLogIngest || strings.HasPrefix(r.URL.Path, "/v1/traces") || strings.HasPrefix(r.URL.Path, "/v1/metrics") || strings.HasPrefix(r.URL.Path, "/v1/logs") {
-				tenantID := r.Header.Get("X-Tenant-ID")
-				if tenantID == "" {
-					tenantID = "default"
+// requireIngestionKey, when true, rejects server-side telemetry ingestion that
+// doesn't present a valid ingestion key instead of quietly attributing it to the
+// "default" tenant. It defaults to false so a fresh local/dev stack ingests out
+// of the box, but MUST be set true in any real multi-tenant deployment — the
+// same posture the codebase already takes for JWT_SECRET. Read once at startup.
+var requireIngestionKey = strings.EqualFold(os.Getenv("REQUIRE_INGESTION_KEY"), "true")
+
+// bearerToken extracts the token from an "Authorization: Bearer <token>" header,
+// or "" if absent/malformed.
+func bearerToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if h == "" || !strings.HasPrefix(h, "Bearer ") {
+		return ""
+	}
+	return strings.TrimPrefix(h, "Bearer ")
+}
+
+// AuthMiddleware authenticates requests and, crucially, resolves tenant identity
+// from a server-verifiable credential rather than a client-supplied header.
+//
+// Two credential types are recognized:
+//   - a JWT (dashboard/API users) → tenant comes from signed claims;
+//   - an ingestion key (telemetry agents) → tenant comes from the ingestion_keys
+//     row the key hashes to (see IngestionKeyStore).
+//
+// Before this, ingestion endpoints trusted an X-Tenant-ID request header
+// verbatim, so any caller could write into any tenant's data. That header (and
+// the other identity headers downstream services trust) is now stripped from
+// every inbound request up front and only ever re-set from a verified source.
+func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Strip client-supplied identity headers on EVERY request. Downstream
+			// services trust these to mean "the gateway verified this"; a client
+			// must never be able to set them itself, on any route.
+			r.Header.Del("X-Tenant-ID")
+			r.Header.Del("X-Tenant-Tier")
+			r.Header.Del("X-User-Role")
+			r.Header.Del("X-User-Subject")
+
+			// Route classification.
+			// NOTE: the OTLP/gRPC path (port 4317) is a raw TCP tunnel that bypasses
+			// this middleware entirely, so it can't be key-authenticated here — that
+			// needs collector-level auth and is tracked as a follow-up. This covers
+			// every HTTP ingestion path.
+			isOTLPHTTP := strings.HasPrefix(r.URL.Path, "/v1/traces") ||
+				strings.HasPrefix(r.URL.Path, "/v1/metrics") ||
+				strings.HasPrefix(r.URL.Path, "/v1/logs")
+			isLogIngest := r.URL.Path == "/api/v1/logs" && r.Method == http.MethodPost
+			isServerIngest := isOTLPHTTP || isLogIngest
+			// RUM comes from browsers and must stay reachable for anonymous visitors
+			// on public pages (e.g. /login before sign-in), so it is never blocked by
+			// REQUIRE_INGESTION_KEY. Per-tenant RUM attribution via a public client
+			// token is a Phase 2/3 follow-up; today an un-keyed RUM event is 'default'.
+			isRUMIngest := r.URL.Path == "/api/v1/rum/ingest" && r.Method == http.MethodPost
+
+			if isServerIngest || isRUMIngest {
+				if tenantID, tier, ok := keys.Resolve(r.Context(), bearerToken(r)); ok {
+					r.Header.Set("X-Tenant-ID", tenantID)
+					r.Header.Set("X-Tenant-Tier", tier)
+				} else {
+					if isServerIngest && requireIngestionKey {
+						http.Error(w, "Unauthorized: valid ingestion key required", http.StatusUnauthorized)
+						return
+					}
+					r.Header.Set("X-Tenant-ID", defaultTenantID)
+					r.Header.Set("X-Tenant-Tier", defaultTenantTier)
 				}
-				tenantTier := r.Header.Get("X-Tenant-Tier")
-				if tenantTier == "" {
-					tenantTier = "standard"
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Other public (no-token) endpoints. No tenant is attributed here.
+			if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/api/v1/auth/register" || r.URL.Path == "/healthz" ||
+				r.URL.Path == "/api/v1/auth/sso/login" || r.URL.Path == "/api/v1/auth/sso/config" || r.URL.Path == "/api/v1/auth/sso/callback" ||
+				strings.HasPrefix(r.URL.Path, "/api/v1/topology/agent-config") || r.URL.Path == "/api/v1/control-plane/incidents" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Everything else requires a valid JWT.
+			tokenStr := bearerToken(r)
+			if tokenStr == "" {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+
+			token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+				if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+					return nil, errors.New("unexpected signing method")
 				}
-				r.Header.Set("X-Tenant-ID", tenantID)
-				r.Header.Set("X-Tenant-Tier", tenantTier)
+				return jwtSecret, nil
+			})
+			if err != nil || !token.Valid {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+
+			// Set identity headers strictly from signed claims.
+			claims, ok := token.Claims.(jwt.MapClaims)
+			if ok && token.Valid {
+				if role, _ := claims["role"].(string); role != "" {
+					r.Header.Set("X-User-Role", role)
+				}
+				if sub, _ := claims["sub"].(string); sub != "" {
+					r.Header.Set("X-User-Subject", sub)
+				}
+				if tenantID, _ := claims["tenant_id"].(string); tenantID != "" {
+					r.Header.Set("X-Tenant-ID", tenantID)
+				} else {
+					r.Header.Set("X-Tenant-ID", defaultTenantID)
+				}
+				if tenantTier, _ := claims["tenant_tier"].(string); tenantTier != "" {
+					r.Header.Set("X-Tenant-Tier", tenantTier)
+				} else {
+					r.Header.Set("X-Tenant-Tier", defaultTenantTier)
+				}
 			}
 
 			next.ServeHTTP(w, r)
-			return
-		}
-
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-		token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, errors.New("unexpected signing method")
-			}
-			return jwtSecret, nil
 		})
-
-		if err != nil || !token.Valid {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		// Extract claims and pass to context if needed
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if ok && token.Valid {
-			r.Header.Set("X-User-Role", claims["role"].(string))
-			r.Header.Set("X-User-Subject", claims["sub"].(string))
-			if tenantID, exists := claims["tenant_id"].(string); exists {
-				r.Header.Set("X-Tenant-ID", tenantID)
-			} else {
-				r.Header.Set("X-Tenant-ID", "default")
-			}
-			if tenantTier, exists := claims["tenant_tier"].(string); exists {
-				r.Header.Set("X-Tenant-Tier", tenantTier)
-			} else {
-				r.Header.Set("X-Tenant-Tier", "standard")
-			}
-		}
-
-		next.ServeHTTP(w, r)
-	})
+	}
 }
 
 type User struct {

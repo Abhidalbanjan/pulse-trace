@@ -49,7 +49,7 @@ func TestGatewaySchemaProvisionsFromScratch(t *testing.T) {
 	// Every table a gateway handler queries must exist after provisioning.
 	wantTables := []string{
 		"users", "error_groups", "deployments", "roles", "abac_policies",
-		"audit_log", "rate_limit_rules", "alert_rules",
+		"audit_log", "rate_limit_rules", "alert_rules", "ingestion_keys",
 	}
 	for _, tbl := range wantTables {
 		var exists bool

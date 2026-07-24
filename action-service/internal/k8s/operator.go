@@ -24,11 +24,11 @@ type Operator struct {
 }
 
 func NewOperator() *Operator {
-	// K8S_TARGET_NAMESPACE is the namespace this operator remediates deployments
-	// in — i.e. where the *customer's* monitored services actually run, which
-	// is essentially never "default" in a real deployment. This was previously
-	// hardcoded to "default", so in any real cluster this operator would only
-	// ever be able to see deployments in a namespace nothing runs in.
+	// K8S_TARGET_NAMESPACE is only the *fallback* namespace, used when a remediation
+	// action doesn't name one. Real clusters spread monitored services across many
+	// namespaces, so the namespace to act in is resolved per-action (from the
+	// service's topology/incident record, passed in by the caller) — see
+	// namespaceFor. A single fixed namespace here could only ever remediate one.
 	namespace := os.Getenv("K8S_TARGET_NAMESPACE")
 	if namespace == "" {
 		namespace = "default"
@@ -63,19 +63,33 @@ func NewOperator() *Operator {
 	}
 }
 
-// ExecuteRunbook performs a specific cluster action (e.g., rolling back a deployment).
-func (o *Operator) ExecuteRunbook(actionType string, target string, parameters map[string]string) error {
-	log.Printf("[K8s Operator] Intercepted Action: %s | Target: %s | Params: %v", actionType, target, parameters)
+// namespaceFor resolves the namespace a given action should run in: the
+// caller-supplied namespace (from the target service's topology record) when
+// present, otherwise the operator's configured fallback. This is what lets one
+// action-service remediate services spread across many namespaces.
+func (o *Operator) namespaceFor(namespace string) string {
+	if namespace != "" {
+		return namespace
+	}
+	return o.namespace
+}
+
+// ExecuteRunbook performs a specific cluster action (e.g., rolling back a
+// deployment) against `namespace` (falling back to the operator default when
+// empty — see namespaceFor).
+func (o *Operator) ExecuteRunbook(actionType, target, namespace string, parameters map[string]string) error {
+	ns := o.namespaceFor(namespace)
+	log.Printf("[K8s Operator] Intercepted Action: %s | Target: %s/%s | Params: %v", actionType, ns, target, parameters)
 
 	if o.clientset == nil {
-		log.Printf("[K8s Operator] MOCK Execution (No K8s cluster): %s on %s", actionType, target)
+		log.Printf("[K8s Operator] MOCK Execution (No K8s cluster): %s on %s/%s", actionType, ns, target)
 		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	deploymentsClient := o.clientset.AppsV1().Deployments(o.namespace)
+	deploymentsClient := o.clientset.AppsV1().Deployments(ns)
 
 	switch actionType {
 	case "ROLLBACK":
@@ -93,7 +107,7 @@ func (o *Operator) ExecuteRunbook(actionType string, target string, parameters m
 			return fmt.Errorf("invalid selector on deployment %s: %w", target, err)
 		}
 
-		rsList, err := o.clientset.AppsV1().ReplicaSets(o.namespace).List(ctx, metav1.ListOptions{
+		rsList, err := o.clientset.AppsV1().ReplicaSets(ns).List(ctx, metav1.ListOptions{
 			LabelSelector: selector.String(),
 		})
 		if err != nil {

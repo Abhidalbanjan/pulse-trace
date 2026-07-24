@@ -507,6 +507,9 @@ Manifests are in `k8s/`. Requires a running cluster with an nginx ingress contro
 # Apply in order
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/configmap.yaml
+# secret.yaml is git-ignored — see k8s/README.md. For dev:
+#   cp k8s/secret.yaml.example k8s/secret.yaml && edit values
+# For prod, sync from a secret backend via k8s/externalsecret.yaml.example.
 kubectl apply -f k8s/secret.yaml        # update values before applying
 kubectl apply -f k8s/log-service.yaml
 kubectl apply -f k8s/alert-service.yaml

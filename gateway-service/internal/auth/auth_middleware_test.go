@@ -125,16 +125,22 @@ func TestIngestionKeyCrossTenantIsolation(t *testing.T) {
 	keyA := seedKey(t, db, "tenant-a", "standard")
 	keyB := seedKey(t, db, "tenant-b", "premium")
 
-	if tid, tier, ok := store.Resolve(ctx, keyA); !ok || tid != "tenant-a" || tier != "standard" {
-		t.Errorf("key A resolved to (%q,%q,%v), want (tenant-a,standard,true)", tid, tier, ok)
+	if tid, tier, scope, ok := store.Resolve(ctx, keyA); !ok || tid != "tenant-a" || tier != "standard" || scope != ScopeIngest {
+		t.Errorf("key A resolved to (%q,%q,%q,%v), want (tenant-a,standard,ingest,true)", tid, tier, scope, ok)
 	}
-	if tid, tier, ok := store.Resolve(ctx, keyB); !ok || tid != "tenant-b" || tier != "premium" {
+	if tid, tier, _, ok := store.Resolve(ctx, keyB); !ok || tid != "tenant-b" || tier != "premium" {
 		t.Errorf("key B resolved to (%q,%q,%v), want (tenant-b,premium,true)", tid, tier, ok)
 	}
 	// Neither key ever resolves to the other's tenant — implicit in the above,
 	// but assert an unknown key yields nothing at all.
-	if _, _, ok := store.Resolve(ctx, "pt_ingest_totally-made-up"); ok {
+	if _, _, _, ok := store.Resolve(ctx, "pt_ingest_totally-made-up"); ok {
 		t.Errorf("an unknown key must not resolve to any tenant")
+	}
+
+	// A public RUM-scoped key resolves with its scope so callers can enforce it.
+	keyR := seedKeyScoped(t, db, "tenant-a", "standard", ScopeRUM)
+	if _, _, scope, ok := store.Resolve(ctx, keyR); !ok || scope != ScopeRUM {
+		t.Errorf("rum key resolved to scope %q (ok=%v), want rum/true", scope, ok)
 	}
 
 	// Revoke A; it must stop resolving (cache is invalidated on revoke).
@@ -142,22 +148,26 @@ func TestIngestionKeyCrossTenantIsolation(t *testing.T) {
 		t.Fatalf("revoke key A: %v", err)
 	}
 	store.invalidateCache()
-	if _, _, ok := store.Resolve(ctx, keyA); ok {
+	if _, _, _, ok := store.Resolve(ctx, keyA); ok {
 		t.Errorf("a revoked key must not resolve")
 	}
 }
 
-// seedKey inserts an ingestion key row for the given tenant and returns the
-// plaintext to present in Resolve.
+// seedKey inserts an ingest-scoped key for the given tenant and returns the plaintext.
 func seedKey(t *testing.T, db *sql.DB, tenantID, tier string) string {
+	return seedKeyScoped(t, db, tenantID, tier, ScopeIngest)
+}
+
+// seedKeyScoped inserts a key of the given scope and returns the plaintext.
+func seedKeyScoped(t *testing.T, db *sql.DB, tenantID, tier, scope string) string {
 	t.Helper()
-	plaintext, prefix, hash, err := generateIngestionKey()
+	plaintext, prefix, hash, err := generateIngestionKey(scope)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
 	if _, err := db.Exec(
-		"INSERT INTO ingestion_keys (name, key_prefix, key_hash, tenant_id, tier) VALUES ($1,$2,$3,$4,$5)",
-		"test-"+tenantID, prefix, hash, tenantID, tier,
+		"INSERT INTO ingestion_keys (name, key_prefix, key_hash, tenant_id, tier, scope) VALUES ($1,$2,$3,$4,$5,$6)",
+		"test-"+tenantID+"-"+scope, prefix, hash, tenantID, tier, scope,
 	); err != nil {
 		t.Fatalf("insert key for %s: %v", tenantID, err)
 	}

@@ -212,12 +212,35 @@ func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
 			// REQUIRE_INGESTION_KEY. Per-tenant RUM attribution via a public client
 			// token is a Phase 2/3 follow-up; today an un-keyed RUM event is 'default'.
 			isRUMIngest := r.URL.Path == "/api/v1/rum/ingest" && r.Method == http.MethodPost
+			// The agent polls agent-config (unauthenticated) for its dynamic log level;
+			// it presents its ingestion key so per-service state is read from the right
+			// tenant rather than always the default one.
+			isAgentConfig := strings.HasPrefix(r.URL.Path, "/api/v1/topology/agent-config")
 
-			if isServerIngest || isRUMIngest {
-				if tenantID, tier, ok := keys.Resolve(r.Context(), bearerToken(r)); ok {
+			if isAgentConfig {
+				if tenantID, tier, _, ok := keys.Resolve(r.Context(), bearerToken(r)); ok {
 					r.Header.Set("X-Tenant-ID", tenantID)
 					r.Header.Set("X-Tenant-Tier", tier)
 				} else {
+					r.Header.Set("X-Tenant-ID", defaultTenantID)
+					r.Header.Set("X-Tenant-Tier", defaultTenantTier)
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			if isServerIngest || isRUMIngest {
+				tenantID, tier, scope, ok := keys.Resolve(r.Context(), bearerToken(r))
+				switch {
+				case ok && isServerIngest && scope != ScopeIngest:
+					// A public RUM token (scope 'rum') can attribute browser RUM to a
+					// tenant but must never be usable to write server telemetry.
+					http.Error(w, "Forbidden: this key is not permitted for server telemetry ingestion", http.StatusForbidden)
+					return
+				case ok:
+					r.Header.Set("X-Tenant-ID", tenantID)
+					r.Header.Set("X-Tenant-Tier", tier)
+				default:
 					if isServerIngest && requireIngestionKey {
 						http.Error(w, "Unauthorized: valid ingestion key required", http.StatusUnauthorized)
 						return
@@ -232,7 +255,7 @@ func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
 			// Other public (no-token) endpoints. No tenant is attributed here.
 			if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/api/v1/auth/register" || r.URL.Path == "/healthz" ||
 				r.URL.Path == "/api/v1/auth/sso/login" || r.URL.Path == "/api/v1/auth/sso/config" || r.URL.Path == "/api/v1/auth/sso/callback" ||
-				strings.HasPrefix(r.URL.Path, "/api/v1/topology/agent-config") || r.URL.Path == "/api/v1/control-plane/incidents" {
+				r.URL.Path == "/api/v1/control-plane/incidents" {
 				next.ServeHTTP(w, r)
 				return
 			}

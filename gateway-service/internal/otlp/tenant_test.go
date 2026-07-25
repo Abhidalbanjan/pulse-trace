@@ -12,18 +12,24 @@ import (
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 )
 
-// fakeResolver resolves exactly one known key.
+// fakeResolver resolves exactly one known key. scope defaults to "ingest" when
+// unset so existing cases keep exercising the server-telemetry path.
 type fakeResolver struct {
 	key    string
 	tenant string
 	tier   string
+	scope  string
 }
 
-func (f fakeResolver) Resolve(_ context.Context, plaintext string) (string, string, bool) {
+func (f fakeResolver) Resolve(_ context.Context, plaintext string) (string, string, string, bool) {
 	if plaintext != "" && plaintext == f.key {
-		return f.tenant, f.tier, true
+		scope := f.scope
+		if scope == "" {
+			scope = scopeIngest
+		}
+		return f.tenant, f.tier, scope, true
 	}
-	return "", "", false
+	return "", "", "", false
 }
 
 func attrValue(attrs []*commonpb.KeyValue, key string) (string, int) {
@@ -77,6 +83,15 @@ func TestAuthTenantResolvesKey(t *testing.T) {
 	tid, tier, err := s.authTenant(ctx)
 	if err != nil || tid != "tA" || tier != "premium" {
 		t.Errorf("authTenant = (%q,%q,%v), want (tA,premium,nil)", tid, tier, err)
+	}
+}
+
+func TestAuthTenantRejectsRumScopedKeyOnGRPC(t *testing.T) {
+	// A public RUM token must not be usable to write server telemetry via gRPC.
+	s := &tenantStamper{resolver: fakeResolver{key: "rumkey", tenant: "tA", tier: "standard", scope: "rum"}, requireKey: false}
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer rumkey"))
+	if _, _, err := s.authTenant(ctx); status.Code(err) != codes.PermissionDenied {
+		t.Errorf("expected PermissionDenied for a rum-scoped key on gRPC, got %v", err)
 	}
 }
 

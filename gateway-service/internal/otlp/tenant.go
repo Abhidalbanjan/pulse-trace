@@ -39,13 +39,18 @@ const (
 
 	defaultTenantID   = "default"
 	defaultTenantTier = "standard"
+
+	// scopeIngest is the key scope permitted to write server telemetry. A public
+	// RUM-scoped key must never be accepted on this (gRPC) path. Kept as a local
+	// constant so this package doesn't import auth.
+	scopeIngest = "ingest"
 )
 
-// TenantResolver maps an ingestion-key plaintext to the tenant it belongs to.
-// Satisfied by auth.IngestionKeyStore, so the gRPC path reuses the exact same
-// key store (and cache) as the HTTP ingestion path.
+// TenantResolver maps an ingestion-key plaintext to the tenant/tier/scope it
+// belongs to. Satisfied by auth.IngestionKeyStore, so the gRPC path reuses the
+// exact same key store (and cache) as the HTTP ingestion path.
 type TenantResolver interface {
-	Resolve(ctx context.Context, plaintext string) (tenantID, tier string, ok bool)
+	Resolve(ctx context.Context, plaintext string) (tenantID, tier, scope string, ok bool)
 }
 
 // tenantStamper holds the shared auth+stamp logic used by all three OTLP service
@@ -62,7 +67,12 @@ type tenantStamper struct {
 // the same policy the HTTP AuthMiddleware applies.
 func (s *tenantStamper) authTenant(ctx context.Context) (tenantID, tier string, err error) {
 	token := bearerFromMetadata(ctx)
-	if tid, tr, ok := s.resolver.Resolve(ctx, token); ok {
+	if tid, tr, scope, ok := s.resolver.Resolve(ctx, token); ok {
+		// The gRPC receiver only carries server telemetry (traces/metrics/logs);
+		// a public RUM-scoped key must never be usable here.
+		if scope != scopeIngest {
+			return "", "", status.Error(codes.PermissionDenied, "this key is not permitted for server telemetry ingestion")
+		}
 		return tid, tr, nil
 	}
 	if s.requireKey {

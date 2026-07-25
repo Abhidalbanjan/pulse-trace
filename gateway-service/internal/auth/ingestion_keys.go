@@ -16,10 +16,26 @@ import (
 	"time"
 )
 
-// ingestionKeyPlaintextPrefix is the human-recognizable prefix every issued key
-// carries, so a leaked key is greppable in logs/secret scanners and obviously a
-// PulseTrace ingestion credential rather than an opaque blob.
-const ingestionKeyPlaintextPrefix = "pt_ingest_"
+// Key scopes. ScopeIngest is a full, secret server-side key; ScopeRUM is a
+// public, RUM-only client token safe to embed in browser JS (see migration 011).
+const (
+	ScopeIngest = "ingest"
+	ScopeRUM    = "rum"
+)
+
+// Plaintext prefixes are human-recognizable so a leaked key is greppable in logs
+// and secret scanners, and the prefix alone tells you which scope it is.
+const (
+	ingestKeyPrefix = "pt_ingest_"
+	rumKeyPrefix    = "pt_rum_"
+)
+
+func prefixForScope(scope string) string {
+	if scope == ScopeRUM {
+		return rumKeyPrefix
+	}
+	return ingestKeyPrefix
+}
 
 // ingestionKeyCacheTTL bounds how long a resolved (or rejected) key is trusted
 // from the in-process cache before we re-check Postgres. Ingestion is high-QPS
@@ -32,6 +48,7 @@ const ingestionKeyCacheTTL = 30 * time.Second
 type resolvedTenant struct {
 	tenantID string
 	tier     string
+	scope    string
 	ok       bool // false = a real negative result (unknown/revoked key), cached to blunt lookup floods
 	cachedAt time.Time
 }
@@ -59,27 +76,29 @@ func hashIngestionKey(plaintext string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// generateIngestionKey mints a fresh key, returning the plaintext (shown to the
-// operator once), a non-secret display prefix, and the hash to persist.
-func generateIngestionKey() (plaintext, prefix, hash string, err error) {
+// generateIngestionKey mints a fresh key of the given scope, returning the
+// plaintext (shown to the operator once), a non-secret display prefix, and the
+// hash to persist.
+func generateIngestionKey(scope string) (plaintext, prefix, hash string, err error) {
 	raw := make([]byte, 32)
 	if _, err = rand.Read(raw); err != nil {
 		return "", "", "", err
 	}
-	plaintext = ingestionKeyPlaintextPrefix + base64.RawURLEncoding.EncodeToString(raw)
+	humanPrefix := prefixForScope(scope)
+	plaintext = humanPrefix + base64.RawURLEncoding.EncodeToString(raw)
 	// First few chars past the human prefix, enough to disambiguate in a list
 	// without leaking anything sensitive.
-	prefix = plaintext[:len(ingestionKeyPlaintextPrefix)+6]
+	prefix = plaintext[:len(humanPrefix)+6]
 	hash = hashIngestionKey(plaintext)
 	return plaintext, prefix, hash, nil
 }
 
-// Resolve verifies a presented plaintext key and returns the tenant/tier it
+// Resolve verifies a presented plaintext key and returns the tenant/tier/scope it
 // belongs to. ok is false for an empty, unknown, or revoked key. Results
 // (including negatives) are cached for ingestionKeyCacheTTL.
-func (s *IngestionKeyStore) Resolve(ctx context.Context, plaintext string) (tenantID, tier string, ok bool) {
+func (s *IngestionKeyStore) Resolve(ctx context.Context, plaintext string) (tenantID, tier, scope string, ok bool) {
 	if plaintext == "" || s == nil || s.db == nil {
-		return "", "", false
+		return "", "", "", false
 	}
 	hash := hashIngestionKey(plaintext)
 
@@ -87,15 +106,15 @@ func (s *IngestionKeyStore) Resolve(ctx context.Context, plaintext string) (tena
 	entry, cached := s.cache[hash]
 	s.mu.RUnlock()
 	if cached && time.Since(entry.cachedAt) < ingestionKeyCacheTTL {
-		return entry.tenantID, entry.tier, entry.ok
+		return entry.tenantID, entry.tier, entry.scope, entry.ok
 	}
 
 	var resolved resolvedTenant
 	resolved.cachedAt = time.Now()
 	err := s.db.QueryRowContext(ctx,
-		"SELECT tenant_id, tier FROM ingestion_keys WHERE key_hash = $1 AND revoked_at IS NULL",
+		"SELECT tenant_id, tier, scope FROM ingestion_keys WHERE key_hash = $1 AND revoked_at IS NULL",
 		hash,
-	).Scan(&resolved.tenantID, &resolved.tier)
+	).Scan(&resolved.tenantID, &resolved.tier, &resolved.scope)
 	switch {
 	case err == nil:
 		resolved.ok = true
@@ -108,13 +127,13 @@ func (s *IngestionKeyStore) Resolve(ctx context.Context, plaintext string) (tena
 		// On a transient DB error, don't cache and don't guess — reject this
 		// request so a Postgres blip can't silently mis-attribute tenant data.
 		log.Printf("ingestion_keys: lookup failed: %v", err)
-		return "", "", false
+		return "", "", "", false
 	}
 
 	s.mu.Lock()
 	s.cache[hash] = resolved
 	s.mu.Unlock()
-	return resolved.tenantID, resolved.tier, resolved.ok
+	return resolved.tenantID, resolved.tier, resolved.scope, resolved.ok
 }
 
 func (s *IngestionKeyStore) touchLastUsed(hash string) {
@@ -144,6 +163,7 @@ type ingestionKeyView struct {
 	KeyPrefix  string  `json:"key_prefix"`
 	TenantID   string  `json:"tenant_id"`
 	Tier       string  `json:"tier"`
+	Scope      string  `json:"scope"`
 	CreatedAt  string  `json:"created_at"`
 	LastUsedAt *string `json:"last_used_at"`
 	RevokedAt  *string `json:"revoked_at"`
@@ -158,7 +178,7 @@ func (s *IngestionKeyStore) ListIngestionKeys(w http.ResponseWriter, r *http.Req
 		return
 	}
 	rows, err := s.db.Query(`
-		SELECT id, name, key_prefix, tenant_id, tier,
+		SELECT id, name, key_prefix, tenant_id, tier, scope,
 		       created_at::text, last_used_at::text, revoked_at::text
 		FROM ingestion_keys
 		ORDER BY created_at DESC`)
@@ -172,7 +192,7 @@ func (s *IngestionKeyStore) ListIngestionKeys(w http.ResponseWriter, r *http.Req
 	out := []ingestionKeyView{}
 	for rows.Next() {
 		var v ingestionKeyView
-		if err := rows.Scan(&v.ID, &v.Name, &v.KeyPrefix, &v.TenantID, &v.Tier, &v.CreatedAt, &v.LastUsedAt, &v.RevokedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.Name, &v.KeyPrefix, &v.TenantID, &v.Tier, &v.Scope, &v.CreatedAt, &v.LastUsedAt, &v.RevokedAt); err != nil {
 			continue
 		}
 		out = append(out, v)
@@ -192,6 +212,7 @@ func (s *IngestionKeyStore) CreateIngestionKey(w http.ResponseWriter, r *http.Re
 		Name     string `json:"name"`
 		TenantID string `json:"tenant_id"`
 		Tier     string `json:"tier"`
+		Scope    string `json:"scope"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -207,8 +228,15 @@ func (s *IngestionKeyStore) CreateIngestionKey(w http.ResponseWriter, r *http.Re
 	if req.Tier == "" {
 		req.Tier = "standard"
 	}
+	if req.Scope == "" {
+		req.Scope = ScopeIngest
+	}
+	if req.Scope != ScopeIngest && req.Scope != ScopeRUM {
+		http.Error(w, "scope must be 'ingest' or 'rum'", http.StatusBadRequest)
+		return
+	}
 
-	plaintext, prefix, hash, err := generateIngestionKey()
+	plaintext, prefix, hash, err := generateIngestionKey(req.Scope)
 	if err != nil {
 		http.Error(w, "failed to generate key", http.StatusInternalServerError)
 		return
@@ -216,8 +244,8 @@ func (s *IngestionKeyStore) CreateIngestionKey(w http.ResponseWriter, r *http.Re
 
 	var id string
 	err = s.db.QueryRow(
-		"INSERT INTO ingestion_keys (name, key_prefix, key_hash, tenant_id, tier) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-		req.Name, prefix, hash, req.TenantID, req.Tier,
+		"INSERT INTO ingestion_keys (name, key_prefix, key_hash, tenant_id, tier, scope) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+		req.Name, prefix, hash, req.TenantID, req.Tier, req.Scope,
 	).Scan(&id)
 	if err != nil {
 		log.Printf("ingestion_keys: failed to create: %v", err)
@@ -228,7 +256,7 @@ func (s *IngestionKeyStore) CreateIngestionKey(w http.ResponseWriter, r *http.Re
 
 	// Audit the creation, but never write the plaintext or hash to the trail.
 	WriteAudit(s.db, actorFromRequest(r), "create", "ingestion_key", id,
-		nil, map[string]string{"name": req.Name, "tenant_id": req.TenantID, "tier": req.Tier, "key_prefix": prefix})
+		nil, map[string]string{"name": req.Name, "tenant_id": req.TenantID, "tier": req.Tier, "scope": req.Scope, "key_prefix": prefix})
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -237,6 +265,7 @@ func (s *IngestionKeyStore) CreateIngestionKey(w http.ResponseWriter, r *http.Re
 		"name":       req.Name,
 		"tenant_id":  req.TenantID,
 		"tier":       req.Tier,
+		"scope":      req.Scope,
 		"key_prefix": prefix,
 		// Shown exactly once. There is no endpoint that can return it again.
 		"key":     plaintext,

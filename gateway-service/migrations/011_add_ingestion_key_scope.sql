@@ -1,0 +1,11 @@
+-- Ingestion-key scope distinguishes two kinds of key:
+--   'ingest' — a full, SECRET server-side key (the PulseTrace agent uses it for
+--              OTLP traces/metrics/logs and /api/v1/logs). Never embed in a browser.
+--   'rum'    — a PUBLIC, RUM-only client token safe to embed in front-end JS. It
+--              can attribute browser RUM events to a tenant but CANNOT ingest
+--              server telemetry, so exposing it only lets someone submit RUM data
+--              for that tenant (low-trust, volume-limited) — not read anything or
+--              write traces/metrics/logs.
+--
+-- Existing keys default to 'ingest' (their prior, full-scope behavior).
+ALTER TABLE ingestion_keys ADD COLUMN IF NOT EXISTS scope VARCHAR(20) NOT NULL DEFAULT 'ingest';

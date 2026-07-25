@@ -27,16 +27,26 @@ export function initRUM(config: RUMConfig = {}) {
   const events: any[] = [];
   let isFlushing = false;
 
+  // Public, RUM-only client token (scope 'rum'). Safe to embed in the bundle: it
+  // can only attribute browser RUM to a tenant, never read data or ingest server
+  // telemetry (enforced gateway-side). When unset, RUM lands in the default tenant.
+  const clientToken = process.env.NEXT_PUBLIC_RUM_CLIENT_TOKEN;
+
   const flush = async () => {
     if (events.length === 0 || isFlushing) return;
     isFlushing = true;
     const batch = [...events];
     events.length = 0;
-    
+
     try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'traceparent': getTraceparentHeader(),
+      };
+      if (clientToken) headers['Authorization'] = `Bearer ${clientToken}`;
       await fetch('/api/v1/rum/ingest', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'traceparent': getTraceparentHeader() },
+        headers,
         body: JSON.stringify(batch),
         keepalive: true
       });

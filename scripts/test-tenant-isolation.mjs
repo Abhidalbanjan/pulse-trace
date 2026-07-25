@@ -45,15 +45,15 @@ async function adminToken() {
   return token;
 }
 
-async function createIngestionKey(token, tenantID) {
+async function createIngestionKey(token, tenantID, scope = 'ingest') {
   const res = await api('/api/v1/admin/ingestion-keys', {
     method: 'POST',
     token,
-    body: { name: 'iso-test-' + tenantID, tenant_id: tenantID },
+    body: { name: `iso-test-${tenantID}-${scope}`, tenant_id: tenantID, scope },
   });
-  if (res.status !== 201) die(`create ingestion key for ${tenantID} returned ${res.status}`);
+  if (res.status !== 201) die(`create ${scope} key for ${tenantID} returned ${res.status}`);
   const { key } = await res.json();
-  if (!key) die(`create ingestion key for ${tenantID} returned no plaintext key`);
+  if (!key) die(`create ${scope} key for ${tenantID} returned no plaintext key`);
   return key;
 }
 
@@ -121,7 +121,24 @@ async function main() {
   if (seenByB.includes(MARKER_A)) die(`LEAK: tenant B can see tenant A's data (${MARKER_A})`);
   console.log('    ✓ tenant B sees only its own errors');
 
-  console.log('✓ PASS: cross-tenant isolation holds');
+  // Scope enforcement: a PUBLIC rum-scoped key can attribute RUM but must NOT be
+  // usable to write server telemetry (/api/v1/logs).
+  const rumKeyA = await createIngestionKey(admin, TENANT_A, 'rum');
+  const logRes = await api('/api/v1/logs', {
+    method: 'POST',
+    key: rumKeyA,
+    body: { service: 'iso', level: 'ERROR', message: 'should-be-rejected' },
+  });
+  if (logRes.status !== 403) die(`a rum-scoped key must be rejected (403) for server ingest, got ${logRes.status}`);
+  const rumRes = await api('/api/v1/rum/ingest', {
+    method: 'POST',
+    key: rumKeyA,
+    body: [{ session_id: 'scope', type: 'error', path: '/iso', user_agent: 'iso', error_msg: 'RUM_SCOPE_OK' }],
+  });
+  if (!rumRes.ok) die(`a rum-scoped key must be accepted for RUM ingest, got ${rumRes.status}`);
+  console.log('    ✓ rum-scoped key rejected for server ingest, accepted for RUM');
+
+  console.log('✓ PASS: cross-tenant isolation + scope enforcement hold');
 }
 
 main().catch((err) => die(err.stack || String(err)));

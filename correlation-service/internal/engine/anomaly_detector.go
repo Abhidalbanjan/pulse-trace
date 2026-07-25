@@ -96,21 +96,24 @@ func (a *AnomalyDetector) pollOnce(ctx context.Context) {
 			continue
 		}
 
-		baseline, ok := a.baselines[row.Service]
+		// Baselines and topology updates are per-tenant: a same-named service in
+		// two tenants gets independent baselines and independent PREDICTIVE_WARNING state.
+		key := baselineKey(row.Tenant, row.Service)
+		baseline, ok := a.baselines[key]
 		if !ok {
 			// First time we've seen this service: seed the baseline with its
 			// current p99 rather than comparing against zero.
-			a.baselines[row.Service] = &serviceBaseline{ewmaP99Ms: row.P99Ms, samples: 1}
+			a.baselines[key] = &serviceBaseline{ewmaP99Ms: row.P99Ms, samples: 1}
 			continue
 		}
 
 		// Compare against the *existing* baseline before folding this sample in,
 		// so the update below doesn't chase its own tail.
 		if baseline.samples >= minSamplesToWarn && baseline.ewmaP99Ms > 0 && row.P99Ms >= baseline.ewmaP99Ms*warnMultiplier {
-			log.Printf("anomaly_detector: ⚠️ %s p99 latency %.1fms is %.1fx its baseline (%.1fms) — PREDICTIVE_WARNING",
-				row.Service, row.P99Ms, row.P99Ms/baseline.ewmaP99Ms, baseline.ewmaP99Ms)
+			log.Printf("anomaly_detector: ⚠️ %s/%s p99 latency %.1fms is %.1fx its baseline (%.1fms) — PREDICTIVE_WARNING",
+				row.tenantOrDefault(), row.Service, row.P99Ms, row.P99Ms/baseline.ewmaP99Ms, baseline.ewmaP99Ms)
 
-			if err := a.topoclient.UpdateServiceState(ctx, row.Service, "PREDICTIVE_WARNING"); err != nil {
+			if err := a.topoclient.UpdateServiceState(ctx, row.tenantOrDefault(), row.Service, "PREDICTIVE_WARNING"); err != nil {
 				log.Printf("anomaly_detector: failed to update predictive state for %s: %v", row.Service, err)
 			}
 		}

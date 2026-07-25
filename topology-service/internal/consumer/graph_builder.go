@@ -35,8 +35,12 @@ func (g *GraphBuilder) Handle(msg *sarama.ConsumerMessage) error {
 		return nil
 	}
 
-	if err := g.repo.UpdateServiceState(ctx, logEntry.ServiceName, "HEALTHY"); err != nil {
-		log.Printf("topology: failed to update state for %s: %v", logEntry.ServiceName, err)
+	tenant := logEntry.TenantID
+	if tenant == "" {
+		tenant = "default"
+	}
+	if err := g.repo.UpdateServiceState(ctx, tenant, logEntry.ServiceName, "HEALTHY"); err != nil {
+		log.Printf("topology: failed to update state for %s/%s: %v", tenant, logEntry.ServiceName, err)
 		span.RecordError(err)
 	}
 	return nil

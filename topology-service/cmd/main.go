@@ -148,7 +148,7 @@ func seedEdges(ctx context.Context, repo *repository.Neo4jRepository) {
 	}
 
 	for _, edge := range edges {
-		if err := repo.UpsertDependencyEdge(ctx, edge[0], edge[1]); err != nil {
+		if err := repo.UpsertDependencyEdge(ctx, "default", edge[0], edge[1]); err != nil {
 			log.Printf("failed to seed edge %s->%s: %v", edge[0], edge[1], err)
 		}
 	}

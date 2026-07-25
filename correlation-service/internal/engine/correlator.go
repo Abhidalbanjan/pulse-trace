@@ -121,14 +121,14 @@ func (c *Correlator) Handle(msg *sarama.ConsumerMessage) error {
 
 	// Predictive Engine Logic: flag downstream services as PREDICTIVE_WARNING
 	go func() {
-		downstream, err := c.topoclient.GetDownstreamDependencies(context.Background(), alert.ServiceName)
+		downstream, err := c.topoclient.GetDownstreamDependencies(context.Background(), alert.TenantID, alert.ServiceName)
 		if err != nil {
 			log.Printf("correlator: failed to get downstream for %s: %v", alert.ServiceName, err)
 			return
 		}
 		for _, ds := range downstream {
 			log.Printf("PREDICTIVE ENGINE: Marking %s as PREDICTIVE_WARNING due to %s degradation", ds, alert.ServiceName)
-			if err := c.topoclient.UpdateServiceState(context.Background(), ds, "PREDICTIVE_WARNING"); err != nil {
+			if err := c.topoclient.UpdateServiceState(context.Background(), alert.TenantID, ds, "PREDICTIVE_WARNING"); err != nil {
 				log.Printf("correlator: failed to update predictive state for %s: %v", ds, err)
 			}
 		}
@@ -179,7 +179,7 @@ func (c *Correlator) scheduleCausalAnalysis(incidentID string) {
 
 		deps := make(map[string][]string)
 		for _, svc := range inc.ServiceNames {
-			upstream, err := c.topoclient.GetUpstreamDependencies(ctx, svc)
+			upstream, err := c.topoclient.GetUpstreamDependencies(ctx, inc.TenantID, svc)
 			if err != nil {
 				log.Printf("causal: failed to get upstream for %s: %v", svc, err)
 				continue
@@ -214,7 +214,7 @@ func (c *Correlator) scheduleCausalAnalysis(incidentID string) {
 
 		// Option 3 Integration: push the causal chain path to Neo4j via topology client!
 		log.Printf("causal: pushing causal chain of length %d to Neo4j topology", len(result.Chain))
-		if err := c.topoclient.UpdateCausalPath(ctx, incidentID, result.Chain); err != nil {
+		if err := c.topoclient.UpdateCausalPath(ctx, inc.TenantID, incidentID, result.Chain); err != nil {
 			log.Printf("causal: failed to push causal path to topology service: %v", err)
 		}
 
@@ -256,7 +256,7 @@ func (c *Correlator) correlate(ctx context.Context, alert *models.Alert) (*model
 	windowStart := alert.TriggeredAt.Add(-correlationWindow)
 
 	// Fetch upstream dependencies to see if this alert cascades from an existing incident.
-	upstream, err := c.topoclient.GetUpstreamDependencies(ctx, alert.ServiceName)
+	upstream, err := c.topoclient.GetUpstreamDependencies(ctx, alert.TenantID, alert.ServiceName)
 	if err != nil {
 		log.Printf("correlator: failed to get upstream for %s: %v", alert.ServiceName, err)
 	}

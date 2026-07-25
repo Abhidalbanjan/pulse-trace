@@ -47,12 +47,31 @@ func envOrDefault(key, fallback string) string {
 // gateway-service's ListServices returns (see
 // gateway-service/internal/handler/service_handler.go).
 type serviceRow struct {
+	Tenant   string  `json:"tenant"`
 	Service  string  `json:"service"`
 	Requests int64   `json:"requests"`
 	Errors   int64   `json:"errors"`
 	P50Ms    float64 `json:"p50_ms"`
 	P90Ms    float64 `json:"p90_ms"`
 	P99Ms    float64 `json:"p99_ms"`
+}
+
+// tenantOrDefault normalizes an empty tenant (e.g. pre-multi-tenant rows whose
+// spans predate tenant stamping) to "default".
+func (s serviceRow) tenantOrDefault() string {
+	if s.Tenant == "" {
+		return "default"
+	}
+	return s.Tenant
+}
+
+// baselineKey namespaces a service's latency baseline by tenant, so two tenants
+// running a same-named service don't share (and corrupt) one baseline.
+func baselineKey(tenant, service string) string {
+	if tenant == "" {
+		tenant = "default"
+	}
+	return tenant + "|" + service
 }
 
 // ErrorRate returns the percentage (0-100) of requests that errored.
@@ -69,6 +88,7 @@ type clickhouseJSONResponse struct {
 
 const redMetricsQuery = `
 	SELECT
+		ResourceAttributes['tenant.id'] as tenant,
 		ServiceName as service,
 		count() as requests,
 		countIf(StatusCode = 'STATUS_CODE_ERROR') as errors,
@@ -77,7 +97,7 @@ const redMetricsQuery = `
 		quantile(0.99)(Duration / 1000000.0) as p99_ms
 	FROM pulsetrace.otel_traces
 	WHERE ParentSpanId = '' AND Timestamp >= now() - INTERVAL 15 MINUTE
-	GROUP BY service
+	GROUP BY tenant, service
 	ORDER BY requests DESC
 	FORMAT JSON
 `

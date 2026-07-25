@@ -30,7 +30,7 @@ func main() {
 	}
 
 	for _, e := range edges {
-		if err := repo.UpsertDependencyEdge(ctx, e[0], e[1]); err != nil {
+		if err := repo.UpsertDependencyEdge(ctx, "default", e[0], e[1]); err != nil {
 			log.Printf("Failed to insert edge %s -> %s: %v", e[0], e[1], err)
 		} else {
 			log.Printf("Inserted edge: %s -> %s", e[0], e[1])
@@ -45,7 +45,7 @@ func main() {
 	}
 
 	for svc, state := range states {
-		if err := repo.UpdateServiceState(ctx, svc, state); err != nil {
+		if err := repo.UpdateServiceState(ctx, "default", svc, state); err != nil {
 			log.Printf("Failed to update state for %s: %v", svc, err)
 		} else {
 			log.Printf("Updated state for %s: %s", svc, state)

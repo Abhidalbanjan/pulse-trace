@@ -22,13 +22,25 @@ func NewTopologyClient(baseURL string) *TopologyClient {
 	}
 }
 
-// GetDownstreamDependencies returns the immediate downstream services for a given service.
-func (c *TopologyClient) GetDownstreamDependencies(ctx context.Context, serviceName string) ([]string, error) {
+// orDefaultTenant normalizes an empty tenant to "default" so a caller that
+// doesn't yet track tenant still produces well-scoped requests.
+func orDefaultTenant(t string) string {
+	if t == "" {
+		return "default"
+	}
+	return t
+}
+
+// GetDownstreamDependencies returns the immediate downstream services for a given
+// service, scoped to the tenant (sent as the X-Tenant-ID header the topology
+// service reads).
+func (c *TopologyClient) GetDownstreamDependencies(ctx context.Context, tenant, serviceName string) ([]string, error) {
 	url := fmt.Sprintf("%s/api/v1/topology/dependencies/downstream/%s", c.baseURL, serviceName)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+	req.Header.Set("X-Tenant-ID", orDefaultTenant(tenant))
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -47,13 +59,15 @@ func (c *TopologyClient) GetDownstreamDependencies(ctx context.Context, serviceN
 	return deps, nil
 }
 
-// GetUpstreamDependencies returns the immediate upstream services for a given service.
-func (c *TopologyClient) GetUpstreamDependencies(ctx context.Context, serviceName string) ([]string, error) {
+// GetUpstreamDependencies returns the immediate upstream services for a given
+// service, scoped to the tenant.
+func (c *TopologyClient) GetUpstreamDependencies(ctx context.Context, tenant, serviceName string) ([]string, error) {
 	url := fmt.Sprintf("%s/api/v1/topology/dependencies/upstream/%s", c.baseURL, serviceName)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+	req.Header.Set("X-Tenant-ID", orDefaultTenant(tenant))
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -72,10 +86,11 @@ func (c *TopologyClient) GetUpstreamDependencies(ctx context.Context, serviceNam
 	return deps, nil
 }
 
-// UpdateServiceState updates the state of a service (e.g., PREDICTIVE_WARNING).
-func (c *TopologyClient) UpdateServiceState(ctx context.Context, serviceName, state string) error {
+// UpdateServiceState updates the state of a tenant's service (e.g., PREDICTIVE_WARNING).
+func (c *TopologyClient) UpdateServiceState(ctx context.Context, tenant, serviceName, state string) error {
 	url := fmt.Sprintf("%s/api/v1/topology/state", c.baseURL)
 	body := map[string]string{
+		"tenant_id":    orDefaultTenant(tenant),
 		"service_name": serviceName,
 		"state":        state,
 	}
@@ -105,13 +120,14 @@ func (c *TopologyClient) UpdateServiceState(ctx context.Context, serviceName, st
 // UpdateCausalPath sets the active causal path edges in Neo4j topology, scoped
 // to incidentID so concurrently-analyzed incidents never clobber each other's
 // causal highlighting (see topology-service's Neo4jRepository.UpdateCausalPath).
-func (c *TopologyClient) UpdateCausalPath(ctx context.Context, incidentID string, chain []models.CausalLink) error {
+func (c *TopologyClient) UpdateCausalPath(ctx context.Context, tenant, incidentID string, chain []models.CausalLink) error {
 	type Link struct {
 		Source string `json:"source"`
 		Target string `json:"target"`
 		Reason string `json:"reason"`
 	}
 	type request struct {
+		TenantID   string `json:"tenant_id"`
 		IncidentID string `json:"incident_id"`
 		Links      []Link `json:"links"`
 	}
@@ -123,7 +139,7 @@ func (c *TopologyClient) UpdateCausalPath(ctx context.Context, incidentID string
 			Reason: l.Evidence,
 		})
 	}
-	payload := request{IncidentID: incidentID, Links: links}
+	payload := request{TenantID: orDefaultTenant(tenant), IncidentID: incidentID, Links: links}
 
 	url := fmt.Sprintf("%s/api/v1/topology/causal-path", c.baseURL)
 	b, err := json.Marshal(payload)

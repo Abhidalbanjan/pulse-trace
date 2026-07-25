@@ -130,7 +130,9 @@ func (e *AlertRuleEvaluator) evaluateOnce(ctx context.Context) {
 			continue
 		}
 
-		baseline := e.baselines[row.Service]
+		rowTenant := row.tenantOrDefault()
+		key := baselineKey(rowTenant, row.Service)
+		baseline := e.baselines[key]
 		baselineRatio := baseline.ratio(row.P99Ms)
 		if baseline != nil && baseline.samples < minSamplesToWarn {
 			baselineRatio = 0 // not enough history yet to trust this
@@ -147,16 +149,21 @@ func (e *AlertRuleEvaluator) evaluateOnce(ctx context.Context) {
 		}
 
 		for _, cr := range e.rules {
+			// A rule only ever evaluates against metrics from its own tenant — a
+			// rule for tenant A must never fire on tenant B's same-named service.
+			if ruleTenant(cr.rule.TenantID) != rowTenant {
+				continue
+			}
 			if cr.rule.ServiceName != "*" && cr.rule.ServiceName != row.Service {
 				continue
 			}
-			e.evaluateRule(ctx, cr, row.Service, env)
+			e.evaluateRule(ctx, cr, rowTenant, row.Service, env)
 		}
 
 		// Update this service's baseline after evaluating, same pattern as
 		// AnomalyDetector — compare against the pre-update baseline, then fold in.
 		if baseline == nil {
-			e.baselines[row.Service] = &serviceBaseline{ewmaP99Ms: row.P99Ms, samples: 1}
+			e.baselines[key] = &serviceBaseline{ewmaP99Ms: row.P99Ms, samples: 1}
 		} else {
 			baseline.ewmaP99Ms = (ewmaAlpha * row.P99Ms) + ((1 - ewmaAlpha) * baseline.ewmaP99Ms)
 			baseline.samples++
@@ -164,7 +171,16 @@ func (e *AlertRuleEvaluator) evaluateOnce(ctx context.Context) {
 	}
 }
 
-func (e *AlertRuleEvaluator) evaluateRule(ctx context.Context, cr compiledRule, serviceName string, env map[string]interface{}) {
+// ruleTenant normalizes an alert rule's tenant (default 'default') for comparison
+// against a metrics row's tenant.
+func ruleTenant(t string) string {
+	if t == "" {
+		return "default"
+	}
+	return t
+}
+
+func (e *AlertRuleEvaluator) evaluateRule(ctx context.Context, cr compiledRule, tenant, serviceName string, env map[string]interface{}) {
 	out, err := expr.Run(cr.program, env)
 	if err != nil {
 		log.Printf("alert_rule_evaluator: rule %q failed to evaluate for %s: %v", cr.rule.Name, serviceName, err)
@@ -175,7 +191,7 @@ func (e *AlertRuleEvaluator) evaluateRule(ctx context.Context, cr compiledRule, 
 		return
 	}
 
-	cooldownKey := fmt.Sprintf("%s:%s", cr.rule.ID, serviceName)
+	cooldownKey := fmt.Sprintf("%s:%s:%s", cr.rule.ID, tenant, serviceName)
 	cooldown := time.Duration(cr.rule.CooldownSeconds) * time.Second
 	if last, ok := e.lastFired[cooldownKey]; ok && time.Since(last) < cooldown {
 		return

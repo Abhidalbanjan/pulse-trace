@@ -13,6 +13,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Tenant isolation: every Service node carries a `tenant` property, and every
+// MERGE/MATCH keys on {name, tenant} so two tenants that run a service of the
+// same name get distinct nodes/edges — one tenant's topology (and therefore its
+// causal analysis) can never bleed into another's. The tenant flows in from the
+// `tenant.id` resource attribute the gateway OTLP receiver stamps on ingested
+// spans, and from the X-Tenant-ID header on the read APIs.
+
 type Neo4jRepository struct {
 	driver neo4j.DriverWithContext
 	rdb    *redis.Client
@@ -50,35 +57,37 @@ func (r *Neo4jRepository) Close(ctx context.Context) error {
 	return r.driver.Close(ctx)
 }
 
-// Helper to invalidate cached topology data
-func (r *Neo4jRepository) invalidateCache(ctx context.Context, service string) {
+// Helper to invalidate cached topology data for a tenant's service. All cache
+// keys are tenant-namespaced so an invalidation never crosses tenants.
+func (r *Neo4jRepository) invalidateCache(ctx context.Context, tenant, service string) {
 	if r.rdb == nil {
 		return
 	}
 	keys := []string{
-		"topo:upstream:" + service,
-		"topo:downstream:" + service,
-		"topo:graph",
+		"topo:upstream:" + tenant + ":" + service,
+		"topo:downstream:" + tenant + ":" + service,
+		"topo:graph:" + tenant,
 	}
 	if err := r.rdb.Del(ctx, keys...).Err(); err != nil {
-		log.Printf("failed to invalidate cache keys for service %s: %v", service, err)
+		log.Printf("failed to invalidate cache keys for service %s/%s: %v", tenant, service, err)
 	}
 }
 
-// UpsertDependencyEdge creates or updates a dependency between two services.
-func (r *Neo4jRepository) UpsertDependencyEdge(ctx context.Context, from, to string) error {
+// UpsertDependencyEdge creates or updates a dependency between two services within a tenant.
+func (r *Neo4jRepository) UpsertDependencyEdge(ctx context.Context, tenant, from, to string) error {
 	query := `
-		MERGE (f:Service {name: $from})
-		MERGE (t:Service {name: $to})
+		MERGE (f:Service {name: $from, tenant: $tenant})
+		MERGE (t:Service {name: $to, tenant: $tenant})
 		MERGE (f)-[:DEPENDS_ON]->(t)
 	`
 	_, err := neo4j.ExecuteQuery(ctx, r.driver, query, map[string]any{
-		"from": from,
-		"to":   to,
+		"from":   from,
+		"to":     to,
+		"tenant": tenant,
 	}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 	if err == nil {
-		r.invalidateCache(ctx, from)
-		r.invalidateCache(ctx, to)
+		r.invalidateCache(ctx, tenant, from)
+		r.invalidateCache(ctx, tenant, to)
 	}
 	return err
 }
@@ -88,18 +97,18 @@ func (r *Neo4jRepository) UpsertDependencyEdge(ctx context.Context, from, to str
 // "is this edge busy/erroring right now," not a counter that only ever grows.
 const edgeMetricTTL = 5 * time.Minute
 
-func edgeMetricKey(from, to string) string {
-	return "topo:edgemetric:" + from + "->" + to
+func edgeMetricKey(tenant, from, to string) string {
+	return "topo:edgemetric:" + tenant + ":" + from + "->" + to
 }
 
 // RecordEdgeMetric attributes one real request (with its actual duration and error
-// status) to the from->to service edge, so the topology graph can show request
-// rate/error rate/latency per dependency instead of a bare boolean "depends on."
-func (r *Neo4jRepository) RecordEdgeMetric(ctx context.Context, from, to string, durationMs float64, isError bool) error {
+// status) to the tenant's from->to service edge, so the topology graph can show
+// request rate/error rate/latency per dependency instead of a bare boolean.
+func (r *Neo4jRepository) RecordEdgeMetric(ctx context.Context, tenant, from, to string, durationMs float64, isError bool) error {
 	if r.rdb == nil {
 		return nil
 	}
-	key := edgeMetricKey(from, to)
+	key := edgeMetricKey(tenant, from, to)
 	pipe := r.rdb.Pipeline()
 	pipe.HIncrBy(ctx, key, "count", 1)
 	if isError {
@@ -118,14 +127,12 @@ type EdgeMetric struct {
 	AvgLatencyMs float64
 }
 
-// GetEdgeMetric reads the current rolling-window metrics for one edge. Returns a
-// zero-value metric (not an error) if the edge hasn't carried traffic recently -
-// that's a legitimate state (e.g. right after startup, or Redis unavailable).
-func (r *Neo4jRepository) GetEdgeMetric(ctx context.Context, from, to string) EdgeMetric {
+// GetEdgeMetric reads the current rolling-window metrics for one tenant edge.
+func (r *Neo4jRepository) GetEdgeMetric(ctx context.Context, tenant, from, to string) EdgeMetric {
 	if r.rdb == nil {
 		return EdgeMetric{}
 	}
-	vals, err := r.rdb.HGetAll(ctx, edgeMetricKey(from, to)).Result()
+	vals, err := r.rdb.HGetAll(ctx, edgeMetricKey(tenant, from, to)).Result()
 	if err != nil || len(vals) == 0 {
 		return EdgeMetric{}
 	}
@@ -139,9 +146,9 @@ func (r *Neo4jRepository) GetEdgeMetric(ctx context.Context, from, to string) Ed
 	return EdgeMetric{RequestCount: count, ErrorCount: errors, AvgLatencyMs: avg}
 }
 
-// GetDownstreamDependencies returns a list of services that depend on the given service.
-func (r *Neo4jRepository) GetDownstreamDependencies(ctx context.Context, serviceName string) ([]string, error) {
-	cacheKey := "topo:downstream:" + serviceName
+// GetDownstreamDependencies returns the services that depend on the given service, within a tenant.
+func (r *Neo4jRepository) GetDownstreamDependencies(ctx context.Context, tenant, serviceName string) ([]string, error) {
+	cacheKey := "topo:downstream:" + tenant + ":" + serviceName
 	if r.rdb != nil {
 		val, err := r.rdb.Get(ctx, cacheKey).Result()
 		if err == nil {
@@ -153,11 +160,12 @@ func (r *Neo4jRepository) GetDownstreamDependencies(ctx context.Context, service
 	}
 
 	query := `
-		MATCH (upstream:Service {name: $serviceName})<-[:DEPENDS_ON]-(downstream:Service)
+		MATCH (upstream:Service {name: $serviceName, tenant: $tenant})<-[:DEPENDS_ON]-(downstream:Service {tenant: $tenant})
 		RETURN downstream.name AS name
 	`
 	result, err := neo4j.ExecuteQuery(ctx, r.driver, query, map[string]any{
 		"serviceName": serviceName,
+		"tenant":      tenant,
 	}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 
 	if err != nil {
@@ -179,26 +187,27 @@ func (r *Neo4jRepository) GetDownstreamDependencies(ctx context.Context, service
 	return deps, nil
 }
 
-// UpdateServiceState updates the state (e.g., PREDICTIVE_WARNING) of a service.
-func (r *Neo4jRepository) UpdateServiceState(ctx context.Context, serviceName, state string) error {
+// UpdateServiceState updates the state (e.g., PREDICTIVE_WARNING) of a tenant's service.
+func (r *Neo4jRepository) UpdateServiceState(ctx context.Context, tenant, serviceName, state string) error {
 	query := `
-		MERGE (s:Service {name: $serviceName})
+		MERGE (s:Service {name: $serviceName, tenant: $tenant})
 		SET s.state = $state, s.updated_at = timestamp()
 	`
 	_, err := neo4j.ExecuteQuery(ctx, r.driver, query, map[string]any{
 		"serviceName": serviceName,
 		"state":       state,
+		"tenant":      tenant,
 	}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 	if err == nil {
-		r.invalidateCache(ctx, serviceName)
+		r.invalidateCache(ctx, tenant, serviceName)
 	}
 	return err
 }
 
-// UpsertServiceCatalog creates or updates catalog metadata for a service.
-func (r *Neo4jRepository) UpsertServiceCatalog(ctx context.Context, serviceName, team, repo, slack string) error {
+// UpsertServiceCatalog creates or updates catalog metadata for a tenant's service.
+func (r *Neo4jRepository) UpsertServiceCatalog(ctx context.Context, tenant, serviceName, team, repo, slack string) error {
 	query := `
-		MERGE (s:Service {name: $serviceName})
+		MERGE (s:Service {name: $serviceName, tenant: $tenant})
 		SET s.team = $team, s.repo = $repo, s.slack = $slack
 	`
 	_, err := neo4j.ExecuteQuery(ctx, r.driver, query, map[string]any{
@@ -206,16 +215,17 @@ func (r *Neo4jRepository) UpsertServiceCatalog(ctx context.Context, serviceName,
 		"team":        team,
 		"repo":        repo,
 		"slack":       slack,
+		"tenant":      tenant,
 	}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 	if err == nil {
-		r.invalidateCache(ctx, serviceName)
+		r.invalidateCache(ctx, tenant, serviceName)
 	}
 	return err
 }
 
-// GetUpstreamDependencies returns a list of services that this service depends on.
-func (r *Neo4jRepository) GetUpstreamDependencies(ctx context.Context, serviceName string) ([]string, error) {
-	cacheKey := "topo:upstream:" + serviceName
+// GetUpstreamDependencies returns the services this service depends on, within a tenant.
+func (r *Neo4jRepository) GetUpstreamDependencies(ctx context.Context, tenant, serviceName string) ([]string, error) {
+	cacheKey := "topo:upstream:" + tenant + ":" + serviceName
 	if r.rdb != nil {
 		val, err := r.rdb.Get(ctx, cacheKey).Result()
 		if err == nil {
@@ -227,11 +237,12 @@ func (r *Neo4jRepository) GetUpstreamDependencies(ctx context.Context, serviceNa
 	}
 
 	query := `
-		MATCH (downstream:Service {name: $serviceName})-[:DEPENDS_ON]->(upstream:Service)
+		MATCH (downstream:Service {name: $serviceName, tenant: $tenant})-[:DEPENDS_ON]->(upstream:Service {tenant: $tenant})
 		RETURN upstream.name AS name
 	`
 	result, err := neo4j.ExecuteQuery(ctx, r.driver, query, map[string]any{
 		"serviceName": serviceName,
+		"tenant":      tenant,
 	}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 
 	if err != nil {
@@ -253,14 +264,15 @@ func (r *Neo4jRepository) GetUpstreamDependencies(ctx context.Context, serviceNa
 	return deps, nil
 }
 
-// GetServiceState returns the current state of a given service.
-func (r *Neo4jRepository) GetServiceState(ctx context.Context, serviceName string) (string, error) {
+// GetServiceState returns the current state of a given tenant service.
+func (r *Neo4jRepository) GetServiceState(ctx context.Context, tenant, serviceName string) (string, error) {
 	query := `
-		MATCH (s:Service {name: $serviceName})
+		MATCH (s:Service {name: $serviceName, tenant: $tenant})
 		RETURN s.state AS state
 	`
 	result, err := neo4j.ExecuteQuery(ctx, r.driver, query, map[string]any{
 		"serviceName": serviceName,
+		"tenant":      tenant,
 	}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 
 	if err != nil {
@@ -311,33 +323,31 @@ type CausalLink struct {
 	Reason string `json:"reason"`
 }
 
-// UpdateCausalPath highlights the causal path for one specific incident. Each
-// relationship stores its causal contributions as a list of "incidentID::reason"
-// entries (causal_entries) rather than a single global is_causal/reason pair, so
-// concurrent incidents analyzed at the same time never clobber each other's
-// highlighting - re-running this for incidentID only ever touches entries that
-// incident itself previously added.
-func (r *Neo4jRepository) UpdateCausalPath(ctx context.Context, incidentID string, links []CausalLink) error {
+// UpdateCausalPath highlights the causal path for one specific incident within a
+// tenant. Each relationship stores its causal contributions as a list of
+// "incidentID::reason" entries (causal_entries) rather than a single global
+// is_causal/reason pair, so concurrent incidents analyzed at the same time never
+// clobber each other's highlighting.
+func (r *Neo4jRepository) UpdateCausalPath(ctx context.Context, tenant, incidentID string, links []CausalLink) error {
 	if incidentID == "" {
 		return fmt.Errorf("incidentID is required")
 	}
 
 	// 1. Remove this incident's own prior contributions (e.g. a re-analysis that
-	// found a shorter/different chain) - scoped by prefix match, never touches
-	// entries belonging to any other incident.
+	// found a shorter/different chain), scoped to this tenant's edges only.
 	clearQuery := `
-		MATCH ()-[r:DEPENDS_ON]->()
+		MATCH (:Service {tenant: $tenant})-[r:DEPENDS_ON]->(:Service {tenant: $tenant})
 		WHERE size(coalesce(r.causal_entries, [])) > 0
 		SET r.causal_entries = [x IN coalesce(r.causal_entries, []) WHERE NOT x STARTS WITH ($incidentID + '::')]
 	`
-	_, err := neo4j.ExecuteQuery(ctx, r.driver, clearQuery, map[string]any{"incidentID": incidentID}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
+	_, err := neo4j.ExecuteQuery(ctx, r.driver, clearQuery, map[string]any{"incidentID": incidentID, "tenant": tenant}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 	if err != nil {
 		return err
 	}
 
-	// 2. Add this incident's new causal path links.
+	// 2. Add this incident's new causal path links (within the tenant).
 	setQuery := `
-		MATCH (s:Service)-[r:DEPENDS_ON]->(t:Service)
+		MATCH (s:Service {tenant: $tenant})-[r:DEPENDS_ON]->(t:Service {tenant: $tenant})
 		WHERE (s.name = $source AND t.name = $target) OR (s.name = $target AND t.name = $source)
 		SET r.causal_entries = coalesce(r.causal_entries, []) + ($incidentID + '::' + $reason)
 	`
@@ -347,6 +357,7 @@ func (r *Neo4jRepository) UpdateCausalPath(ctx context.Context, incidentID strin
 			"target":     link.Target,
 			"reason":     link.Reason,
 			"incidentID": incidentID,
+			"tenant":     tenant,
 		}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 		if err != nil {
 			return err
@@ -355,9 +366,9 @@ func (r *Neo4jRepository) UpdateCausalPath(ctx context.Context, incidentID strin
 	return nil
 }
 
-// GetGraph returns all nodes and edges in the topology.
-func (r *Neo4jRepository) GetGraph(ctx context.Context) (*Graph, error) {
-	cacheKey := "topo:graph"
+// GetGraph returns all nodes and edges in one tenant's topology.
+func (r *Neo4jRepository) GetGraph(ctx context.Context, tenant string) (*Graph, error) {
+	cacheKey := "topo:graph:" + tenant
 	if r.rdb != nil {
 		val, err := r.rdb.Get(ctx, cacheKey).Result()
 		if err == nil {
@@ -368,7 +379,9 @@ func (r *Neo4jRepository) GetGraph(ctx context.Context) (*Graph, error) {
 		}
 	}
 
-	nodesRes, err := neo4j.ExecuteQuery(ctx, r.driver, `MATCH (n:Service) RETURN n.name AS id, n.state AS state, n.team AS team, n.repo AS repo, n.slack AS slack`, nil, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
+	nodesRes, err := neo4j.ExecuteQuery(ctx, r.driver,
+		`MATCH (n:Service {tenant: $tenant}) RETURN n.name AS id, n.state AS state, n.team AS team, n.repo AS repo, n.slack AS slack`,
+		map[string]any{"tenant": tenant}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +420,9 @@ func (r *Neo4jRepository) GetGraph(ctx context.Context) (*Graph, error) {
 		})
 	}
 
-	edgesRes, err := neo4j.ExecuteQuery(ctx, r.driver, `MATCH (s:Service)-[r:DEPENDS_ON]->(t:Service) RETURN s.name AS source, t.name AS target, coalesce(r.causal_entries, []) AS causal_entries`, nil, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
+	edgesRes, err := neo4j.ExecuteQuery(ctx, r.driver,
+		`MATCH (s:Service {tenant: $tenant})-[r:DEPENDS_ON]->(t:Service {tenant: $tenant}) RETURN s.name AS source, t.name AS target, coalesce(r.causal_entries, []) AS causal_entries`,
+		map[string]any{"tenant": tenant}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +449,7 @@ func (r *Neo4jRepository) GetGraph(ctx context.Context) (*Graph, error) {
 
 		sourceName := source.(string)
 		targetName := target.(string)
-		metric := r.GetEdgeMetric(ctx, sourceName, targetName)
+		metric := r.GetEdgeMetric(ctx, tenant, sourceName, targetName)
 
 		edges = append(edges, Edge{
 			Source:       sourceName,
@@ -458,7 +473,10 @@ func (r *Neo4jRepository) GetGraph(ctx context.Context) (*Graph, error) {
 	return graph, nil
 }
 
-// SetSpanService caches a span ID to its service name mapping.
+// SetSpanService caches a span ID to its service name mapping. Span IDs are
+// globally unique per trace, and a trace belongs to a single tenant, so these
+// span-resolution keys don't need tenant namespacing — the tenant is carried
+// through to the edge writes (UpsertDependencyEdge/RecordEdgeMetric) by the caller.
 func (r *Neo4jRepository) SetSpanService(ctx context.Context, key, serviceName string, ttl time.Duration) error {
 	if r.rdb == nil {
 		return nil

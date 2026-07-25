@@ -37,6 +37,24 @@ func NewAPI(repo *repository.Neo4jRepository, secret string) *API {
 	}
 }
 
+// tenantOf returns the caller's tenant from the gateway-verified X-Tenant-ID
+// header (proxied through from the gateway AuthMiddleware), or "default".
+func tenantOf(r *http.Request) string {
+	if t := r.Header.Get("X-Tenant-ID"); t != "" {
+		return t
+	}
+	return "default"
+}
+
+// orDefaultTenant normalizes an empty tenant (e.g. from an older caller that
+// doesn't set one yet) to "default".
+func orDefaultTenant(t string) string {
+	if t == "" {
+		return "default"
+	}
+	return t
+}
+
 // RegisterRoutes sets up the HTTP handlers for the topology service.
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/topology/graph", a.handleGetGraph)
@@ -57,7 +75,7 @@ func (a *API) handleGetDownstream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deps, err := a.repo.GetDownstreamDependencies(r.Context(), serviceName)
+	deps, err := a.repo.GetDownstreamDependencies(r.Context(), tenantOf(r), serviceName)
 	if err != nil {
 		log.Printf("failed to get dependencies for %s: %v", serviceName, err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -78,7 +96,7 @@ func (a *API) handleGetUpstream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deps, err := a.repo.GetUpstreamDependencies(r.Context(), serviceName)
+	deps, err := a.repo.GetUpstreamDependencies(r.Context(), tenantOf(r), serviceName)
 	if err != nil {
 		log.Printf("failed to get upstream dependencies for %s: %v", serviceName, err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -104,7 +122,7 @@ func (a *API) handleGetAgentConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state, err := a.repo.GetServiceState(r.Context(), serviceName)
+	state, err := a.repo.GetServiceState(r.Context(), tenantOf(r), serviceName)
 	if err != nil {
 		log.Printf("failed to get service state for %s: %v", serviceName, err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -125,6 +143,7 @@ func (a *API) handleGetAgentConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 type UpdateStateRequest struct {
+	TenantID    string `json:"tenant_id"`
 	ServiceName string `json:"service_name"`
 	State       string `json:"state"`
 }
@@ -136,7 +155,7 @@ func (a *API) handleUpdateState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.repo.UpdateServiceState(r.Context(), req.ServiceName, req.State); err != nil {
+	if err := a.repo.UpdateServiceState(r.Context(), orDefaultTenant(req.TenantID), req.ServiceName, req.State); err != nil {
 		log.Printf("failed to update state for %s: %v", req.ServiceName, err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -146,6 +165,7 @@ func (a *API) handleUpdateState(w http.ResponseWriter, r *http.Request) {
 }
 
 type UpdateCatalogRequest struct {
+	TenantID    string `json:"tenant_id"`
 	ServiceName string `json:"service_name"`
 	Team        string `json:"team"`
 	Repo        string `json:"repo"`
@@ -168,7 +188,7 @@ func (a *API) handleUpdateCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.repo.UpsertServiceCatalog(r.Context(), req.ServiceName, req.Team, req.Repo, req.Slack); err != nil {
+	if err := a.repo.UpsertServiceCatalog(r.Context(), orDefaultTenant(req.TenantID), req.ServiceName, req.Team, req.Repo, req.Slack); err != nil {
 		log.Printf("failed to update catalog for %s: %v", req.ServiceName, err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -178,6 +198,7 @@ func (a *API) handleUpdateCatalog(w http.ResponseWriter, r *http.Request) {
 }
 
 type UpdateCausalPathRequest struct {
+	TenantID   string                  `json:"tenant_id"`
 	IncidentID string                  `json:"incident_id"`
 	Links      []repository.CausalLink `json:"links"`
 }
@@ -193,7 +214,7 @@ func (a *API) handleUpdateCausalPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.repo.UpdateCausalPath(r.Context(), req.IncidentID, req.Links); err != nil {
+	if err := a.repo.UpdateCausalPath(r.Context(), orDefaultTenant(req.TenantID), req.IncidentID, req.Links); err != nil {
 		log.Printf("failed to update causal path: %v", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -211,7 +232,7 @@ func (a *API) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	graph, err := a.repo.GetGraph(r.Context())
+	graph, err := a.repo.GetGraph(r.Context(), tenantOf(r))
 	if err != nil {
 		log.Printf("failed to get graph: %v", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -239,10 +260,18 @@ func (a *API) handleReceiveTraces(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	for _, resourceSpans := range req.ResourceSpans {
 		serviceName := ""
+		tenant := "default"
 		if resourceSpans.Resource != nil {
 			for _, attr := range resourceSpans.Resource.Attributes {
-				if attr.Key == "service.name" {
+				switch attr.Key {
+				case "service.name":
 					serviceName = attr.Value.GetStringValue()
+				case "tenant.id":
+					// Stamped by the gateway OTLP receiver; scopes this service's
+					// node/edges so same-named services in different tenants stay separate.
+					if v := attr.Value.GetStringValue(); v != "" {
+						tenant = v
+					}
 				}
 			}
 		}
@@ -272,11 +301,11 @@ func (a *API) handleReceiveTraces(w http.ResponseWriter, r *http.Request) {
 						// downstream call itself, so its own duration/status are exactly
 						// what should be attributed to the parentService -> serviceName edge.
 						if parentService != serviceName {
-							log.Printf("topology: span relation discovered edge: %s -> %s", parentService, serviceName)
-							if err := a.repo.UpsertDependencyEdge(ctx, parentService, serviceName); err != nil {
+							log.Printf("topology: span relation discovered edge: %s -> %s (tenant %s)", parentService, serviceName, tenant)
+							if err := a.repo.UpsertDependencyEdge(ctx, tenant, parentService, serviceName); err != nil {
 								log.Printf("topology: failed to upsert edge %s -> %s: %v", parentService, serviceName, err)
 							}
-							if err := a.repo.RecordEdgeMetric(ctx, parentService, serviceName, durationMs, isError); err != nil {
+							if err := a.repo.RecordEdgeMetric(ctx, tenant, parentService, serviceName, durationMs, isError); err != nil {
 								log.Printf("topology: failed to record edge metric %s -> %s: %v", parentService, serviceName, err)
 							}
 						}
@@ -300,11 +329,11 @@ func (a *API) handleReceiveTraces(w http.ResponseWriter, r *http.Request) {
 						if !ok || serviceName == entry.Service {
 							continue
 						}
-						log.Printf("topology: pending span relation resolved edge: %s -> %s", serviceName, entry.Service)
-						if err := a.repo.UpsertDependencyEdge(ctx, serviceName, entry.Service); err != nil {
+						log.Printf("topology: pending span relation resolved edge: %s -> %s (tenant %s)", serviceName, entry.Service, tenant)
+						if err := a.repo.UpsertDependencyEdge(ctx, tenant, serviceName, entry.Service); err != nil {
 							log.Printf("topology: failed to upsert edge %s -> %s: %v", serviceName, entry.Service, err)
 						}
-						if err := a.repo.RecordEdgeMetric(ctx, serviceName, entry.Service, entry.DurationMs, entry.IsError); err != nil {
+						if err := a.repo.RecordEdgeMetric(ctx, tenant, serviceName, entry.Service, entry.DurationMs, entry.IsError); err != nil {
 							log.Printf("topology: failed to record edge metric %s -> %s: %v", serviceName, entry.Service, err)
 						}
 					}

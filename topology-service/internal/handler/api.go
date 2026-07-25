@@ -82,6 +82,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/topology/state", a.handleUpdateState)
 	mux.HandleFunc("POST /api/v1/topology/catalog", a.handleUpdateCatalog)
 	mux.HandleFunc("POST /api/v1/topology/causal-path", a.handleUpdateCausalPath)
+	mux.HandleFunc("DELETE /api/v1/topology/tenant", a.handleDeleteTenant)
 	mux.HandleFunc("POST /v1/traces", a.handleReceiveTraces)
 	mux.HandleFunc("POST /api/v1/agent/playbook/execute", a.handleExecutePlaybook)
 }
@@ -258,6 +259,18 @@ func (a *API) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, graph)
+}
+
+// handleDeleteTenant removes all of a tenant's topology (Neo4j nodes/edges). The
+// gateway calls this as part of tenant data deletion; the tenant comes from the
+// gateway-verified X-Tenant-ID header.
+func (a *API) handleDeleteTenant(w http.ResponseWriter, r *http.Request) {
+	if err := a.repo.DeleteTenant(r.Context(), tenantOf(r)); err != nil {
+		log.Printf("failed to delete tenant topology for %s: %v", tenantOf(r), err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (a *API) handleReceiveTraces(w http.ResponseWriter, r *http.Request) {

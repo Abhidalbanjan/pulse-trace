@@ -20,6 +20,7 @@ import (
 	"github.com/pulsetrace/gateway-service/internal/pii"
 	"github.com/pulsetrace/gateway-service/internal/proxy"
 	"github.com/pulsetrace/gateway-service/internal/quota"
+	"github.com/pulsetrace/gateway-service/internal/tenantdata"
 	"github.com/pulsetrace/shared/metering"
 	gatewaymigrations "github.com/pulsetrace/gateway-service/migrations"
 	"github.com/pulsetrace/shared/middleware"
@@ -193,6 +194,12 @@ func main() {
 		mux.HandleFunc("POST /api/v1/admin/users", authHandler.CreateUser)
 		mux.HandleFunc("DELETE /api/v1/admin/users", authHandler.DeleteUser)
 		mux.HandleFunc("PUT /api/v1/admin/users/role", authHandler.UpdateUserRole)
+
+		// Tenant data deletion (GDPR / offboarding): purge telemetry, or fully
+		// close the account. Confirmation-guarded; admin-gated by RBAC.
+		purger := tenantdata.New(authHandler.GetDB(), clickhouseURL, topologyServiceURL, quickwitURL)
+		mux.HandleFunc("POST /api/v1/admin/tenant/purge-data", purger.PurgeDataHandler)
+		mux.HandleFunc("POST /api/v1/admin/tenant/close", purger.CloseAccountHandler)
 
 		// Per-tenant ingestion keys: mint/list/revoke the credentials telemetry
 		// agents present so ingestion is attributed to a tenant server-side rather

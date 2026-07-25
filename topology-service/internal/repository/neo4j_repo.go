@@ -473,6 +473,22 @@ func (r *Neo4jRepository) GetGraph(ctx context.Context, tenant string) (*Graph, 
 	return graph, nil
 }
 
+// DeleteTenant removes an entire tenant's topology — every Service node it owns
+// and their DEPENDS_ON relationships — for tenant offboarding / data deletion.
+func (r *Neo4jRepository) DeleteTenant(ctx context.Context, tenant string) error {
+	_, err := neo4j.ExecuteQuery(ctx, r.driver,
+		`MATCH (n:Service {tenant: $tenant}) DETACH DELETE n`,
+		map[string]any{"tenant": tenant}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
+	if err == nil && r.rdb != nil {
+		// Drop the tenant's cached graph/edge entries so nothing stale survives.
+		if keys, e := r.rdb.Keys(ctx, "topo:*:"+tenant+"*").Result(); e == nil && len(keys) > 0 {
+			r.rdb.Del(ctx, keys...)
+		}
+		r.rdb.Del(ctx, "topo:graph:"+tenant)
+	}
+	return err
+}
+
 // SetSpanService caches a span ID to its service name mapping. Span IDs are
 // globally unique per trace, and a trace belongs to a single tenant, so these
 // span-resolution keys don't need tenant namespacing — the tenant is carried

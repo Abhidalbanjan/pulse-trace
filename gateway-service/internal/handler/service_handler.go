@@ -61,13 +61,13 @@ func (h *ServiceHandler) ListServices(w http.ResponseWriter, r *http.Request) {
 			quantile(0.90)(Duration / 1000000.0) as p90_ms,
 			quantile(0.99)(Duration / 1000000.0) as p99_ms
 		FROM pulsetrace.otel_traces
-		WHERE ParentSpanId = '' AND Timestamp >= now() - INTERVAL %s
+		WHERE ResourceAttributes['tenant.id'] = {tenant:String} AND ParentSpanId = '' AND Timestamp >= now() - INTERVAL %s
 		GROUP BY service
 		ORDER BY requests DESC
 		FORMAT JSON
 	`, sqlInterval)
 
-	resp, err := h.ch.query(query, nil)
+	resp, err := h.ch.query(query, map[string]string{"tenant": tenantFromRequest(r)})
 	if !h.writeErrOrEmpty(w, resp, err, "ServiceHandler.ListServices") {
 		return
 	}
@@ -87,7 +87,7 @@ func (h *ServiceHandler) GetServiceDetail(w http.ResponseWriter, r *http.Request
 	}
 
 	_, sqlInterval, bucketExpr := resolveInterval(r.URL.Query().Get("interval"))
-	params := map[string]string{"service": stringParam(service)}
+	params := map[string]string{"service": stringParam(service), "tenant": tenantFromRequest(r)}
 
 	summaryQuery := fmt.Sprintf(`
 		SELECT
@@ -97,7 +97,7 @@ func (h *ServiceHandler) GetServiceDetail(w http.ResponseWriter, r *http.Request
 			quantile(0.90)(Duration / 1000000.0) as p90_ms,
 			quantile(0.99)(Duration / 1000000.0) as p99_ms
 		FROM pulsetrace.otel_traces
-		WHERE ParentSpanId = '' AND ServiceName = {service:String} AND Timestamp >= now() - INTERVAL %s
+		WHERE ResourceAttributes['tenant.id'] = {tenant:String} AND ParentSpanId = '' AND ServiceName = {service:String} AND Timestamp >= now() - INTERVAL %s
 		FORMAT JSON
 	`, sqlInterval)
 
@@ -110,7 +110,7 @@ func (h *ServiceHandler) GetServiceDetail(w http.ResponseWriter, r *http.Request
 			quantile(0.90)(Duration / 1000000.0) as p90_ms,
 			quantile(0.99)(Duration / 1000000.0) as p99_ms
 		FROM pulsetrace.otel_traces
-		WHERE ParentSpanId = '' AND ServiceName = {service:String} AND Timestamp >= now() - INTERVAL %s
+		WHERE ResourceAttributes['tenant.id'] = {tenant:String} AND ParentSpanId = '' AND ServiceName = {service:String} AND Timestamp >= now() - INTERVAL %s
 		GROUP BY time_bucket
 		ORDER BY time_bucket ASC
 		FORMAT JSON
@@ -126,7 +126,7 @@ func (h *ServiceHandler) GetServiceDetail(w http.ResponseWriter, r *http.Request
 			quantile(0.99)(Duration / 1000000.0) as p99_ms,
 			sum(Duration) / 1000000.0 as total_ms
 		FROM pulsetrace.otel_traces
-		WHERE ParentSpanId = '' AND ServiceName = {service:String} AND Timestamp >= now() - INTERVAL %s
+		WHERE ResourceAttributes['tenant.id'] = {tenant:String} AND ParentSpanId = '' AND ServiceName = {service:String} AND Timestamp >= now() - INTERVAL %s
 		GROUP BY operation
 		ORDER BY requests DESC
 		LIMIT 50
@@ -146,7 +146,7 @@ func (h *ServiceHandler) GetServiceDetail(w http.ResponseWriter, r *http.Request
 			min(Timestamp) as first_seen,
 			max(Timestamp) as last_seen
 		FROM pulsetrace.otel_traces
-		WHERE ParentSpanId = '' AND ServiceName = {service:String} AND Timestamp >= now() - INTERVAL %s
+		WHERE ResourceAttributes['tenant.id'] = {tenant:String} AND ParentSpanId = '' AND ServiceName = {service:String} AND Timestamp >= now() - INTERVAL %s
 		GROUP BY version
 		ORDER BY last_seen DESC
 		FORMAT JSON

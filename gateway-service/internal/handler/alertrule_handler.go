@@ -64,7 +64,7 @@ var validSeverities = map[string]bool{
 func (h *AlertRuleHandler) ListAlertRules(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := h.db.Query(`SELECT id, tenant_id, name, COALESCE(description, ''), service_name, condition, severity, cooldown_seconds, enabled
-		FROM alert_rules ORDER BY name ASC`)
+		FROM alert_rules WHERE tenant_id = $1 ORDER BY name ASC`, tenantFromRequest(r))
 	if err != nil {
 		log.Printf("alertrules: failed to list: %v", err)
 		http.Error(w, "failed to list alert rules", http.StatusInternalServerError)
@@ -178,8 +178,8 @@ func (h *AlertRuleHandler) UpdateAlertRule(w http.ResponseWriter, r *http.Reques
 			cooldown_seconds = COALESCE(NULLIF($5, 0), cooldown_seconds),
 			enabled = $6,
 			updated_at = now()
-		WHERE id = $7`,
-		req.Description, req.ServiceName, req.Condition, strings.ToUpper(req.Severity), req.CooldownSeconds, enabled, id,
+		WHERE id = $7 AND tenant_id = $8`,
+		req.Description, req.ServiceName, req.Condition, strings.ToUpper(req.Severity), req.CooldownSeconds, enabled, id, tenantFromRequest(r),
 	)
 	if err != nil {
 		log.Printf("alertrules: failed to update: %v", err)
@@ -197,7 +197,7 @@ func (h *AlertRuleHandler) UpdateAlertRule(w http.ResponseWriter, r *http.Reques
 // DeleteAlertRule handles DELETE /api/v1/admin/alert-rules/{id}
 func (h *AlertRuleHandler) DeleteAlertRule(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	res, err := h.db.Exec("DELETE FROM alert_rules WHERE id = $1", id)
+	res, err := h.db.Exec("DELETE FROM alert_rules WHERE id = $1 AND tenant_id = $2", id, tenantFromRequest(r))
 	if err != nil {
 		log.Printf("alertrules: failed to delete: %v", err)
 		http.Error(w, "failed to delete alert rule", http.StatusInternalServerError)

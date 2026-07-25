@@ -159,6 +159,11 @@ const (
 // same posture the codebase already takes for JWT_SECRET. Read once at startup.
 var requireIngestionKey = strings.EqualFold(os.Getenv("REQUIRE_INGESTION_KEY"), "true")
 
+// RequireIngestionKey reports whether telemetry ingestion must present a valid
+// ingestion key (REQUIRE_INGESTION_KEY). Exposed so the in-process OTLP/gRPC
+// receiver enforces the exact same policy as the HTTP ingestion path.
+func RequireIngestionKey() bool { return requireIngestionKey }
+
 // bearerToken extracts the token from an "Authorization: Bearer <token>" header,
 // or "" if absent/malformed.
 func bearerToken(r *http.Request) string {
@@ -292,7 +297,7 @@ func (h *AuthHandler) GetUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.db.Query("SELECT id, username, role, tenant_id, tier, created_at FROM users ORDER BY created_at DESC")
+	rows, err := h.db.Query("SELECT id, username, role, tenant_id, tier, created_at FROM users WHERE tenant_id = $1 ORDER BY created_at DESC", tenantOf(r))
 	if err != nil {
 		http.Error(w, "Failed to fetch users", http.StatusInternalServerError)
 		return
@@ -340,11 +345,17 @@ func (h *AuthHandler) UpdateUserRole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var previousRole string
-	_ = h.db.QueryRow("SELECT role FROM users WHERE id = $1", userID).Scan(&previousRole)
+	_ = h.db.QueryRow("SELECT role FROM users WHERE id = $1 AND tenant_id = $2", userID, tenantOf(r)).Scan(&previousRole)
 
-	_, err := h.db.Exec("UPDATE users SET role = $1 WHERE id = $2", req.Role, userID)
+	res, err := h.db.Exec("UPDATE users SET role = $1 WHERE id = $2 AND tenant_id = $3", req.Role, userID, tenantOf(r))
 	if err != nil {
 		http.Error(w, "Failed to update role", http.StatusInternalServerError)
+		return
+	}
+	// A row count of 0 means the id doesn't exist in the caller's tenant — treat
+	// it as not found rather than silently succeeding on a cross-tenant id.
+	if n, _ := res.RowsAffected(); n == 0 {
+		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
 
@@ -368,9 +379,10 @@ func (h *AuthHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Prevent deleting the root 'admin' user for safety
+	// Prevent deleting the root 'admin' user for safety. Scoped to the caller's
+	// tenant so one tenant's admin can't delete another tenant's users by id.
 	var username string
-	err := h.db.QueryRow("SELECT username FROM users WHERE id = $1", userID).Scan(&username)
+	err := h.db.QueryRow("SELECT username FROM users WHERE id = $1 AND tenant_id = $2", userID, tenantOf(r)).Scan(&username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "User not found", http.StatusNotFound)
@@ -385,7 +397,7 @@ func (h *AuthHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = h.db.Exec("DELETE FROM users WHERE id = $1", userID)
+	_, err = h.db.Exec("DELETE FROM users WHERE id = $1 AND tenant_id = $2", userID, tenantOf(r))
 	if err != nil {
 		http.Error(w, "Failed to delete user", http.StatusInternalServerError)
 		return
@@ -426,10 +438,9 @@ func (h *AuthHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID := req.TenantID
-	if tenantID == "" {
-		tenantID = "default"
-	}
+	// Tenant is the caller's own tenant, not whatever the request body asks for —
+	// an admin creates users within their tenant, never into another one.
+	tenantID := tenantOf(r)
 	tier := req.Tier
 	if tier == "" {
 		tier = "standard"
@@ -522,6 +533,17 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// tenantOf returns the caller's tenant from the gateway-verified X-Tenant-ID
+// header (set by AuthMiddleware from the JWT). User administration is scoped to
+// this tenant so one tenant's admin can neither see nor mutate another tenant's
+// users. Defaults to "default".
+func tenantOf(r *http.Request) string {
+	if t := r.Header.Get("X-Tenant-ID"); t != "" {
+		return t
+	}
+	return defaultTenantID
 }
 
 // ── SSO (OAuth2 / OIDC) ───────────────────────────────────────────────────

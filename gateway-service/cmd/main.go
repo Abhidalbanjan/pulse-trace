@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"log"
-	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -17,6 +15,7 @@ import (
 	"github.com/grafana/pyroscope-go"
 	"github.com/pulsetrace/gateway-service/internal/auth"
 	"github.com/pulsetrace/gateway-service/internal/handler"
+	"github.com/pulsetrace/gateway-service/internal/otlp"
 	"github.com/pulsetrace/gateway-service/internal/pii"
 	"github.com/pulsetrace/gateway-service/internal/proxy"
 	gatewaymigrations "github.com/pulsetrace/gateway-service/migrations"
@@ -140,9 +139,9 @@ func main() {
 		}},
 		{Prefix: "/api/traces", Upstream: jaegerURL},
 		{Prefix: "/api/services", Upstream: jaegerURL},
-		{Prefix: "/v1/traces", Upstream: otelCollectorHTTPURL},
-		{Prefix: "/v1/metrics", Upstream: otelCollectorHTTPURL},
-		{Prefix: "/v1/logs", Upstream: otelCollectorHTTPURL},
+		// NOTE: /v1/traces|metrics|logs are NOT proxied raw anymore — they're
+		// terminated in-process below (otlpHTTP) so telemetry is tenant-stamped
+		// before reaching the collector, mirroring the gRPC receiver.
 	}
 
 	router := proxy.NewRouter(routes)
@@ -251,6 +250,14 @@ func main() {
 	githubWebhookHandler := handler.NewGithubWebhookHandler()
 	mux.HandleFunc("POST /api/v1/webhooks/github", githubWebhookHandler.Handle)
 
+	// OTLP/HTTP ingestion, terminated in-process so each payload is tenant-stamped
+	// (tenant resolved onto X-Tenant-ID by AuthMiddleware) before forwarding to the
+	// collector — the HTTP counterpart of the in-process gRPC receiver below.
+	otlpHTTP := otlp.NewHTTPHandler(otelCollectorHTTPURL)
+	mux.HandleFunc("POST /v1/traces", otlpHTTP.Handler(otlp.SignalTraces))
+	mux.HandleFunc("POST /v1/metrics", otlpHTTP.Handler(otlp.SignalMetrics))
+	mux.HandleFunc("POST /v1/logs", otlpHTTP.Handler(otlp.SignalLogs))
+
 	mux.Handle("/", router)
 
 	// Middleware chain: CORS → Tracing → RequestLogger → Auth → RateLimit → PII Sanitizer → RBAC/ABAC → router
@@ -272,9 +279,19 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// ── OTLP gRPC TCP Forwarder ────────────────────────────────────────────────
+	// ── In-process OTLP/gRPC receiver ──────────────────────────────────────────
+	// Replaces the old raw TCP tunnel to :4317. This terminates OTLP/gRPC here so
+	// each export is authenticated with its ingestion key and stamped with the
+	// resolved tenant (tenant.id resource attribute) before being forwarded to the
+	// collector — which is what gives otel_traces/otel_metrics a tenant dimension.
 	otelCollectorGRPCAddr := getEnv("OTEL_COLLECTOR_GRPC_ADDR", "localhost:4317")
-	go startGRPCProxy(ctx, ":4317", otelCollectorGRPCAddr)
+	otlpReceiver, err := otlp.NewReceiver(ingestionKeys, auth.RequireIngestionKey(), otelCollectorGRPCAddr)
+	if err != nil {
+		log.Fatalf("gateway-service: failed to create OTLP receiver: %v", err)
+	}
+	if err := otlpReceiver.Start(":4317"); err != nil {
+		log.Fatalf("gateway-service: failed to start OTLP receiver: %v", err)
+	}
 
 	go func() {
 		log.Printf("gateway-service listening on :%s", port)
@@ -292,6 +309,7 @@ func main() {
 	<-quit
 
 	log.Println("shutting down gateway...")
+	otlpReceiver.Stop()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
@@ -306,55 +324,4 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-// startGRPCProxy runs a high-performance transparent TCP tunnel for OTLP/gRPC.
-func startGRPCProxy(ctx context.Context, listenAddr, targetAddr string) {
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		log.Printf("gateway-service: failed to start OTLP gRPC proxy listener: %v", err)
-		return
-	}
-	defer listener.Close()
-
-	go func() {
-		<-ctx.Done()
-		listener.Close()
-	}()
-
-	log.Printf("gateway-service: OTLP gRPC TCP proxy listening on %s -> forwarding to %s", listenAddr, targetAddr)
-
-	for {
-		clientConn, err := listener.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				log.Printf("gateway-service: gRPC proxy accept error: %v", err)
-				continue
-			}
-		}
-
-		go func(cc net.Conn) {
-			defer cc.Close()
-			backendConn, err := net.DialTimeout("tcp", targetAddr, 5*time.Second)
-			if err != nil {
-				log.Printf("gateway-service: failed to connect to backend gRPC %s: %v", targetAddr, err)
-				return
-			}
-			defer backendConn.Close()
-
-			errChan := make(chan error, 2)
-			go func() {
-				_, err := io.Copy(backendConn, cc)
-				errChan <- err
-			}()
-			go func() {
-				_, err := io.Copy(cc, backendConn)
-				errChan <- err
-			}()
-			<-errChan
-		}(clientConn)
-	}
 }

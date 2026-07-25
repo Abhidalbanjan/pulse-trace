@@ -76,18 +76,18 @@ func (h *MetricsHandler) ListMetricNames(w http.ResponseWriter, r *http.Request)
 	query := `
 		SELECT MetricName as name, MetricDescription as description, MetricUnit as unit, ServiceName as service, 'gauge' as type
 		FROM pulsetrace.otel_metrics_gauge
-		WHERE TimeUnix >= now() - INTERVAL 24 HOUR
+		WHERE ResourceAttributes['tenant.id'] = {tenant:String} AND TimeUnix >= now() - INTERVAL 24 HOUR
 		GROUP BY name, description, unit, service
 		UNION ALL
 		SELECT MetricName as name, MetricDescription as description, MetricUnit as unit, ServiceName as service, 'sum' as type
 		FROM pulsetrace.otel_metrics_sum
-		WHERE TimeUnix >= now() - INTERVAL 24 HOUR
+		WHERE ResourceAttributes['tenant.id'] = {tenant:String} AND TimeUnix >= now() - INTERVAL 24 HOUR
 		GROUP BY name, description, unit, service
 		ORDER BY name ASC
 		FORMAT JSON
 	`
 
-	resp, err := h.ch.query(query, nil)
+	resp, err := h.ch.query(query, map[string]string{"tenant": tenantFromRequest(r)})
 	if !h.writeErrOrEmpty(w, resp, err, "MetricsHandler.ListMetricNames") {
 		return
 	}
@@ -125,7 +125,7 @@ func (h *MetricsHandler) QueryMetric(w http.ResponseWriter, r *http.Request) {
 	bucketExpr := metricIntervalToBucket[interval]
 
 	service := r.URL.Query().Get("service")
-	params := map[string]string{"metric": stringParam(metricName)}
+	params := map[string]string{"metric": stringParam(metricName), "tenant": tenantFromRequest(r)}
 
 	var whereService, groupService, selectService string
 	if service != "" {
@@ -154,7 +154,7 @@ func (h *MetricsHandler) QueryMetric(w http.ResponseWriter, r *http.Request) {
 			max(Value) as max_value,
 			count() as sample_count
 		FROM pulsetrace.%s
-		WHERE MetricName = {metric:String} %s AND TimeUnix >= now() - INTERVAL %s
+		WHERE ResourceAttributes['tenant.id'] = {tenant:String} AND MetricName = {metric:String} %s AND TimeUnix >= now() - INTERVAL %s
 		GROUP BY time_bucket%s
 		ORDER BY time_bucket ASC
 		FORMAT JSON

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -19,6 +20,7 @@ type SyntheticsHandler struct {
 
 type SyntheticResult struct {
 	Timestamp  time.Time `json:"timestamp"`
+	TenantID   string    `json:"tenant_id"`
 	URL        string    `json:"url"`
 	StatusCode int       `json:"status_code"`
 	LatencyMs  float64   `json:"latency_ms"`
@@ -43,8 +45,10 @@ func (h *SyntheticsHandler) initPostgresTable() {
 	query := `
 		CREATE TABLE IF NOT EXISTS synthetic_targets (
 			id SERIAL PRIMARY KEY,
-			url VARCHAR(255) UNIQUE NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			tenant_id VARCHAR(50) NOT NULL DEFAULT 'default',
+			url VARCHAR(255) NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(tenant_id, url)
 		);
 	`
 	_, err := h.DB.Exec(query)
@@ -53,24 +57,28 @@ func (h *SyntheticsHandler) initPostgresTable() {
 	} else {
 		log.Println("[SyntheticsHandler] Postgres synthetic_targets table initialized.")
 	}
+	// Backfill tenant_id on a pre-existing single-tenant table (best-effort).
+	_, _ = h.DB.Exec("ALTER TABLE synthetic_targets ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(50) NOT NULL DEFAULT 'default'")
 }
 
 func (h *SyntheticsHandler) initClickHouseTable() {
 	query := `
 		CREATE TABLE IF NOT EXISTS pulsetrace.synthetic_results (
 			Timestamp DateTime64(3) DEFAULT now(),
+			TenantID String DEFAULT 'default',
 			URL String,
 			StatusCode Int32,
 			LatencyMs Float64,
 			Success UInt8
 		) ENGINE = MergeTree()
+		PARTITION BY TenantID
 		ORDER BY (Timestamp, URL)
 		TTL toDateTime(Timestamp) + INTERVAL 7 DAY;
 	`
-	
+
 	req, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(query))
 	req.SetBasicAuth(clickhouseUser, clickhousePassword)
-	
+
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -78,12 +86,20 @@ func (h *SyntheticsHandler) initClickHouseTable() {
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		log.Printf("[SyntheticsHandler] WARNING: ClickHouse table creation returned %d: %s", resp.StatusCode, string(body))
 	} else {
 		log.Println("[SyntheticsHandler] ClickHouse synthetic_results table initialized.")
+	}
+
+	// Add TenantID to a pre-existing table (best-effort), backfilling old rows to 'default'.
+	alter, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(
+		"ALTER TABLE pulsetrace.synthetic_results ADD COLUMN IF NOT EXISTS TenantID String DEFAULT 'default'"))
+	alter.SetBasicAuth(clickhouseUser, clickhousePassword)
+	if aresp, aerr := client.Do(alter); aerr == nil {
+		aresp.Body.Close()
 	}
 }
 
@@ -99,18 +115,20 @@ func (h *SyntheticsHandler) StartWorker() {
 				continue // Need DB for targets
 			}
 
-			// Fetch targets from postgres
-			rows, err := h.DB.Query("SELECT url FROM synthetic_targets")
+			// Fetch targets from postgres, carrying each target's owning tenant so
+			// its probe results are attributed back to that tenant.
+			rows, err := h.DB.Query("SELECT tenant_id, url FROM synthetic_targets")
 			if err != nil {
 				log.Printf("[SyntheticsWorker] Failed to query targets: %v", err)
 				continue
 			}
 
-			var endpoints []string
+			type target struct{ tenantID, url string }
+			var endpoints []target
 			for rows.Next() {
-				var url string
-				if err := rows.Scan(&url); err == nil {
-					endpoints = append(endpoints, url)
+				var t target
+				if err := rows.Scan(&t.tenantID, &t.url); err == nil {
+					endpoints = append(endpoints, t)
 				}
 			}
 			rows.Close()
@@ -122,14 +140,15 @@ func (h *SyntheticsHandler) StartWorker() {
 			var results []SyntheticResult
 			now := time.Now()
 
-			for _, url := range endpoints {
+			for _, tgt := range endpoints {
 				start := time.Now()
-				resp, err := client.Get(url)
+				resp, err := client.Get(tgt.url)
 				latency := float64(time.Since(start).Milliseconds())
-				
+
 				res := SyntheticResult{
 					Timestamp: now,
-					URL:       url,
+					TenantID:  tgt.tenantID,
+					URL:       tgt.url,
 					LatencyMs: latency,
 				}
 
@@ -154,25 +173,32 @@ func (h *SyntheticsHandler) flushResults(results []SyntheticResult) {
 	}
 
 	var insertQuery bytes.Buffer
-	insertQuery.WriteString("INSERT INTO pulsetrace.synthetic_results (Timestamp, URL, StatusCode, LatencyMs, Success) FORMAT JSONEachRow\n")
-	
+	insertQuery.WriteString("INSERT INTO pulsetrace.synthetic_results (Timestamp, TenantID, URL, StatusCode, LatencyMs, Success) FORMAT JSONEachRow\n")
+
 	for _, res := range results {
 		// Convert time to string for CH JSONEachRow
 		type chResult struct {
 			Timestamp  string  `json:"Timestamp"`
+			TenantID   string  `json:"TenantID"`
 			URL        string  `json:"URL"`
 			StatusCode int     `json:"StatusCode"`
 			LatencyMs  float64 `json:"LatencyMs"`
 			Success    uint8   `json:"Success"`
 		}
-		
+
 		succ := uint8(0)
 		if res.Success {
 			succ = 1
 		}
 
+		tenantID := res.TenantID
+		if tenantID == "" {
+			tenantID = "default"
+		}
+
 		ch := chResult{
 			Timestamp:  res.Timestamp.Format("2006-01-02 15:04:05.000"),
+			TenantID:   tenantID,
 			URL:        res.URL,
 			StatusCode: res.StatusCode,
 			LatencyMs:  res.LatencyMs,
@@ -205,22 +231,29 @@ func (h *SyntheticsHandler) flushResults(results []SyntheticResult) {
 func (h *SyntheticsHandler) GetResults(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Get the last 60 minutes of data for sparklines, plus aggregated stats
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	// Get the last 60 minutes of data for sparklines, plus aggregated stats,
+	// scoped to the caller's tenant.
 	query := `
-		SELECT 
+		SELECT
 			URL,
 			avg(LatencyMs) as avg_latency_ms,
 			avg(Success) * 100 as uptime_percent,
 			groupArray(LatencyMs) as latency_history
 		FROM pulsetrace.synthetic_results
-		WHERE Timestamp >= now() - INTERVAL 1 HOUR
+		WHERE TenantID = {tenant:String} AND Timestamp >= now() - INTERVAL 1 HOUR
 		GROUP BY URL
 		FORMAT JSON
 	`
 
-	req, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(query))
+	reqURL := h.ClickHouseURL + "?param_tenant=" + url.QueryEscape(tenantID)
+	req, _ := http.NewRequest("POST", reqURL, bytes.NewBufferString(query))
 	req.SetBasicAuth(clickhouseUser, clickhousePassword)
-	
+
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -251,7 +284,12 @@ func (h *SyntheticsHandler) CreateTarget(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	_, err := h.DB.Exec("INSERT INTO synthetic_targets (url) VALUES ($1) ON CONFLICT (url) DO NOTHING", payload.URL)
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	_, err := h.DB.Exec("INSERT INTO synthetic_targets (tenant_id, url) VALUES ($1, $2) ON CONFLICT (tenant_id, url) DO NOTHING", tenantID, payload.URL)
 	if err != nil {
 		log.Printf("[SyntheticsHandler] Failed to insert target: %v", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)

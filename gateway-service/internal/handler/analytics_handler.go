@@ -26,8 +26,8 @@ func (h *AnalyticsHandler) GetTraceAnalytics(w http.ResponseWriter, r *http.Requ
 	services := r.URL.Query()["service"]
 	routes := r.URL.Query()["route"]
 
-	where := fmt.Sprintf("ParentSpanId = '' AND Timestamp >= now() - INTERVAL %s", sqlInterval)
-	params := map[string]string{}
+	where := fmt.Sprintf("%s AND ParentSpanId = '' AND Timestamp >= now() - INTERVAL %s", tenantClause, sqlInterval)
+	params := map[string]string{"tenant": tenantFromRequest(r)}
 	if len(services) > 0 {
 		where += " AND ServiceName IN {services:Array(String)}"
 		params["services"] = arrayParam(services)
@@ -80,14 +80,16 @@ func (h *AnalyticsHandler) GetTraceAnalytics(w http.ResponseWriter, r *http.Requ
 func (h *AnalyticsHandler) GetTraceFacets(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
+	tenantParams := map[string]string{"tenant": tenantFromRequest(r)}
+
 	serviceResp, err := h.ch.query(`
 		SELECT DISTINCT ServiceName as name
 		FROM pulsetrace.otel_traces
-		WHERE ParentSpanId = '' AND Timestamp >= now() - INTERVAL 7 DAY
+		WHERE `+tenantClause+` AND ParentSpanId = '' AND Timestamp >= now() - INTERVAL 7 DAY
 		ORDER BY name
 		LIMIT 50
 		FORMAT JSON
-	`, nil)
+	`, tenantParams)
 	if err != nil {
 		log.Printf("[AnalyticsHandler] Failed to query service facets: %v", err)
 		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)
@@ -98,11 +100,11 @@ func (h *AnalyticsHandler) GetTraceFacets(w http.ResponseWriter, r *http.Request
 	routeResp, err := h.ch.query(`
 		SELECT DISTINCT SpanAttributes['http.route'] as name
 		FROM pulsetrace.otel_traces
-		WHERE Timestamp >= now() - INTERVAL 7 DAY AND SpanAttributes['http.route'] != ''
+		WHERE `+tenantClause+` AND Timestamp >= now() - INTERVAL 7 DAY AND SpanAttributes['http.route'] != ''
 		ORDER BY name
 		LIMIT 50
 		FORMAT JSON
-	`, nil)
+	`, tenantParams)
 	if err != nil {
 		log.Printf("[AnalyticsHandler] Failed to query route facets: %v", err)
 		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)

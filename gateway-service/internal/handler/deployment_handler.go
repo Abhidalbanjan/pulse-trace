@@ -50,10 +50,10 @@ func (h *DeploymentHandler) RecordDeployment(w http.ResponseWriter, r *http.Requ
 	var id string
 	var deployedAt string
 	err := h.db.QueryRow(`
-		INSERT INTO deployments (service, version, git_sha, environment, deployed_by, notes)
-		VALUES ($1, $2, NULLIF($3, ''), $4, NULLIF($5, ''), NULLIF($6, ''))
+		INSERT INTO deployments (tenant_id, service, version, git_sha, environment, deployed_by, notes)
+		VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), NULLIF($7, ''))
 		RETURNING id, deployed_at::text
-	`, req.Service, req.Version, req.GitSHA, req.Environment, req.DeployedBy, req.Notes).Scan(&id, &deployedAt)
+	`, tenantFromRequest(r), req.Service, req.Version, req.GitSHA, req.Environment, req.DeployedBy, req.Notes).Scan(&id, &deployedAt)
 	if err != nil {
 		log.Printf("[DeploymentHandler] failed to record deployment: %v", err)
 		http.Error(w, "failed to record deployment", http.StatusInternalServerError)
@@ -88,10 +88,10 @@ func (h *DeploymentHandler) ListDeployments(w http.ResponseWriter, r *http.Reque
 	rows, err := h.db.Query(`
 		SELECT id, service, version, COALESCE(git_sha, ''), environment, COALESCE(deployed_by, ''), COALESCE(notes, ''), deployed_at::text
 		FROM deployments
-		WHERE service = $1
+		WHERE tenant_id = $1 AND service = $2
 		ORDER BY deployed_at DESC
 		LIMIT 20
-	`, service)
+	`, tenantFromRequest(r), service)
 	if err != nil {
 		log.Printf("[DeploymentHandler] failed to list deployments: %v", err)
 		http.Error(w, "failed to list deployments", http.StatusInternalServerError)

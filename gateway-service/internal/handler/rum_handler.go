@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -36,6 +37,7 @@ func (h *RUMHandler) initTable() {
 	query := `
 		CREATE TABLE IF NOT EXISTS pulsetrace.rum_events (
 			Timestamp DateTime64(3) DEFAULT now(),
+			TenantID String DEFAULT 'default',
 			SessionID String,
 			Type String,
 			Path String,
@@ -47,6 +49,7 @@ func (h *RUMHandler) initTable() {
 			TraceID String DEFAULT '',
 			SpanID String DEFAULT ''
 		) ENGINE = MergeTree()
+		PARTITION BY TenantID
 		ORDER BY (Timestamp, Type)
 		TTL toDateTime(Timestamp) + INTERVAL 7 DAY;
 	`
@@ -69,9 +72,12 @@ func (h *RUMHandler) initTable() {
 		log.Println("[RUMHandler] ClickHouse rum_events table initialized.")
 	}
 
-	// Table may already exist from before TraceID/SpanID were added - add them if missing.
+	// Table may already exist from before these columns were added - add them if
+	// missing. TenantID backfills existing rows with 'default' (the pre-multi-tenant
+	// value), so old data stays visible to the default tenant rather than vanishing.
 	alterQuery := `
 		ALTER TABLE pulsetrace.rum_events
+			ADD COLUMN IF NOT EXISTS TenantID String DEFAULT 'default',
 			ADD COLUMN IF NOT EXISTS TraceID String DEFAULT '',
 			ADD COLUMN IF NOT EXISTS SpanID String DEFAULT ''
 	`
@@ -102,12 +108,33 @@ func (h *RUMHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Batch insert into ClickHouse
+	// Tenant is resolved server-side from the gateway-verified header, never from
+	// the browser payload — a RUM event can't choose its own tenant.
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	// Batch insert into ClickHouse. Keys are written in the table's PascalCase
+	// column names so JSONEachRow maps them correctly (and the tenant is stamped
+	// onto every row).
 	var insertQuery bytes.Buffer
-	insertQuery.WriteString("INSERT INTO pulsetrace.rum_events (SessionID, Type, Path, UserAgent, MetricName, MetricValue, ErrorMsg, ErrorStack, TraceID, SpanID) FORMAT JSONEachRow\n")
-	
+	insertQuery.WriteString("INSERT INTO pulsetrace.rum_events (TenantID, SessionID, Type, Path, UserAgent, MetricName, MetricValue, ErrorMsg, ErrorStack, TraceID, SpanID) FORMAT JSONEachRow\n")
+
 	for _, ev := range events {
-		b, _ := json.Marshal(ev)
+		b, _ := json.Marshal(map[string]interface{}{
+			"TenantID":    tenantID,
+			"SessionID":   ev.SessionID,
+			"Type":        ev.Type,
+			"Path":        ev.Path,
+			"UserAgent":   ev.UserAgent,
+			"MetricName":  ev.MetricName,
+			"MetricValue": ev.MetricValue,
+			"ErrorMsg":    ev.ErrorMsg,
+			"ErrorStack":  ev.ErrorStack,
+			"TraceID":     ev.TraceID,
+			"SpanID":      ev.SpanID,
+		})
 		insertQuery.Write(b)
 		insertQuery.WriteString("\n")
 	}
@@ -135,33 +162,43 @@ func (h *RUMHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, `{"status": "ok"}`)
 }
 
-// GetAnalytics queries RUM data for the frontend dashboard
+// tenantQuery POSTs a ClickHouse query scoped to one tenant, passing the tenant
+// as a bind parameter (param_tenant → {tenant:String}) so it's never
+// string-concatenated into SQL.
+func (h *RUMHandler) tenantQuery(r *http.Request, query string) (*http.Response, error) {
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	reqURL := h.ClickHouseURL + "?param_tenant=" + url.QueryEscape(tenantID)
+	req, _ := http.NewRequest("POST", reqURL, bytes.NewBufferString(query))
+	req.SetBasicAuth(clickhouseUser, clickhousePassword)
+	return (&http.Client{Timeout: 5 * time.Second}).Do(req)
+}
+
+// GetAnalytics queries RUM data for the frontend dashboard, scoped to the caller's tenant.
 func (h *RUMHandler) GetAnalytics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	query := `
-		SELECT 
+		SELECT
 			Type,
 			MetricName,
 			avg(MetricValue) as avg_value,
 			count() as count
 		FROM pulsetrace.rum_events
-		WHERE Timestamp >= now() - INTERVAL 24 HOUR
+		WHERE TenantID = {tenant:String} AND Timestamp >= now() - INTERVAL 24 HOUR
 		GROUP BY Type, MetricName
 		FORMAT JSON
 	`
 
-	req, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(query))
-	req.SetBasicAuth(clickhouseUser, clickhousePassword)
-	
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := h.tenantQuery(r, query)
 	if err != nil {
 		http.Error(w, "failed to query analytics", http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode == http.StatusNotFound {
 		io.WriteString(w, `{"data": []}`)
 		return
@@ -169,7 +206,7 @@ func (h *RUMHandler) GetAnalytics(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-// GetErrors queries recent frontend errors
+// GetErrors queries recent frontend errors, scoped to the caller's tenant.
 func (h *RUMHandler) GetErrors(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -182,23 +219,19 @@ func (h *RUMHandler) GetErrors(w http.ResponseWriter, r *http.Request) {
 			UserAgent as user_agent,
 			TraceID as trace_id
 		FROM pulsetrace.rum_events
-		WHERE Type = 'error'
+		WHERE TenantID = {tenant:String} AND Type = 'error'
 		ORDER BY Timestamp DESC
 		LIMIT 50
 		FORMAT JSON
 	`
 
-	req, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(query))
-	req.SetBasicAuth(clickhouseUser, clickhousePassword)
-	
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := h.tenantQuery(r, query)
 	if err != nil {
 		http.Error(w, "failed to query errors", http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode == http.StatusNotFound {
 		io.WriteString(w, `{"data": []}`)
 		return

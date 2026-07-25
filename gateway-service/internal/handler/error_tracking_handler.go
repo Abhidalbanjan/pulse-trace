@@ -23,9 +23,12 @@ func NewErrorTrackingHandler(clickhouseURL string, db *sql.DB) *ErrorTrackingHan
 	return &ErrorTrackingHandler{ch: &clickHouseClient{URL: clickhouseURL}, db: db}
 }
 
-// fingerprint derives a stable 16-char id for an error group from its identity fields.
-func fingerprint(service, operation, message string) string {
-	sum := sha256.Sum256([]byte(service + "|" + operation + "|" + message))
+// fingerprint derives a stable 16-char id for an error group from its identity
+// fields. tenant is part of the hash so two tenants that happen to share a
+// service/operation/message never collide onto the same error_groups row — which
+// would otherwise leak one tenant's triage state (resolved/muted) to another.
+func fingerprint(tenant, service, operation, message string) string {
+	sum := sha256.Sum256([]byte(tenant + "|" + service + "|" + operation + "|" + message))
 	return hex.EncodeToString(sum[:])[:16]
 }
 
@@ -77,14 +80,14 @@ func (h *ErrorTrackingHandler) ListErrorGroups(w http.ResponseWriter, r *http.Re
 			max(Timestamp) as last_seen,
 			argMax(TraceId, Timestamp) as sample_trace_id
 		FROM pulsetrace.otel_traces
-		WHERE StatusCode = 'STATUS_CODE_ERROR' AND Timestamp >= now() - INTERVAL 7 DAY
+		WHERE ` + tenantClause + ` AND StatusCode = 'STATUS_CODE_ERROR' AND Timestamp >= now() - INTERVAL 7 DAY
 		GROUP BY service, operation, message
 		ORDER BY last_seen DESC
 		LIMIT 200
 		FORMAT JSON
 	`
 
-	resp, err := h.ch.query(query, nil)
+	resp, err := h.ch.query(query, map[string]string{"tenant": tenantFromRequest(r)})
 	if err != nil {
 		log.Printf("[ErrorTrackingHandler] ClickHouse query failed: %v", err)
 		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)
@@ -127,7 +130,7 @@ func (h *ErrorTrackingHandler) ListErrorGroups(w http.ResponseWriter, r *http.Re
 	groups := make([]errorGroupRow, 0, len(result.Data))
 	fingerprints := make([]string, 0, len(result.Data))
 	for _, d := range result.Data {
-		fp := fingerprint(d.Service, d.Operation, d.Message)
+		fp := fingerprint(tenantFromRequest(r), d.Service, d.Operation, d.Message)
 		fingerprints = append(fingerprints, fp)
 		occurrences, _ := strconv.ParseInt(d.Occurrences, 10, 64)
 		groups = append(groups, errorGroupRow{

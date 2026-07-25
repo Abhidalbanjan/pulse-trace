@@ -7,6 +7,7 @@ import { PoliciesPanel } from './PoliciesPanel';
 import { AuditLogPanel } from './AuditLogPanel';
 import { RateLimitsPanel } from './RateLimitsPanel';
 import { AlertRulesPanel } from './AlertRulesPanel';
+import { BillingPanel } from './BillingPanel';
 import { useTheme } from '@/context/ThemeContext';
 
 export function SettingsView() {
@@ -192,7 +193,7 @@ export function SettingsView() {
       <div style={{ width: '230px', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '4px' }}>
         <h2 style={{ fontSize: '24px', fontWeight: 700, margin: '0 0 20px', color: t.text1 }}>Settings</h2>
 
-        {['users', 'roles', 'policies', 'ratelimits', 'audit', 'apikeys', 'sso', 'alerts'].map(tab => (
+        {['users', 'billing', 'roles', 'policies', 'ratelimits', 'audit', 'apikeys', 'sso', 'alerts'].map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -211,6 +212,7 @@ export function SettingsView() {
             }}
           >
             {tab === 'users' ? 'Users'
+              : tab === 'billing' ? 'Billing & Usage'
               : tab === 'roles' ? 'Roles (RBAC)'
               : tab === 'policies' ? 'Policies (ABAC)'
               : tab === 'ratelimits' ? 'Rate Limits'
@@ -290,6 +292,7 @@ export function SettingsView() {
           </div>
         )}
 
+        {activeTab === 'billing' && <BillingPanel />}
         {activeTab === 'roles' && <RolesPanel />}
 
         {activeTab === 'policies' && <PoliciesPanel />}

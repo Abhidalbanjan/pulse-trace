@@ -255,7 +255,7 @@ func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
 			// Other public (no-token) endpoints. No tenant is attributed here.
 			if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/api/v1/auth/register" || r.URL.Path == "/api/v1/auth/signup" || r.URL.Path == "/healthz" ||
 				r.URL.Path == "/api/v1/auth/sso/login" || r.URL.Path == "/api/v1/auth/sso/config" || r.URL.Path == "/api/v1/auth/sso/callback" ||
-				r.URL.Path == "/api/v1/control-plane/incidents" {
+				r.URL.Path == "/api/v1/webhooks/stripe" || r.URL.Path == "/api/v1/control-plane/incidents" {
 				next.ServeHTTP(w, r)
 				return
 			}

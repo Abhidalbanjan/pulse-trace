@@ -14,6 +14,7 @@ import (
 
 	"github.com/grafana/pyroscope-go"
 	"github.com/pulsetrace/gateway-service/internal/auth"
+	"github.com/pulsetrace/gateway-service/internal/billing"
 	"github.com/pulsetrace/gateway-service/internal/handler"
 	"github.com/pulsetrace/gateway-service/internal/otlp"
 	"github.com/pulsetrace/gateway-service/internal/pii"
@@ -169,9 +170,22 @@ func main() {
 		mux.HandleFunc("POST /api/v1/auth/signup", tenantStore.Signup)
 		// The caller's own tenant (plan/status) — authenticated.
 		mux.HandleFunc("GET /api/v1/tenant", tenantStore.GetCurrentTenant)
-		// Metered usage for the current billing period.
+	// Metered usage for the current billing period.
 		usageHandler := handler.NewUsageHandler(authHandler.GetDB())
 		mux.HandleFunc("GET /api/v1/usage", usageHandler.GetUsage)
+
+		// Billing: provider-agnostic (Stripe for SaaS, manual for on-prem).
+		billingHandler := billing.NewHandler(billing.FromEnv(), tenantStore)
+		mux.HandleFunc("POST /api/v1/billing/checkout", billingHandler.Checkout)
+		mux.HandleFunc("POST /api/v1/billing/portal", billingHandler.Portal)
+		if billingHandler.IsStripe() {
+			// Public, signature-verified — see the allowlist in AuthMiddleware.
+			mux.HandleFunc("POST /api/v1/webhooks/stripe", billingHandler.Webhook)
+		} else {
+			// Manual/on-prem: operators set plans directly (admin-gated). Never
+			// exposed under Stripe, so a SaaS tenant can't self-upgrade for free.
+			mux.HandleFunc("POST /api/v1/admin/tenant/plan", billingHandler.SetPlan)
+		}
 		mux.HandleFunc("GET /api/v1/auth/sso/login", authHandler.SSOLogin)
 		mux.HandleFunc("GET /api/v1/auth/sso/config", authHandler.GetSSOConfig)
 		mux.HandleFunc("GET /api/v1/auth/sso/callback", authHandler.SSOCallback)

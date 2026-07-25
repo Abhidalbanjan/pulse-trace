@@ -39,6 +39,10 @@ func NewTenantStore(db *sql.DB) *TenantStore {
 	return &TenantStore{db: db}
 }
 
+// DB exposes the underlying connection for callers that need to write related
+// rows (e.g. the billing handler's audit entries) against the same database.
+func (s *TenantStore) DB() *sql.DB { return s.db }
+
 // GetTenant returns a tenant by id, or (nil, nil) if it doesn't exist.
 func (s *TenantStore) GetTenant(ctx context.Context, id string) (*Tenant, error) {
 	var t Tenant
@@ -206,6 +210,41 @@ func (s *TenantStore) createTenantWithAdmin(ctx context.Context, baseSlug, name,
 func isUniqueViolation(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "unique constraint") || strings.Contains(msg, "duplicate key")
+}
+
+// UpdatePlan changes a tenant's plan (called by billing on subscription events,
+// or by an operator override).
+func (s *TenantStore) UpdatePlan(ctx context.Context, tenantID, plan string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE tenants SET plan = $1, updated_at = now() WHERE id = $2", plan, tenantID)
+	return err
+}
+
+// SetStatus flips a tenant active/suspended/deleted.
+func (s *TenantStore) SetStatus(ctx context.Context, tenantID, status string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE tenants SET status = $1, updated_at = now() WHERE id = $2", status, tenantID)
+	return err
+}
+
+// SetStripeIDs links a tenant to its Stripe customer/subscription.
+func (s *TenantStore) SetStripeIDs(ctx context.Context, tenantID, customerID, subscriptionID string) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE tenants SET stripe_customer_id = NULLIF($1,''), stripe_subscription_id = NULLIF($2,''), updated_at = now() WHERE id = $3",
+		customerID, subscriptionID, tenantID)
+	return err
+}
+
+// TenantByStripeCustomer resolves the tenant a Stripe customer id belongs to —
+// used by the webhook to map an incoming event back to a tenant.
+func (s *TenantStore) TenantByStripeCustomer(ctx context.Context, customerID string) (*Tenant, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, "SELECT id FROM tenants WHERE stripe_customer_id = $1", customerID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.GetTenant(ctx, id)
 }
 
 // GetCurrentTenant handles GET /api/v1/tenant — the caller's own tenant.

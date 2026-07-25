@@ -82,6 +82,8 @@ func main() {
 	// ingestion request belongs to. AuthMiddleware resolves the presented key
 	// against this store instead of trusting a client-supplied X-Tenant-ID header.
 	ingestionKeys := auth.NewIngestionKeyStore(authHandler.GetDB())
+	// Tenants as first-class entities + the self-serve signup funnel.
+	tenantStore := auth.NewTenantStore(authHandler.GetDB())
 	analyticsHandler := handler.NewAnalyticsHandler(clickhouseURL)
 	serviceHandler := handler.NewServiceHandler(clickhouseURL)
 	metricsHandler := handler.NewMetricsHandler(clickhouseURL)
@@ -156,6 +158,10 @@ func main() {
 	if authHandler != nil {
 		mux.HandleFunc("POST /api/v1/auth/login", authHandler.Login)
 		mux.HandleFunc("POST /api/v1/auth/register", authHandler.Register)
+		// Self-serve signup: creates a new tenant and its first admin.
+		mux.HandleFunc("POST /api/v1/auth/signup", tenantStore.Signup)
+		// The caller's own tenant (plan/status) — authenticated.
+		mux.HandleFunc("GET /api/v1/tenant", tenantStore.GetCurrentTenant)
 		mux.HandleFunc("GET /api/v1/auth/sso/login", authHandler.SSOLogin)
 		mux.HandleFunc("GET /api/v1/auth/sso/config", authHandler.GetSSOConfig)
 		mux.HandleFunc("GET /api/v1/auth/sso/callback", authHandler.SSOCallback)

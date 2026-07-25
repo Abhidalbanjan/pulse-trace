@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { CodeSnippet } from './CodeSnippet';
 import { useTheme } from '@/context/ThemeContext';
+import { fetchWithAuth } from '@/lib/api';
 
 type Platform = 'Kubernetes' | 'Docker' | 'Node.js' | 'Go' | null;
 
@@ -11,6 +12,8 @@ export function Wizard() {
   const [step, setStep] = useState(1);
   const [platform, setPlatform] = useState<Platform>(null);
   const [apiKey, setApiKey] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const platforms = [
     { name: 'Kubernetes', desc: 'Helm chart & DaemonSet', icon: 'deployed_code' },
@@ -19,12 +22,28 @@ export function Wizard() {
     { name: 'Go', desc: 'Native Go agent & Profiling', icon: 'memory' },
   ];
 
-  const generateKey = () => {
-    // Simulate API call
-    setTimeout(() => {
-      setApiKey(`pt_${Math.random().toString(36).substring(2, 15)}_${Math.random().toString(36).substring(2, 15)}`);
+  const generateKey = async () => {
+    // Mint a REAL per-tenant ingestion key via the admin API. The plaintext is
+    // returned exactly once — we show it in the install snippet immediately.
+    setGenerating(true);
+    setError(null);
+    try {
+      const res = await fetchWithAuth('/api/v1/admin/ingestion-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: `${platform ?? 'agent'} onboarding key`, scope: 'ingest' }),
+      });
+      if (!res.ok) {
+        throw new Error((await res.text()) || 'Failed to generate ingestion key');
+      }
+      const data = await res.json();
+      setApiKey(data.key);
       setStep(3);
-    }, 600);
+    } catch (e: any) {
+      setError(e.message || 'Failed to generate ingestion key');
+    } finally {
+      setGenerating(false);
+    }
   };
 
   const getScriptForPlatform = () => {
@@ -143,6 +162,7 @@ export function Wizard() {
             }}>
               <button
                 onClick={generateKey}
+                disabled={generating}
                 style={{
                   background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
                   color: '#fff',
@@ -151,11 +171,15 @@ export function Wizard() {
                   border: 'none',
                   fontWeight: 600,
                   fontSize: '15px',
-                  cursor: 'pointer'
+                  cursor: generating ? 'not-allowed' : 'pointer',
+                  opacity: generating ? 0.7 : 1
                 }}
               >
-                Generate API Key
+                {generating ? 'Generating…' : 'Generate API Key'}
               </button>
+              {error && (
+                <div style={{ marginTop: '16px', color: t.red, fontSize: '13.5px' }}>{error}</div>
+              )}
             </div>
           </div>
         )}

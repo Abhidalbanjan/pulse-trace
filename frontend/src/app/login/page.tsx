@@ -7,6 +7,7 @@ import { useTheme } from '@/context/ThemeContext';
 export default function LoginPage() {
   const { tokens: t } = useTheme();
   const [isLogin, setIsLogin] = useState(true);
+  const [orgName, setOrgName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -26,12 +27,17 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const endpoint = isLogin ? '/api/v1/auth/login' : '/api/v1/auth/register';
+      // Sign-in uses /login; sign-up uses the self-serve /signup, which creates a
+      // brand-new tenant with this user as its admin and returns a token directly.
+      const endpoint = isLogin ? '/api/v1/auth/login' : '/api/v1/auth/signup';
+      const body = isLogin
+        ? { username: email, password }
+        : { org_name: orgName, username: email, password };
 
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: email, password })
+        body: JSON.stringify(body)
       });
 
       let data;
@@ -47,22 +53,7 @@ export default function LoginPage() {
         throw new Error(data.error || data.message || 'Authentication failed');
       }
 
-      // If we just registered, the backend returns a success message but no token.
-      // We must auto-login to get the token.
-      if (!isLogin) {
-        const loginRes = await fetch('/api/v1/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: email, password })
-        });
-        if (!loginRes.ok) {
-          const errText = await loginRes.text();
-          throw new Error(errText || 'Login after registration failed');
-        }
-        data = await loginRes.json();
-      }
-
-      const userData = data.user || { id: 'temp-id', email: email, role: data.role || 'ADMIN' };
+      const userData = data.user || { id: 'temp-id', email: email, role: data.role || 'admin' };
       login(data.token, userData);
 
     } catch (err: any) {
@@ -139,6 +130,20 @@ export default function LoginPage() {
         )}
 
         <form onSubmit={handleSubmit} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {!isLogin && (
+            <div>
+              <label style={labelStyle}>Organization name</label>
+              <input
+                type="text"
+                value={orgName}
+                onChange={(e) => setOrgName(e.target.value)}
+                required
+                style={inputStyle}
+                placeholder="Acme Inc"
+              />
+            </div>
+          )}
+
           <div>
             <label style={labelStyle}>Email or Username</label>
             <input
@@ -227,6 +232,7 @@ export default function LoginPage() {
               setIsLogin(!isLogin);
               setError('');
               setConfirmPassword('');
+              setOrgName('');
             }}
             style={{ color: t.accent, cursor: 'pointer', fontWeight: 500 }}
           >

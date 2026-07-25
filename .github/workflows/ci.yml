@@ -147,6 +147,9 @@ jobs:
       - name: Run e2e suite (waits for health, seeds, then Playwright)
         run: scripts/run-e2e.sh
 
+      - name: Cross-tenant isolation test (multi-tenant data boundary)
+        run: node scripts/test-tenant-isolation.mjs
+
       - name: Upload Playwright artifacts
         if: always()
         uses: actions/upload-artifact@v4

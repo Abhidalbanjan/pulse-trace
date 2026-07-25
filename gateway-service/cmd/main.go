@@ -18,6 +18,7 @@ import (
 	"github.com/pulsetrace/gateway-service/internal/otlp"
 	"github.com/pulsetrace/gateway-service/internal/pii"
 	"github.com/pulsetrace/gateway-service/internal/proxy"
+	"github.com/pulsetrace/gateway-service/internal/quota"
 	"github.com/pulsetrace/shared/metering"
 	gatewaymigrations "github.com/pulsetrace/gateway-service/migrations"
 	"github.com/pulsetrace/shared/middleware"
@@ -88,6 +89,8 @@ func main() {
 	// Usage metering: Redis counters on the hot path, flushed to usage_daily.
 	usageMeter := metering.New(getEnv("REDIS_ADDR", "redis:6379"), authHandler.GetDB())
 	usageMeter.StartFlusher(ctx, 30*time.Second)
+	// Per-plan monthly quota enforcement, backed by the meter + tenants.plan.
+	quotaEnforcer := quota.New(usageMeter, authHandler.GetDB())
 	analyticsHandler := handler.NewAnalyticsHandler(clickhouseURL)
 	serviceHandler := handler.NewServiceHandler(clickhouseURL)
 	metricsHandler := handler.NewMetricsHandler(clickhouseURL)
@@ -278,6 +281,7 @@ func main() {
 	chain = rbacEngine.Middleware(chain)
 	chain = pii.PIISanitizerMiddleware(chain)
 	chain = rateLimiter.RateLimit(chain)
+	chain = quotaEnforcer.Middleware(chain)
 	chain = auth.AuthMiddleware(ingestionKeys)(chain)
 	chain = middleware.RequestLogger(chain)
 	chain = middleware.Tracing(serviceName)(chain)
@@ -298,7 +302,7 @@ func main() {
 	// resolved tenant (tenant.id resource attribute) before being forwarded to the
 	// collector — which is what gives otel_traces/otel_metrics a tenant dimension.
 	otelCollectorGRPCAddr := getEnv("OTEL_COLLECTOR_GRPC_ADDR", "localhost:4317")
-	otlpReceiver, err := otlp.NewReceiver(ingestionKeys, auth.RequireIngestionKey(), otelCollectorGRPCAddr, usageMeter.Record)
+	otlpReceiver, err := otlp.NewReceiver(ingestionKeys, auth.RequireIngestionKey(), otelCollectorGRPCAddr, usageMeter.Record, quotaEnforcer.Allow)
 	if err != nil {
 		log.Fatalf("gateway-service: failed to create OTLP receiver: %v", err)
 	}

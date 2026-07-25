@@ -57,6 +57,10 @@ type TenantResolver interface {
 // tenant. Injected so this package doesn't import the metering package. nil = off.
 type RecordFunc func(ctx context.Context, tenantID, signal string, count int64)
 
+// AllowFunc reports whether a tenant may still ingest `signal` under its plan
+// quota. Injected so this package doesn't import the quota package. nil = allow all.
+type AllowFunc func(ctx context.Context, tenantID, signal string) bool
+
 // tenantStamper holds the shared auth+stamp logic used by all three OTLP service
 // servers (trace/metrics/logs each need their own type because the OTLP proto
 // gives all three an identically-named Export method).
@@ -64,6 +68,7 @@ type tenantStamper struct {
 	resolver   TenantResolver
 	requireKey bool
 	record     RecordFunc
+	allow      AllowFunc
 }
 
 // meter records count events for the tenant if metering is wired.
@@ -71,6 +76,15 @@ func (s *tenantStamper) meter(ctx context.Context, tenantID, signal string, coun
 	if s.record != nil && count > 0 {
 		s.record(ctx, tenantID, signal, count)
 	}
+}
+
+// checkQuota returns a ResourceExhausted error if the tenant is over its plan
+// quota for the signal, else nil. No-op when no AllowFunc is wired.
+func (s *tenantStamper) checkQuota(ctx context.Context, tenantID, signal string) error {
+	if s.allow != nil && !s.allow(ctx, tenantID, signal) {
+		return status.Error(codes.ResourceExhausted, "monthly "+signal+" ingestion quota exceeded for this plan")
+	}
+	return nil
 }
 
 // authTenant resolves the tenant for an incoming export from its ingestion key
@@ -166,6 +180,9 @@ func (t *traceServer) Export(ctx context.Context, req *coltracepb.ExportTraceSer
 	if err != nil {
 		return nil, err
 	}
+	if err := t.stamper.checkQuota(ctx, tenantID, "traces"); err != nil {
+		return nil, err
+	}
 	for _, rs := range req.GetResourceSpans() {
 		rs.Resource = stampResource(rs.GetResource(), tenantID, tier)
 	}
@@ -184,6 +201,9 @@ func (m *metricsServer) Export(ctx context.Context, req *colmetricspb.ExportMetr
 	if err != nil {
 		return nil, err
 	}
+	if err := m.stamper.checkQuota(ctx, tenantID, "metrics"); err != nil {
+		return nil, err
+	}
 	for _, rm := range req.GetResourceMetrics() {
 		rm.Resource = stampResource(rm.GetResource(), tenantID, tier)
 	}
@@ -200,6 +220,9 @@ type logsServer struct {
 func (l *logsServer) Export(ctx context.Context, req *collogspb.ExportLogsServiceRequest) (*collogspb.ExportLogsServiceResponse, error) {
 	tenantID, tier, err := l.stamper.authTenant(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := l.stamper.checkQuota(ctx, tenantID, "logs"); err != nil {
 		return nil, err
 	}
 	for _, rl := range req.GetResourceLogs() {

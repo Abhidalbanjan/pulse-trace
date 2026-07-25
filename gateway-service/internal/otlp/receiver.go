@@ -29,14 +29,15 @@ type Receiver struct {
 // NewReceiver dials the upstream collector (lazily; grpc.NewClient does not
 // connect until the first RPC) and prepares the tenant-stamping servers.
 // resolver is the ingestion-key store; requireKey mirrors REQUIRE_INGESTION_KEY;
-// record meters ingested volume (nil disables metering).
-func NewReceiver(resolver TenantResolver, requireKey bool, upstreamAddr string, record RecordFunc) (*Receiver, error) {
+// record meters ingested volume (nil disables metering); allow enforces per-plan
+// quota on the gRPC path (nil allows all).
+func NewReceiver(resolver TenantResolver, requireKey bool, upstreamAddr string, record RecordFunc, allow AllowFunc) (*Receiver, error) {
 	conn, err := grpc.NewClient(upstreamAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}
 	return &Receiver{
-		stamper:       &tenantStamper{resolver: resolver, requireKey: requireKey, record: record},
+		stamper:       &tenantStamper{resolver: resolver, requireKey: requireKey, record: record, allow: allow},
 		upstream:      conn,
 		traceClient:   coltracepb.NewTraceServiceClient(conn),
 		metricsClient: colmetricspb.NewMetricsServiceClient(conn),

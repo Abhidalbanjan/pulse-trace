@@ -54,7 +54,20 @@ func counterKey(tenantID, day, signal string) string {
 	return fmt.Sprintf("usage:%s:%s:%s", tenantID, day, signal)
 }
 
+// monthKey backs the fast monthly-quota check: a single running total per
+// (tenant, month, signal), so the quota check is one Redis GET rather than a sum
+// over the month's daily counters.
+func monthKey(tenantID, month, signal string) string {
+	return fmt.Sprintf("usage_month:%s:%s:%s", tenantID, month, signal)
+}
+
 func today() string { return time.Now().UTC().Format("2006-01-02") }
+
+func thisMonth() string { return time.Now().UTC().Format("2006-01") }
+
+// monthCounterTTL keeps a month's counter well past the month itself so quota
+// checks early next month still see the right (reset) value once it rolls over.
+const monthCounterTTL = 70 * 24 * time.Hour
 
 // Record adds count events to the current day's (tenant, signal) counter. It is
 // best-effort and non-blocking-ish: a Redis hiccup logs and returns rather than
@@ -63,13 +76,30 @@ func (m *Meter) Record(ctx context.Context, tenantID, signal string, count int64
 	if m == nil || m.rdb == nil || count <= 0 || tenantID == "" {
 		return
 	}
-	key := counterKey(tenantID, today(), signal)
+	dayKey := counterKey(tenantID, today(), signal)
+	monKey := monthKey(tenantID, thisMonth(), signal)
 	pipe := m.rdb.Pipeline()
-	pipe.IncrBy(ctx, key, count)
-	pipe.Expire(ctx, key, counterTTL)
+	pipe.IncrBy(ctx, dayKey, count) // per-day, mirrored to usage_daily
+	pipe.Expire(ctx, dayKey, counterTTL)
+	pipe.IncrBy(ctx, monKey, count) // per-month running total, for quota checks
+	pipe.Expire(ctx, monKey, monthCounterTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		log.Printf("metering: failed to record %d %s for %s: %v", count, signal, tenantID, err)
 	}
+}
+
+// MonthlyUsage returns the tenant's running total for a signal this UTC month,
+// read from a single Redis counter — the hot value the quota checker compares
+// against the plan limit. Returns 0 when metering is disabled.
+func (m *Meter) MonthlyUsage(ctx context.Context, tenantID, signal string) int64 {
+	if m == nil || m.rdb == nil {
+		return 0
+	}
+	v, err := m.rdb.Get(ctx, monthKey(tenantID, thisMonth(), signal)).Int64()
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // CurrentUsage returns the tenant's counter total for a signal on the given day

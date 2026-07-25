@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,6 +17,12 @@ import (
 func TestHandleExecutePlaybook_SignatureValidation(t *testing.T) {
 	secret := "test_shared_secret"
 	api := NewAPI(nil, secret)
+	// Stub the external command runner so a validly-signed request executes
+	// deterministically without a real kubectl/docker on the machine. This test
+	// covers signature/timestamp validation, not the remediation shell-out.
+	api.runCmd = func(_ context.Context, _ string, _ ...string) (string, error) {
+		return "stubbed ok", nil
+	}
 
 	incidentID := "test-incident-123"
 	playbookName := "restart_service"

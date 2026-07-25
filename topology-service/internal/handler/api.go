@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,9 +23,25 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
+// commandRunner executes an external remediation command and returns its
+// combined output. Injected so tests can exercise the playbook handler
+// deterministically without a real kubectl/docker on the box.
+type commandRunner func(ctx context.Context, name string, args ...string) (string, error)
+
+// execCommandRunner is the production runner: it actually shells out.
+func execCommandRunner(ctx context.Context, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	return strings.TrimSpace(out.String()), err
+}
+
 type API struct {
 	repo         *repository.Neo4jRepository
 	sharedSecret []byte
+	runCmd       commandRunner
 }
 
 func NewAPI(repo *repository.Neo4jRepository, secret string) *API {
@@ -34,6 +51,7 @@ func NewAPI(repo *repository.Neo4jRepository, secret string) *API {
 	return &API{
 		repo:         repo,
 		sharedSecret: []byte(secret),
+		runCmd:       execCommandRunner,
 	}
 }
 
@@ -405,7 +423,6 @@ func (a *API) handleExecutePlaybook(w http.ResponseWriter, r *http.Request) {
 		req.PlaybookName, req.ServiceName, req.IncidentID)
 
 	var output string
-	var errExec error
 	var status = "EXECUTED"
 
 	switch req.PlaybookName {
@@ -413,20 +430,18 @@ func (a *API) handleExecutePlaybook(w http.ResponseWriter, r *http.Request) {
 		// Recycle database connection pools (terminate idle-in-transaction connections)
 		pgPool, err := db.NewPostgresPool(r.Context())
 		if err != nil {
-			errExec = err
 			status = "FAILED"
 			output = fmt.Sprintf("Failed to connect to database for recycling connection pool: %v", err)
 		} else {
 			defer pgPool.Close()
 			query := `
-				SELECT pg_terminate_backend(pid) 
-				FROM pg_stat_activity 
-				WHERE state = 'idle in transaction' 
+				SELECT pg_terminate_backend(pid)
+				FROM pg_stat_activity
+				WHERE state = 'idle in transaction'
 				  AND state_change < NOW() - INTERVAL '1 minute'
 			`
 			tag, err := pgPool.Exec(r.Context(), query)
 			if err != nil {
-				errExec = err
 				status = "FAILED"
 				output = fmt.Sprintf("Recycle DB pool failed: %v", err)
 			} else {
@@ -435,47 +450,32 @@ func (a *API) handleExecutePlaybook(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case "restart_service":
-		// Try Kubectl restart
-		cmd := exec.Command("kubectl", "rollout", "restart", "deployment/"+req.ServiceName)
-		var out bytes.Buffer
-		cmd.Stdout = &out
-		cmd.Stderr = &out
-		errExec = cmd.Run()
-
-		if errExec != nil {
-			// Fallback to Docker Compose restart
-			log.Printf("agent-handler: kubectl restart failed, trying docker restart fallback: %v", errExec)
-			dockerCmd := exec.Command("docker", "restart", "pulsetrace-"+req.ServiceName)
-			var dockerOut bytes.Buffer
-			dockerCmd.Stdout = &dockerOut
-			dockerCmd.Stderr = &dockerOut
-			if errDocker := dockerCmd.Run(); errDocker != nil {
-				log.Printf("agent-handler: docker restart fallback failed: %v", errDocker)
+		// Try Kubectl restart, falling back to Docker.
+		kOut, kErr := a.runCmd(r.Context(), "kubectl", "rollout", "restart", "deployment/"+req.ServiceName)
+		if kErr != nil {
+			log.Printf("agent-handler: kubectl restart failed, trying docker restart fallback: %v", kErr)
+			dOut, dErr := a.runCmd(r.Context(), "docker", "restart", "pulsetrace-"+req.ServiceName)
+			if dErr != nil {
+				log.Printf("agent-handler: docker restart fallback failed: %v", dErr)
 				status = "FAILED"
 				output = fmt.Sprintf("Failed to restart service %q. Kubectl error: %v (output: %q). Docker error: %v (output: %q).",
-					req.ServiceName, errExec, out.String(), errDocker, dockerOut.String())
+					req.ServiceName, kErr, kOut, dErr, dOut)
 			} else {
-				output = fmt.Sprintf("Successfully restarted container pulsetrace-%s using Docker. Output: %s", req.ServiceName, strings.TrimSpace(dockerOut.String()))
+				output = fmt.Sprintf("Successfully restarted container pulsetrace-%s using Docker. Output: %s", req.ServiceName, dOut)
 			}
 		} else {
-			output = fmt.Sprintf("Successfully executed rolling restart on Kubernetes for deployment/%s. Output: %s", req.ServiceName, strings.TrimSpace(out.String()))
+			output = fmt.Sprintf("Successfully executed rolling restart on Kubernetes for deployment/%s. Output: %s", req.ServiceName, kOut)
 		}
 
 	case "scale_replicas":
-		// Try Kubectl scale
-		cmd := exec.Command("kubectl", "scale", "deployment/"+req.ServiceName, "--replicas=4")
-		var out bytes.Buffer
-		cmd.Stdout = &out
-		cmd.Stderr = &out
-		errExec = cmd.Run()
-
-		if errExec != nil {
-			log.Printf("agent-handler: kubectl scale failed: %v", errExec)
+		kOut, kErr := a.runCmd(r.Context(), "kubectl", "scale", "deployment/"+req.ServiceName, "--replicas=4")
+		if kErr != nil {
+			log.Printf("agent-handler: kubectl scale failed: %v", kErr)
 			status = "FAILED"
 			output = fmt.Sprintf("Failed to scale deployment/%s. Kubectl error: %v (output: %q).",
-				req.ServiceName, errExec, out.String())
+				req.ServiceName, kErr, kOut)
 		} else {
-			output = fmt.Sprintf("Successfully scaled deployment/%s to 4 replicas. Output: %s", req.ServiceName, strings.TrimSpace(out.String()))
+			output = fmt.Sprintf("Successfully scaled deployment/%s to 4 replicas. Output: %s", req.ServiceName, kOut)
 		}
 
 	default:

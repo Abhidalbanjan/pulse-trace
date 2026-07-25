@@ -79,19 +79,27 @@ func (p *Purger) purgeClickHouse(ctx context.Context, tenantID string, res *Resu
 	}
 	q := chQuote(tenantID)
 	// rum_events / synthetic_results are PARTITION BY TenantID — dropping the
-	// partition is a near-instant metadata operation.
+	// partition is a near-instant metadata operation. If the table predates the
+	// partitioning (created before it was added), DROP PARTITION fails, so fall
+	// back to a synchronous row delete on the TenantID column.
 	for _, table := range []string{"pulsetrace.rum_events", "pulsetrace.synthetic_results"} {
-		stmt := fmt.Sprintf("ALTER TABLE %s DROP PARTITION %s", table, q)
-		if err := p.clickhouseExec(ctx, stmt); err != nil {
-			res.fail("clickhouse drop partition "+table, err)
+		drop := fmt.Sprintf("ALTER TABLE %s DROP PARTITION %s", table, q)
+		if err := p.clickhouseExec(ctx, drop); err == nil {
+			res.ok("clickhouse " + table + " (partition)")
+			continue
+		}
+		del := fmt.Sprintf("ALTER TABLE %s DELETE WHERE TenantID = %s SETTINGS mutations_sync = 1", table, q)
+		if err := p.clickhouseExec(ctx, del); err != nil {
+			res.fail("clickhouse "+table, err)
 		} else {
-			res.ok("clickhouse " + table)
+			res.ok("clickhouse " + table + " (delete)")
 		}
 	}
 	// otel_traces / otel_metrics_* carry the tenant as a resource attribute, not a
-	// partition, so use a lightweight mutation.
+	// partition, so delete by it. mutations_sync makes the deletion complete before
+	// we return, so "delete my data" is actually done when the call succeeds.
 	for _, table := range []string{"pulsetrace.otel_traces", "pulsetrace.otel_metrics_gauge", "pulsetrace.otel_metrics_sum"} {
-		stmt := fmt.Sprintf("ALTER TABLE %s DELETE WHERE ResourceAttributes['tenant.id'] = %s", table, q)
+		stmt := fmt.Sprintf("ALTER TABLE %s DELETE WHERE ResourceAttributes['tenant.id'] = %s SETTINGS mutations_sync = 1", table, q)
 		if err := p.clickhouseExec(ctx, stmt); err != nil {
 			res.fail("clickhouse delete "+table, err)
 		} else {

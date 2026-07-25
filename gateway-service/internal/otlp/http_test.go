@@ -20,6 +20,9 @@ func TestStampPayloadProtobufRoundTrip(t *testing.T) {
 			Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{
 				{Key: TenantIDAttr, Value: stringValue("spoofed")},
 			}},
+			ScopeSpans: []*tracepb.ScopeSpans{{
+				Spans: []*tracepb.Span{{Name: "GET /checkout"}},
+			}},
 		}},
 	}
 	data, err := proto.Marshal(in)
@@ -27,9 +30,12 @@ func TestStampPayloadProtobufRoundTrip(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	out, err := stampPayload(SignalTraces, data, false, "real-tenant", "premium")
+	out, count, err := stampPayload(SignalTraces, data, false, "real-tenant", "premium")
 	if err != nil {
 		t.Fatalf("stampPayload: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 span counted, got %d", count)
 	}
 
 	got := &coltracepb.ExportTraceServiceRequest{}

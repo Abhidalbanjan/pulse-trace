@@ -18,6 +18,7 @@ import (
 	"github.com/pulsetrace/gateway-service/internal/otlp"
 	"github.com/pulsetrace/gateway-service/internal/pii"
 	"github.com/pulsetrace/gateway-service/internal/proxy"
+	"github.com/pulsetrace/shared/metering"
 	gatewaymigrations "github.com/pulsetrace/gateway-service/migrations"
 	"github.com/pulsetrace/shared/middleware"
 	"github.com/pulsetrace/shared/migrate"
@@ -84,6 +85,9 @@ func main() {
 	ingestionKeys := auth.NewIngestionKeyStore(authHandler.GetDB())
 	// Tenants as first-class entities + the self-serve signup funnel.
 	tenantStore := auth.NewTenantStore(authHandler.GetDB())
+	// Usage metering: Redis counters on the hot path, flushed to usage_daily.
+	usageMeter := metering.New(getEnv("REDIS_ADDR", "redis:6379"), authHandler.GetDB())
+	usageMeter.StartFlusher(ctx, 30*time.Second)
 	analyticsHandler := handler.NewAnalyticsHandler(clickhouseURL)
 	serviceHandler := handler.NewServiceHandler(clickhouseURL)
 	metricsHandler := handler.NewMetricsHandler(clickhouseURL)
@@ -104,7 +108,7 @@ func main() {
 	rateLimitRuleHandler := handler.NewRateLimitRuleHandler(authHandler.GetDB(), rateLimiter)
 	alertRuleHandler := handler.NewAlertRuleHandler(authHandler.GetDB())
 	rateLimitRuleHandler.StartPolling(ctx, 5*time.Second)
-	rumHandler := handler.NewRUMHandler(clickhouseURL)
+	rumHandler := handler.NewRUMHandler(clickhouseURL, usageMeter)
 	syntheticsHandler := handler.NewSyntheticsHandler(clickhouseURL, authHandler.GetDB())
 	syntheticsHandler.StartWorker()
 
@@ -162,6 +166,9 @@ func main() {
 		mux.HandleFunc("POST /api/v1/auth/signup", tenantStore.Signup)
 		// The caller's own tenant (plan/status) — authenticated.
 		mux.HandleFunc("GET /api/v1/tenant", tenantStore.GetCurrentTenant)
+		// Metered usage for the current billing period.
+		usageHandler := handler.NewUsageHandler(authHandler.GetDB())
+		mux.HandleFunc("GET /api/v1/usage", usageHandler.GetUsage)
 		mux.HandleFunc("GET /api/v1/auth/sso/login", authHandler.SSOLogin)
 		mux.HandleFunc("GET /api/v1/auth/sso/config", authHandler.GetSSOConfig)
 		mux.HandleFunc("GET /api/v1/auth/sso/callback", authHandler.SSOCallback)
@@ -259,7 +266,7 @@ func main() {
 	// OTLP/HTTP ingestion, terminated in-process so each payload is tenant-stamped
 	// (tenant resolved onto X-Tenant-ID by AuthMiddleware) before forwarding to the
 	// collector — the HTTP counterpart of the in-process gRPC receiver below.
-	otlpHTTP := otlp.NewHTTPHandler(otelCollectorHTTPURL)
+	otlpHTTP := otlp.NewHTTPHandler(otelCollectorHTTPURL, usageMeter.Record)
 	mux.HandleFunc("POST /v1/traces", otlpHTTP.Handler(otlp.SignalTraces))
 	mux.HandleFunc("POST /v1/metrics", otlpHTTP.Handler(otlp.SignalMetrics))
 	mux.HandleFunc("POST /v1/logs", otlpHTTP.Handler(otlp.SignalLogs))
@@ -291,7 +298,7 @@ func main() {
 	// resolved tenant (tenant.id resource attribute) before being forwarded to the
 	// collector — which is what gives otel_traces/otel_metrics a tenant dimension.
 	otelCollectorGRPCAddr := getEnv("OTEL_COLLECTOR_GRPC_ADDR", "localhost:4317")
-	otlpReceiver, err := otlp.NewReceiver(ingestionKeys, auth.RequireIngestionKey(), otelCollectorGRPCAddr)
+	otlpReceiver, err := otlp.NewReceiver(ingestionKeys, auth.RequireIngestionKey(), otelCollectorGRPCAddr, usageMeter.Record)
 	if err != nil {
 		log.Fatalf("gateway-service: failed to create OTLP receiver: %v", err)
 	}

@@ -22,6 +22,7 @@ import (
 
 	"github.com/pulsetrace/shared/jsonpool"
 	"github.com/pulsetrace/shared/kafka"
+	"github.com/pulsetrace/shared/metering"
 	"github.com/pulsetrace/shared/models"
 )
 
@@ -47,10 +48,11 @@ type LogHandler struct {
 	// shouldn't need to know Quickwit exists, not the ingestion path.
 	quickwitURL string
 	httpClient  *http.Client
+	meter       *metering.Meter
 }
 
 // NewLogHandler creates a handler with high-performance buffered queue and worker pool.
-func NewLogHandler(producer *kafka.Producer, quickwitURL string) *LogHandler {
+func NewLogHandler(producer *kafka.Producer, quickwitURL string, meter *metering.Meter) *LogHandler {
 	h := &LogHandler{
 		producer:      producer,
 		logQueue:      make(chan *models.LogEntry, 100000), // 100k buffered elements shock absorber
@@ -59,6 +61,7 @@ func NewLogHandler(producer *kafka.Producer, quickwitURL string) *LogHandler {
 		closeChan:     make(chan struct{}),
 		quickwitURL:   quickwitURL,
 		httpClient:    &http.Client{Timeout: 10 * time.Second},
+		meter:         meter,
 	}
 
 	// Spin up 8 concurrent high-throughput ingestion workers
@@ -219,6 +222,10 @@ func (h *LogHandler) IngestLog(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Meter accepted log records against the tenant's usage (shared Redis counters;
+	// the gateway's flusher mirrors them into usage_daily).
+	h.meter.Record(r.Context(), tenantID, metering.SignalLogs, int64(len(enqueued)))
 
 	if len(enqueued) == 1 {
 		span.SetAttributes(attribute.String("log.id", enqueued[0].ID))

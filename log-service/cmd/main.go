@@ -13,6 +13,7 @@ import (
 
 	"github.com/pulsetrace/log-service/internal/handler"
 	"github.com/pulsetrace/shared/kafka"
+	"github.com/pulsetrace/shared/metering"
 	"github.com/pulsetrace/shared/middleware"
 	"github.com/pulsetrace/shared/telemetry"
 	"github.com/grafana/pyroscope-go"
@@ -70,7 +71,14 @@ func main() {
 	if quickwitURL == "" {
 		quickwitURL = "http://quickwit:7280"
 	}
-	logHandler := handler.NewLogHandler(producer, quickwitURL)
+	// Usage metering: increment the same shared-Redis counters the gateway flushes
+	// to usage_daily. No DB here — log-service only records, the gateway flushes.
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "redis:6379"
+	}
+	usageMeter := metering.New(redisAddr, nil)
+	logHandler := handler.NewLogHandler(producer, quickwitURL, usageMeter)
 
 	mux := http.NewServeMux()
 	logHandler.RegisterRoutes(mux)

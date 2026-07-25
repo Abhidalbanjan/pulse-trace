@@ -8,10 +8,13 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/pulsetrace/shared/metering"
 )
 
 type RUMHandler struct {
 	ClickHouseURL string
+	meter         *metering.Meter
 }
 
 type RUMEvent struct {
@@ -27,8 +30,8 @@ type RUMEvent struct {
 	SpanID      string  `json:"span_id,omitempty"`
 }
 
-func NewRUMHandler(clickhouseURL string) *RUMHandler {
-	handler := &RUMHandler{ClickHouseURL: clickhouseURL}
+func NewRUMHandler(clickhouseURL string, meter *metering.Meter) *RUMHandler {
+	handler := &RUMHandler{ClickHouseURL: clickhouseURL, meter: meter}
 	handler.initTable()
 	return handler
 }
@@ -157,6 +160,9 @@ func (h *RUMHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
+
+	// Meter the accepted RUM events against the tenant's usage.
+	h.meter.Record(r.Context(), tenantID, metering.SignalRUM, int64(len(events)))
 
 	w.Header().Set("Content-Type", "application/json")
 	io.WriteString(w, `{"status": "ok"}`)

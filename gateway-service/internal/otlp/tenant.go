@@ -53,12 +53,24 @@ type TenantResolver interface {
 	Resolve(ctx context.Context, plaintext string) (tenantID, tier, scope string, ok bool)
 }
 
+// RecordFunc meters `count` events of a signal ("traces"/"metrics"/"logs") for a
+// tenant. Injected so this package doesn't import the metering package. nil = off.
+type RecordFunc func(ctx context.Context, tenantID, signal string, count int64)
+
 // tenantStamper holds the shared auth+stamp logic used by all three OTLP service
 // servers (trace/metrics/logs each need their own type because the OTLP proto
 // gives all three an identically-named Export method).
 type tenantStamper struct {
 	resolver   TenantResolver
 	requireKey bool
+	record     RecordFunc
+}
+
+// meter records count events for the tenant if metering is wired.
+func (s *tenantStamper) meter(ctx context.Context, tenantID, signal string, count int64) {
+	if s.record != nil && count > 0 {
+		s.record(ctx, tenantID, signal, count)
+	}
 }
 
 // authTenant resolves the tenant for an incoming export from its ingestion key
@@ -157,6 +169,7 @@ func (t *traceServer) Export(ctx context.Context, req *coltracepb.ExportTraceSer
 	for _, rs := range req.GetResourceSpans() {
 		rs.Resource = stampResource(rs.GetResource(), tenantID, tier)
 	}
+	t.stamper.meter(ctx, tenantID, "traces", countTraceSpans(req))
 	return t.up.Export(forwardContext(ctx), req)
 }
 
@@ -174,6 +187,7 @@ func (m *metricsServer) Export(ctx context.Context, req *colmetricspb.ExportMetr
 	for _, rm := range req.GetResourceMetrics() {
 		rm.Resource = stampResource(rm.GetResource(), tenantID, tier)
 	}
+	m.stamper.meter(ctx, tenantID, "metrics", countMetricPoints(req))
 	return m.up.Export(forwardContext(ctx), req)
 }
 
@@ -191,5 +205,46 @@ func (l *logsServer) Export(ctx context.Context, req *collogspb.ExportLogsServic
 	for _, rl := range req.GetResourceLogs() {
 		rl.Resource = stampResource(rl.GetResource(), tenantID, tier)
 	}
+	l.stamper.meter(ctx, tenantID, "logs", countLogRecords(req))
 	return l.up.Export(forwardContext(ctx), req)
+}
+
+// ── Volume counting for metering ──────────────────────────────────────────────
+
+func countTraceSpans(req *coltracepb.ExportTraceServiceRequest) int64 {
+	var n int64
+	for _, rs := range req.GetResourceSpans() {
+		for _, ss := range rs.GetScopeSpans() {
+			n += int64(len(ss.GetSpans()))
+		}
+	}
+	return n
+}
+
+func countLogRecords(req *collogspb.ExportLogsServiceRequest) int64 {
+	var n int64
+	for _, rl := range req.GetResourceLogs() {
+		for _, sl := range rl.GetScopeLogs() {
+			n += int64(len(sl.GetLogRecords()))
+		}
+	}
+	return n
+}
+
+// countMetricPoints counts individual datapoints across all metric instrument
+// types — the billable unit for metrics, not the number of metric names.
+func countMetricPoints(req *colmetricspb.ExportMetricsServiceRequest) int64 {
+	var n int64
+	for _, rm := range req.GetResourceMetrics() {
+		for _, sm := range rm.GetScopeMetrics() {
+			for _, metric := range sm.GetMetrics() {
+				n += int64(len(metric.GetGauge().GetDataPoints()))
+				n += int64(len(metric.GetSum().GetDataPoints()))
+				n += int64(len(metric.GetHistogram().GetDataPoints()))
+				n += int64(len(metric.GetExponentialHistogram().GetDataPoints()))
+				n += int64(len(metric.GetSummary().GetDataPoints()))
+			}
+		}
+	}
+	return n
 }

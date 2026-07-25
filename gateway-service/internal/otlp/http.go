@@ -46,12 +46,25 @@ func (s Signal) path() string {
 type HTTPHandler struct {
 	upstreamBase string // e.g. http://otel-collector:4318
 	client       *http.Client
+	record       RecordFunc
 }
 
-func NewHTTPHandler(upstreamBase string) *HTTPHandler {
+func NewHTTPHandler(upstreamBase string, record RecordFunc) *HTTPHandler {
 	return &HTTPHandler{
 		upstreamBase: strings.TrimRight(upstreamBase, "/"),
 		client:       &http.Client{Timeout: 30 * time.Second},
+		record:       record,
+	}
+}
+
+func (s Signal) meteringName() string {
+	switch s {
+	case SignalMetrics:
+		return "metrics"
+	case SignalLogs:
+		return "logs"
+	default:
+		return "traces"
 	}
 }
 
@@ -74,11 +87,14 @@ func (h *HTTPHandler) Handler(signal Signal) http.HandlerFunc {
 		}
 
 		isJSON := strings.Contains(r.Header.Get("Content-Type"), "json")
-		stamped, err := stampPayload(signal, raw, isJSON, tenantID, tier)
+		stamped, count, err := stampPayload(signal, raw, isJSON, tenantID, tier)
 		if err != nil {
 			// A malformed OTLP body is the client's error, not ours; don't forward.
 			http.Error(w, "invalid OTLP payload: "+err.Error(), http.StatusBadRequest)
 			return
+		}
+		if h.record != nil && count > 0 {
+			h.record(r.Context(), tenantID, signal.meteringName(), count)
 		}
 
 		contentType := "application/x-protobuf"
@@ -130,36 +146,40 @@ func readBody(r *http.Request) ([]byte, error) {
 }
 
 // stampPayload decodes an OTLP export request, stamps the tenant onto every
-// resource, and re-encodes it in the same wire format (protobuf or JSON).
-func stampPayload(signal Signal, data []byte, isJSON bool, tenantID, tier string) ([]byte, error) {
+// resource, re-encodes it in the same wire format (protobuf or JSON), and returns
+// the number of billable records (spans/datapoints/log-records) it carried.
+func stampPayload(signal Signal, data []byte, isJSON bool, tenantID, tier string) ([]byte, int64, error) {
 	switch signal {
 	case SignalMetrics:
 		req := &colmetricspb.ExportMetricsServiceRequest{}
 		if err := decode(data, isJSON, req); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		for _, rm := range req.GetResourceMetrics() {
 			rm.Resource = stampResource(rm.GetResource(), tenantID, tier)
 		}
-		return encode(req, isJSON)
+		out, err := encode(req, isJSON)
+		return out, countMetricPoints(req), err
 	case SignalLogs:
 		req := &collogspb.ExportLogsServiceRequest{}
 		if err := decode(data, isJSON, req); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		for _, rl := range req.GetResourceLogs() {
 			rl.Resource = stampResource(rl.GetResource(), tenantID, tier)
 		}
-		return encode(req, isJSON)
+		out, err := encode(req, isJSON)
+		return out, countLogRecords(req), err
 	default:
 		req := &coltracepb.ExportTraceServiceRequest{}
 		if err := decode(data, isJSON, req); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		for _, rs := range req.GetResourceSpans() {
 			rs.Resource = stampResource(rs.GetResource(), tenantID, tier)
 		}
-		return encode(req, isJSON)
+		out, err := encode(req, isJSON)
+		return out, countTraceSpans(req), err
 	}
 }
 

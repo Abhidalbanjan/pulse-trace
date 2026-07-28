@@ -1,0 +1,69 @@
+# PodDisruptionBudgets keep a minimum number of replicas serving during
+# *voluntary* disruptions — node drains for upgrades, autoscaler scale-in,
+# `kubectl drain`. Without one, a cluster upgrade can evict every replica of a
+# service at once and take it fully offline mid-rollout.
+#
+# These cover only the horizontally-scaled, stateless services (gateway, log,
+# alert, notification — each runs >= 2 replicas). minAvailable: 1 lets the
+# cluster drain one node at a time while always leaving a replica up. It does NOT
+# cover correlation/topology/action: those run a single replica on purpose
+# (correlation-service hosts the anomaly detector and automation router as
+# background singletons that must not be double-scheduled), so a minAvailable
+# PDB there would just block node drains outright. Making those HA needs leader
+# election, not a PDB — tracked separately.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway-pdb
+  namespace: pulsetrace
+  labels:
+    app: gateway
+    app.kubernetes.io/part-of: pulsetrace
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: gateway
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: log-service-pdb
+  namespace: pulsetrace
+  labels:
+    app: log-service
+    app.kubernetes.io/part-of: pulsetrace
+spec:
+  # The ingestion hot path — keep a replica accepting telemetry through any drain.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: log-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: alert-service-pdb
+  namespace: pulsetrace
+  labels:
+    app: alert-service
+    app.kubernetes.io/part-of: pulsetrace
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: alert-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: notification-service-pdb
+  namespace: pulsetrace
+  labels:
+    app: notification-service
+    app.kubernetes.io/part-of: pulsetrace
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: notification-service

@@ -34,6 +34,18 @@ Deployment already references, so no other manifest changes. It works for both
 GTM models: point the `SecretStore` at your cloud secret manager (SaaS) or at the
 customer's in-cluster Vault (enterprise on-prem).
 
+## Availability & autoscaling
+
+- **HorizontalPodAutoscalers**: `gateway` (2→8 on CPU) and `log-service` (2→10 on
+  CPU+memory) — the two ingestion-path services — scale with load. Requires
+  `metrics-server` in the cluster.
+- **PodDisruptionBudgets** (`poddisruptionbudgets.yaml`): `minAvailable: 1` for
+  the multi-replica stateless services (gateway, log, alert, notification), so a
+  node drain / cluster upgrade can never evict every replica of a service at
+  once. `correlation`, `topology`, and `action` run a single replica by design
+  (they host background singletons that must not be double-scheduled), so they
+  intentionally have no PDB — making them HA needs leader election, not a PDB.
+
 ## Key security-relevant settings
 
 | Key | Why it matters |

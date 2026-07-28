@@ -176,4 +176,49 @@ func TestEvaluateABAC(t *testing.T) {
 			t.Errorf("got allow=%v deniedBy=%q, want the broken policy skipped and fallback-allow to match", allow, deniedBy)
 		}
 	})
+
+	// Migration 015's self-service carve-out: a higher-priority allow on the
+	// saved-searches resource must beat the two seeded global deny policies, but
+	// only for that resource. This models the exact seeded policy set.
+	t.Run("saved-search self-service carve-out overrides global denies for that resource only", func(t *testing.T) {
+		seeded := []Policy{
+			{Name: "saved-searches-self-service", Effect: "allow", Resource: "saved-searches", Condition: "true", Enabled: true, Priority: 5},
+			{Name: "no-non-admin-deletes", Effect: "deny", Resource: "*", Condition: `action == "delete" && subject.role != "admin"`, Enabled: true, Priority: 10},
+			{Name: "viewer-strictly-read-only", Effect: "deny", Resource: "*", Condition: `subject.role == "viewer" && action != "read"`, Enabled: true, Priority: 20},
+		}
+		e := newTestEngine(nil, seeded)
+
+		// A viewer creating and deleting their own saved search is allowed.
+		if allow, deniedBy := e.EvaluateABAC("saved-searches", "create", map[string]interface{}{"role": "viewer"}); !allow {
+			t.Errorf("viewer create saved-search should be allowed, denied by %q", deniedBy)
+		}
+		if allow, deniedBy := e.EvaluateABAC("saved-searches", "delete", map[string]interface{}{"role": "viewer"}); !allow {
+			t.Errorf("viewer delete saved-search should be allowed, denied by %q", deniedBy)
+		}
+		// An editor deleting their own saved search is allowed (the global
+		// no-non-admin-deletes would otherwise block it).
+		if allow, deniedBy := e.EvaluateABAC("saved-searches", "delete", map[string]interface{}{"role": "editor"}); !allow {
+			t.Errorf("editor delete saved-search should be allowed, denied by %q", deniedBy)
+		}
+		// The carve-out must NOT leak: a viewer still can't delete an incident.
+		if allow, _ := e.EvaluateABAC("incidents", "delete", map[string]interface{}{"role": "viewer"}); allow {
+			t.Error("viewer deleting an incident must still be denied by the global policies")
+		}
+	})
+}
+
+// TestHasPermission_SavedSearchesViewer verifies the RBAC half of migration 015:
+// the viewer role, once granted saved-searches:write, passes the coarse write
+// check for that resource but not for others.
+func TestHasPermission_SavedSearchesViewer(t *testing.T) {
+	e := newTestEngine(map[string]Role{
+		"viewer": {Name: "viewer", Permissions: []string{"read", "saved-searches:read", "saved-searches:write"}},
+	}, nil)
+
+	if !e.HasPermission("viewer", "saved-searches", "write") {
+		t.Error("viewer should have saved-searches:write after the carve-out")
+	}
+	if e.HasPermission("viewer", "incidents", "write") {
+		t.Error("viewer must not gain write on other resources from the carve-out")
+	}
 }

@@ -21,12 +21,45 @@ interface Bucket {
   doc_count: number;
 }
 
+type TimeRange = "15m" | "1h" | "24h" | "7d" | "all";
+
+const TIME_RANGES: { key: TimeRange; label: string; ms: number }[] = [
+  { key: "15m", label: "15m", ms: 15 * 60_000 },
+  { key: "1h", label: "1h", ms: 60 * 60_000 },
+  { key: "24h", label: "24h", ms: 24 * 60 * 60_000 },
+  { key: "7d", label: "7d", ms: 7 * 24 * 60 * 60_000 },
+  { key: "all", label: "All", ms: 0 },
+];
+
+interface SavedSearch {
+  id: string;
+  name: string;
+  shared: boolean;
+  mine: boolean;
+  query_params: { query?: string; regex?: string; range?: string };
+}
+
 export function ExplorerView() {
   const { tokens: t } = useTheme();
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("*");
   const [selectedLog, setSelectedLog] = useState<LogEntry | null>(null);
+
+  // Query-depth controls: treat the search box as a regex on the message, and
+  // scope to a relative time window. These build extra Quickwit clauses at
+  // fetch time (see buildEffectiveQuery) rather than mutating the box text, so
+  // the user's typed query stays intact as they toggle them.
+  const [regexMode, setRegexMode] = useState(false);
+  const [timeRange, setTimeRange] = useState<TimeRange>("all");
+
+  // Saved searches (per-user, from the gateway). savedError surfaces a failed
+  // save/list so the control never silently no-ops.
+  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [savedOpen, setSavedOpen] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [saveShared, setSaveShared] = useState(false);
+  const [savedError, setSavedError] = useState<string | null>(null);
 
   // Aggregation State
   const [serviceBuckets, setServiceBuckets] = useState<Bucket[]>([]);
@@ -37,11 +70,38 @@ export function ExplorerView() {
   const [isLiveTail, setIsLiveTail] = useState(false);
   const liveTailRef = useRef<NodeJS.Timeout | null>(null);
 
+  // timeClause turns the selected relative window into a Quickwit datetime
+  // range on the timestamp field ("all" means no bound).
+  const timeClause = (range: TimeRange): string => {
+    const r = TIME_RANGES.find((x) => x.key === range);
+    if (!r || r.ms === 0) return "";
+    const start = new Date(Date.now() - r.ms).toISOString();
+    return `timestamp:[${start} TO *]`;
+  };
+
+  // buildEffectiveQuery combines the search box, the regex toggle, and the time
+  // window into the actual query sent to Quickwit — without mutating the box so
+  // toggles stay reversible.
+  const buildEffectiveQuery = (): string => {
+    const clauses: string[] = [];
+    const raw = query.trim();
+    if (regexMode) {
+      // Treat the box as a regex over the message field. Escape '/' so it can't
+      // terminate the literal early (mirrors the server-side log search).
+      if (raw && raw !== "*") clauses.push(`message:/${raw.replace(/\//g, "\\/")}/`);
+    } else if (raw && raw !== "*") {
+      clauses.push(raw);
+    }
+    const tc = timeClause(timeRange);
+    if (tc) clauses.push(tc);
+    return clauses.length ? clauses.join(" AND ") : "*";
+  };
+
   const fetchLogs = () => {
     setLoading(true);
     // Add aggregations to the Quickwit query
     const requestBody = {
-      query: query,
+      query: buildEffectiveQuery(),
       max_hits: 100,
       sort_by_field: "-timestamp",
       aggs: {
@@ -97,7 +157,64 @@ export function ExplorerView() {
 
   useEffect(() => {
     fetchLogs();
-  }, [query]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, regexMode, timeRange]);
+
+  // Load this user's saved searches once on mount.
+  useEffect(() => {
+    loadSavedSearches();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadSavedSearches = () => {
+    fetchWithAuth('/api/v1/saved-searches')
+      .then((res) => (res.ok ? res.json() : Promise.reject(res.status)))
+      .then((data) => setSavedSearches(data?.data || []))
+      .catch((err) => console.error('Failed to load saved searches:', err));
+  };
+
+  const applySavedSearch = (s: SavedSearch) => {
+    const p = s.query_params || {};
+    setQuery(p.query || '*');
+    setRegexMode(p.regex === 'true');
+    setTimeRange((p.range as TimeRange) || 'all');
+    setSavedOpen(false);
+  };
+
+  const saveCurrentSearch = () => {
+    const name = saveName.trim();
+    if (!name) return;
+    setSavedError(null);
+    fetchWithAuth('/api/v1/saved-searches', {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        kind: 'logs',
+        shared: saveShared,
+        query_params: { query, regex: String(regexMode), range: timeRange },
+      }),
+    })
+      .then(async (res) => {
+        if (res.status === 201) {
+          setSaveName('');
+          setSaveShared(false);
+          loadSavedSearches();
+          return;
+        }
+        if (res.status === 409) throw new Error('A saved search with that name already exists.');
+        if (res.status === 403) throw new Error('You do not have permission to save searches.');
+        throw new Error(`Save failed (${res.status})`);
+      })
+      .catch((err) => setSavedError(err.message || 'Save failed'));
+  };
+
+  const deleteSavedSearch = (id: string) => {
+    fetchWithAuth(`/api/v1/saved-searches/${id}`, { method: 'DELETE' })
+      .then((res) => {
+        if (res.ok) loadSavedSearches();
+      })
+      .catch((err) => console.error('Failed to delete saved search:', err));
+  };
 
   useEffect(() => {
     if (isLiveTail) {
@@ -110,7 +227,8 @@ export function ExplorerView() {
     return () => {
       if (liveTailRef.current) clearInterval(liveTailRef.current);
     };
-  }, [isLiveTail, query]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLiveTail, query, regexMode, timeRange]);
 
   const toggleLiveTail = () => setIsLiveTail(!isLiveTail);
 
@@ -216,12 +334,127 @@ export function ExplorerView() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search logs... (e.g. level:ERROR)"
-              style={{ flex: 1, background: 'transparent', border: 'none', color: t.text1, outline: 'none', fontSize: '13.5px' }}
+              placeholder={regexMode ? 'Regex on message... (e.g. timeout|refused)' : 'Search logs... (e.g. level:ERROR)'}
+              style={{ flex: 1, background: 'transparent', border: 'none', color: t.text1, outline: 'none', fontSize: '13.5px', fontFamily: regexMode ? 'monospace' : 'inherit' }}
               onKeyDown={(e) => e.key === 'Enter' && fetchLogs()}
             />
+            {/* Regex toggle — treats the box as a /pattern/ over the message. */}
+            <button
+              onClick={() => setRegexMode((v) => !v)}
+              title="Toggle regex search on the message field"
+              style={{
+                fontFamily: 'monospace',
+                fontSize: '13px',
+                fontWeight: 700,
+                padding: '2px 8px',
+                borderRadius: '7px',
+                cursor: 'pointer',
+                border: `1px solid ${regexMode ? t.accent : t.panelBorder}`,
+                background: regexMode ? t.accent : 'transparent',
+                color: regexMode ? '#fff' : t.text2,
+              }}
+            >
+              .*
+            </button>
             {loading && <span style={{ fontSize: '12px', color: t.text2 }}>Searching...</span>}
           </div>
+
+          {/* Time range selector */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '2px', background: t.panelBg, border: `1px solid ${t.panelBorder}`, borderRadius: '14px', padding: '4px', backdropFilter: 'blur(20px) saturate(180%)', WebkitBackdropFilter: 'blur(20px) saturate(180%)' }}>
+            {TIME_RANGES.map((r) => (
+              <button
+                key={r.key}
+                onClick={() => setTimeRange(r.key)}
+                style={{
+                  padding: '7px 11px',
+                  borderRadius: '10px',
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontSize: '12.5px',
+                  fontWeight: 600,
+                  background: timeRange === r.key ? t.accent : 'transparent',
+                  color: timeRange === r.key ? '#fff' : t.text2,
+                }}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Saved searches */}
+          <div style={{ position: 'relative' }}>
+            <button
+              onClick={() => setSavedOpen((v) => !v)}
+              title="Saved searches"
+              style={{
+                display: 'flex', alignItems: 'center', gap: '8px', height: '100%',
+                padding: '11px 16px', borderRadius: '14px',
+                border: `1px solid ${savedOpen ? t.accent : t.panelBorder}`,
+                background: 'transparent', color: t.text2, fontSize: '13px', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+              }}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>bookmark</span>
+              Saved
+            </button>
+            {savedOpen && (
+              <div style={{ ...glassPanel, position: 'absolute', top: 'calc(100% + 8px)', right: 0, width: '320px', zIndex: 20, borderRadius: '16px', padding: '14px', maxHeight: '420px', overflowY: 'auto' }}>
+                {/* Save current */}
+                <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.05em', color: t.text2, marginBottom: '8px' }}>SAVE CURRENT SEARCH</div>
+                <div style={{ display: 'flex', gap: '6px', marginBottom: '6px' }}>
+                  <input
+                    type="text"
+                    value={saveName}
+                    onChange={(e) => setSaveName(e.target.value)}
+                    placeholder="Name this search"
+                    style={{ flex: 1, background: t.dark ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.05)', border: `1px solid ${t.panelBorder}`, borderRadius: '9px', padding: '8px 10px', color: t.text1, outline: 'none', fontSize: '13px' }}
+                    onKeyDown={(e) => e.key === 'Enter' && saveCurrentSearch()}
+                  />
+                  <button
+                    onClick={saveCurrentSearch}
+                    style={{ padding: '8px 14px', borderRadius: '9px', border: 'none', background: t.accent, color: '#fff', fontSize: '13px', fontWeight: 600, cursor: 'pointer' }}
+                  >
+                    Save
+                  </button>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '7px', fontSize: '12.5px', color: t.text2, marginBottom: savedError ? '6px' : '14px', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={saveShared} onChange={(e) => setSaveShared(e.target.checked)} />
+                  Share with my team
+                </label>
+                {savedError && <div style={{ fontSize: '12px', color: t.red, marginBottom: '12px' }}>{savedError}</div>}
+
+                <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.05em', color: t.text2, margin: '4px 0 8px' }}>MY SEARCHES</div>
+                {savedSearches.length === 0 ? (
+                  <div style={{ fontSize: '13px', color: t.text2, padding: '6px 0' }}>No saved searches yet.</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                    {savedSearches.map((s) => (
+                      <div
+                        key={s.id}
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 9px', borderRadius: '9px', cursor: 'pointer' }}
+                        onMouseEnter={(e) => (e.currentTarget.style.background = t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)')}
+                        onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                      >
+                        <span onClick={() => applySavedSearch(s)} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '8px', color: t.text1, fontSize: '13px', overflow: 'hidden' }}>
+                          <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</span>
+                          {s.shared && <span style={badgeStyle}>{s.mine ? 'shared' : 'team'}</span>}
+                        </span>
+                        {s.mine && (
+                          <button
+                            onClick={() => deleteSavedSearch(s.id)}
+                            title="Delete"
+                            style={{ background: 'transparent', border: 'none', color: t.text2, cursor: 'pointer', fontSize: '15px', lineHeight: 1, padding: '0 2px' }}
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           <button
             onClick={toggleLiveTail}
             style={{

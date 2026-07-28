@@ -170,6 +170,49 @@ jobs:
         if: always()
         run: docker compose down -v
 
+  load-test:
+    name: load test (k6 ingestion)
+    runs-on: ubuntu-latest
+    # Drives the telemetry ingestion hot path (gateway → log-service → Kafka →
+    # ClickHouse) at a sustained arrival rate and fails the build if p95/p99
+    # latency or error rate regress past the thresholds baked into the k6 script.
+    # This is the check for the thing most likely to fall over first under real
+    # customer traffic, which neither unit tests nor the e2e flow exercise.
+    env:
+      JWT_SECRET: ci-load-fixed-secret-not-for-production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start backend stack (docker compose)
+        run: docker compose up -d --build
+
+      - name: Wait for the gateway to be healthy
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/healthz >/dev/null 2>&1; then
+              echo "gateway healthy after ${i}s"; exit 0
+            fi
+            sleep 2
+          done
+          echo "gateway did not become healthy in time"; exit 1
+
+      - name: Run k6 ingestion load test
+        # Reuse the k6 Docker image (docker is already present for compose) with
+        # host networking so it reaches the compose-published gateway on :8080.
+        run: |
+          docker run --rm --network host \
+            -e RATE=80 -e DURATION=30s \
+            -v "$PWD/scripts/load:/scripts:ro" \
+            grafana/k6 run /scripts/ingest-load.js
+
+      - name: Dump backend logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 400
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
   docker-build:
     name: docker build / ${{ matrix.service }}
     runs-on: ubuntu-latest

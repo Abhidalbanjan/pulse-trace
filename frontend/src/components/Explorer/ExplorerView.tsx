@@ -167,7 +167,7 @@ export function ExplorerView() {
   }, []);
 
   const loadSavedSearches = () => {
-    fetchWithAuth('/api/v1/saved-searches')
+    fetchWithAuth('/api/v1/saved-searches?kind=logs')
       .then((res) => (res.ok ? res.json() : Promise.reject(res.status)))
       .then((data) => setSavedSearches(data?.data || []))
       .catch((err) => console.error('Failed to load saved searches:', err));

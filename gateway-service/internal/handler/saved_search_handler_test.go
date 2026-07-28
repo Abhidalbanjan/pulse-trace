@@ -208,6 +208,38 @@ func TestSavedSearch_DuplicateNameConflicts(t *testing.T) {
 	}
 }
 
+func TestSavedSearch_KindFilter(t *testing.T) {
+	h, _ := newSavedSearchTestDB(t)
+
+	for _, s := range []map[string]any{
+		{"name": "log view", "kind": "logs"},
+		{"name": "trace view", "kind": "traces"},
+	} {
+		rr := httptest.NewRecorder()
+		h.Create(rr, ssReq(http.MethodPost, "/api/v1/saved-searches", "acme", "alice", s))
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("create %v status = %d", s["name"], rr.Code)
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	h.List(rr, ssReq(http.MethodGet, "/api/v1/saved-searches?kind=traces", "acme", "alice", nil))
+	var resp struct {
+		Data []savedSearchRow `json:"data"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if len(resp.Data) != 1 || resp.Data[0].Name != "trace view" {
+		t.Fatalf("kind=traces should return only the trace view, got %+v", resp.Data)
+	}
+
+	// An unknown kind is a 400, not a silent empty result.
+	rr = httptest.NewRecorder()
+	h.List(rr, ssReq(http.MethodGet, "/api/v1/saved-searches?kind=metrics", "acme", "alice", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown kind filter should 400, got %d", rr.Code)
+	}
+}
+
 func TestSavedSearch_InvalidKindRejected(t *testing.T) {
 	h, _ := newSavedSearchTestDB(t)
 	rr := httptest.NewRecorder()

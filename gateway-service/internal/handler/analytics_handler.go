@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"regexp"
 )
 
 type AnalyticsHandler struct {
@@ -23,18 +25,10 @@ func (h *AnalyticsHandler) GetTraceAnalytics(w http.ResponseWriter, r *http.Requ
 
 	_, sqlInterval, bucketExpr := resolveInterval(r.URL.Query().Get("interval"))
 
-	services := r.URL.Query()["service"]
-	routes := r.URL.Query()["route"]
-
-	where := fmt.Sprintf("%s AND ParentSpanId = '' AND Timestamp >= now() - INTERVAL %s", tenantClause, sqlInterval)
-	params := map[string]string{"tenant": tenantFromRequest(r)}
-	if len(services) > 0 {
-		where += " AND ServiceName IN {services:Array(String)}"
-		params["services"] = arrayParam(services)
-	}
-	if len(routes) > 0 {
-		where += " AND SpanAttributes['http.route'] IN {routes:Array(String)}"
-		params["routes"] = arrayParam(routes)
+	where, params, err := buildTraceAnalyticsWhere(r.URL.Query(), tenantFromRequest(r), sqlInterval)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	query := fmt.Sprintf(`
@@ -73,6 +67,45 @@ func (h *AnalyticsHandler) GetTraceAnalytics(w http.ResponseWriter, r *http.Requ
 	}
 
 	io.Copy(w, resp.Body)
+}
+
+// buildTraceAnalyticsWhere assembles the ClickHouse WHERE clause and bind
+// params for the trace analytics query from the request's filters, always
+// tenant-scoped and restricted to root spans within the resolved interval.
+//
+// Beyond exact service/route IN-lists it supports regex depth: route_regex and
+// operation_regex match SpanAttributes['http.route'] / SpanName via ClickHouse's
+// RE2 match(). Each pattern is validated with Go's regexp (same RE2 dialect)
+// before it's sent, so a bad pattern returns 400 here rather than a ClickHouse
+// error — and is passed as a bind param, never concatenated into the SQL.
+func buildTraceAnalyticsWhere(q url.Values, tenant, sqlInterval string) (string, map[string]string, error) {
+	where := fmt.Sprintf("%s AND ParentSpanId = '' AND Timestamp >= now() - INTERVAL %s", tenantClause, sqlInterval)
+	params := map[string]string{"tenant": tenant}
+
+	if services := q["service"]; len(services) > 0 {
+		where += " AND ServiceName IN {services:Array(String)}"
+		params["services"] = arrayParam(services)
+	}
+	if routes := q["route"]; len(routes) > 0 {
+		where += " AND SpanAttributes['http.route'] IN {routes:Array(String)}"
+		params["routes"] = arrayParam(routes)
+	}
+	if pattern := q.Get("route_regex"); pattern != "" {
+		if _, err := regexp.Compile(pattern); err != nil {
+			return "", nil, fmt.Errorf("invalid route_regex %q: %v", pattern, err)
+		}
+		where += " AND match(SpanAttributes['http.route'], {route_regex:String})"
+		params["route_regex"] = pattern
+	}
+	if pattern := q.Get("operation_regex"); pattern != "" {
+		if _, err := regexp.Compile(pattern); err != nil {
+			return "", nil, fmt.Errorf("invalid operation_regex %q: %v", pattern, err)
+		}
+		where += " AND match(SpanName, {operation_regex:String})"
+		params["operation_regex"] = pattern
+	}
+
+	return where, params, nil
 }
 
 // GetTraceFacets returns the distinct service names and HTTP routes seen in stored traces,

@@ -47,17 +47,28 @@ func ownerOf(r *http.Request) string {
 }
 
 // List handles GET /api/v1/saved-searches — the caller's own searches plus any
-// searches shared within their tenant.
+// searches shared within their tenant. An optional ?kind=logs|traces narrows the
+// result to one surface, so the log explorer and trace view each see only their
+// own saved searches.
 func (h *SavedSearchHandler) List(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	tenantID := tenantFromRequest(r)
 	owner := ownerOf(r)
 
+	// kind is an optional filter; an empty/absent value matches every kind. It's
+	// validated so an unknown value can't silently return nothing.
+	kindFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
+	if kindFilter != "" && !validSearchKinds[kindFilter] {
+		http.Error(w, "kind must be one of logs, traces", http.StatusBadRequest)
+		return
+	}
+
 	rows, err := h.db.Query(`
 		SELECT id, tenant_id, owner, name, kind, query_params, shared
 		FROM saved_searches
 		WHERE tenant_id = $1 AND (owner = $2 OR shared = true)
-		ORDER BY name ASC`, tenantID, owner)
+		  AND ($3 = '' OR kind = $3)
+		ORDER BY name ASC`, tenantID, owner, kindFilter)
 	if err != nil {
 		log.Printf("saved_searches: failed to list: %v", err)
 		http.Error(w, "failed to list saved searches", http.StatusInternalServerError)

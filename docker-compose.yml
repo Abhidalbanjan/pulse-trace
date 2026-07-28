@@ -405,6 +405,11 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-alerts@pulsetrace.local}
       SMTP_TO: ${SMTP_TO:-}
+      PAGERDUTY_ROUTING_KEY: ${PAGERDUTY_ROUTING_KEY:-}
+      OPSGENIE_API_KEY: ${OPSGENIE_API_KEY:-}
+      OPSGENIE_API_URL: ${OPSGENIE_API_URL:-}
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
     depends_on:
       rabbitmq:
         condition: service_healthy

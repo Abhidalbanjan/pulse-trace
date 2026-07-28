@@ -72,7 +72,7 @@ A production-grade, event-driven observability platform for microservices, built
 | `correlation-service`      | Consume `alerts`, group into incidents, infer root cause, SLO burn rate engine          |
 | `topology-service`         | Auto-discovers service dependencies and maintains ownership Catalog in Neo4j              |
 | `frontend`                 | Next.js React dashboard for Logs, Traces, Profiling, RUM, Catalog, and Synthetics       |
-| `notification-service`     | Consume RabbitMQ, dispatch to Slack / email / log                                       |
+| `notification-service`     | Consume RabbitMQ, dispatch to Slack / email / PagerDuty / Opsgenie / webhook / log                                       |
 | `shared`                   | Models, DB pools (Postgres + ClickHouse), Kafka, RabbitMQ, OTel middleware              |
 | ClickHouse                 | Column-oriented analytical store for high-volume logs (hot SSD tier)                   |
 | MinIO                      | Local S3-compatible emulator for ClickHouse cold tier (dev/test)                       |
@@ -187,8 +187,17 @@ log-service
                 notification-service consumer
                   ├─ logs structured notification (always)
                   ├─ posts to Slack (if SLACK_WEBHOOK_URL set)
-                  └─ sends email (if SMTP_HOST set)
+                  ├─ sends email (if SMTP_HOST set)
+                  ├─ pages PagerDuty (if PAGERDUTY_ROUTING_KEY set)
+                  ├─ opens an Opsgenie alert (if OPSGENIE_API_KEY set)
+                  └─ POSTs a signed webhook (if WEBHOOK_URL set)
 ```
+
+Every channel is independent and opt-in: set its env var to activate it, leave
+it blank to skip it. PagerDuty and Opsgenie deduplicate on the incident ID, so
+repeated notifications for one incident coalesce into a single alert rather than
+paging on-call once per update. The generic webhook signs each request with
+`X-PulseTrace-Signature: sha256=<hmac>` when `WEBHOOK_SECRET` is set.
 
 ### SLO Burn Rate Engine
 
@@ -607,7 +616,7 @@ pulsetrace/
 │   ├── internal/repository/
 │   ├── migrations/
 │   └── Dockerfile
-├── notification-service/      # RabbitMQ consumer → Slack / email / log
+├── notification-service/      # RabbitMQ consumer → Slack / email / PagerDuty / Opsgenie / webhook / log
 │   ├── cmd/main.go
 │   ├── internal/worker/
 │   └── Dockerfile

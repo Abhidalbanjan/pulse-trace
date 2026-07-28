@@ -6,9 +6,12 @@ import "time"
 type NotificationChannel string
 
 const (
-	NotificationChannelSlack NotificationChannel = "slack"
-	NotificationChannelEmail NotificationChannel = "email"
-	NotificationChannelLog   NotificationChannel = "log" // always-on fallback
+	NotificationChannelSlack     NotificationChannel = "slack"
+	NotificationChannelEmail     NotificationChannel = "email"
+	NotificationChannelPagerDuty NotificationChannel = "pagerduty"
+	NotificationChannelOpsgenie  NotificationChannel = "opsgenie"
+	NotificationChannelWebhook   NotificationChannel = "webhook" // generic HMAC-signed HTTP POST
+	NotificationChannelLog       NotificationChannel = "log"      // always-on fallback
 )
 
 // NotificationEvent is the message published to RabbitMQ when an incident

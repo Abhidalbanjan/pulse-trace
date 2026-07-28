@@ -54,6 +54,26 @@ spec:
                 secretKeyRef:
                   name: pulsetrace-secrets
                   key: SMTP_PASSWORD
+            - name: PAGERDUTY_ROUTING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: PAGERDUTY_ROUTING_KEY
+            - name: OPSGENIE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: OPSGENIE_API_KEY
+            - name: WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: WEBHOOK_URL
+            - name: WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pulsetrace-secrets
+                  key: WEBHOOK_SECRET
           resources:
             requests:
               cpu: "50m"

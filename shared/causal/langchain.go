@@ -43,8 +43,7 @@ func NewLangChainAnalyzer(provider, modelName string) (*LangChainAnalyzer, error
 		if modelName != "" {
 			opts = append(opts, openai.WithModel(modelName))
 		}
-		endpoint := os.Getenv("LLM_ENDPOINT")
-		if endpoint != "" {
+		if endpoint := providerEndpoint("OPENAI_BASE_URL"); endpoint != "" {
 			opts = append(opts, openai.WithBaseURL(endpoint))
 		}
 		model, err = openai.New(opts...)
@@ -72,7 +71,7 @@ func NewLangChainAnalyzer(provider, modelName string) (*LangChainAnalyzer, error
 		if modelName != "" {
 			opts = append(opts, ollama.WithModel(modelName))
 		}
-		endpoint := os.Getenv("LLM_ENDPOINT")
+		endpoint := providerEndpoint("OLLAMA_ENDPOINT")
 		if endpoint == "" {
 			endpoint = "http://localhost:11434"
 		}
@@ -92,6 +91,22 @@ func NewLangChainAnalyzer(provider, modelName string) (*LangChainAnalyzer, error
 		modelName: modelName,
 		model:     model,
 	}, nil
+}
+
+// providerEndpoint resolves a provider-specific endpoint override, falling
+// back to the legacy shared LLM_ENDPOINT.
+//
+// LLM_ENDPOINT was fine when exactly one provider was configured, but it is
+// actively wrong once providers are chained: a value set to point Ollama at a
+// local daemon would also be handed to OpenAI as its base URL, silently
+// sending API-key-authenticated traffic to localhost. Provider-specific vars
+// take precedence; LLM_ENDPOINT remains as a fallback so existing
+// single-provider deployments keep working unchanged.
+func providerEndpoint(specificVar string) string {
+	if v := strings.TrimSpace(os.Getenv(specificVar)); v != "" {
+		return v
+	}
+	return strings.TrimSpace(os.Getenv("LLM_ENDPOINT"))
 }
 
 func (l *LangChainAnalyzer) Name() string {

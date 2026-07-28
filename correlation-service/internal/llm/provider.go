@@ -42,6 +42,15 @@ type Response struct {
 }
 
 // Provider is the interface for any LLM backend (Ollama, OpenAI, Anthropic, etc.)
+//
+// Implementations must be safe for concurrent use — a single Provider is
+// shared by the chat handler and the SLO handler across all in-flight
+// requests.
 type Provider interface {
 	Chat(ctx context.Context, messages []Message) (Response, error)
+
+	// Name identifies the backend for logs and for describing a fallback
+	// chain, e.g. "anthropic/claude-sonnet-4-5" or "ollama/llama3". It must
+	// not include credentials.
+	Name() string
 }

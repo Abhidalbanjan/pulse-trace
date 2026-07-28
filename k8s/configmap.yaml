@@ -4,6 +4,12 @@ metadata:
   name: pulsetrace-config
   namespace: pulsetrace
 data:
+  # Self-healing posture. Deliberately the safe value here, unlike the local
+  # demo stack in docker-compose.yml: a real cluster should not have an
+  # observability tool restarting or scaling its deployments unattended.
+  # Set to "auto" only once you've watched "dry-run" long enough to trust it.
+  # See .env.example for the full list of modes.
+  REMEDIATION_MODE: "manual"
   # Kafka
   KAFKA_BROKERS: "kafka:29092"
   # PostgreSQL (non-secret parts)

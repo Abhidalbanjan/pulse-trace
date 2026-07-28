@@ -220,6 +220,38 @@ func (r *IncidentRepository) GetByID(ctx context.Context, id string) (*models.In
 	return inc, nil
 }
 
+// GetByIDForTenant fetches a single incident, refusing to return one that
+// belongs to another tenant.
+//
+// The unscoped GetByID exists for internal callers that have already resolved
+// the tenant. Any handler acting on a *request* — especially one that mutates
+// state, like approving a remediation — must go through this variant, or an
+// incident ID leaked or guessed from one tenant becomes a lever on another
+// tenant's infrastructure.
+func (r *IncidentRepository) GetByIDForTenant(ctx context.Context, tenantID, id string) (*models.Incident, error) {
+	const q = `
+		SELECT tenant_id, id, title, root_cause, status, severity, alert_count,
+		       started_at, resolved_at, created_at, updated_at,
+		       causal, causal_analyzed_at
+		FROM incidents WHERE id = $1 AND tenant_id = $2
+	`
+	inc := &models.Incident{}
+	var causalJSON []byte
+	var causalAnalyzedAt *time.Time
+	err := r.db.QueryRow(ctx, q, id, tenantID).Scan(
+		&inc.TenantID, &inc.ID, &inc.Title, &inc.RootCause, &inc.Status,
+		&inc.Severity, &inc.AlertCount, &inc.StartedAt,
+		&inc.ResolvedAt, &inc.CreatedAt, &inc.UpdatedAt,
+		&causalJSON, &causalAnalyzedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("incident not found: %w", err)
+	}
+	inc.Causal = decodeCausal(causalJSON)
+	inc.ServiceNames, _ = r.serviceNames(ctx, id)
+	return inc, nil
+}
+
 // Timeline returns the ordered sequence of events for an incident.
 func (r *IncidentRepository) Timeline(ctx context.Context, id string) ([]models.IncidentTimelineEvent, error) {
 	inc, err := r.GetByID(ctx, id)

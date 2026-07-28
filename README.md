@@ -442,11 +442,58 @@ Most "AI for observability" features bolt an LLM onto raw logs and hope for the 
 
 ### Configuration
 
-| Env var               | Default            | Description                                                  |
-|-----------------------|--------------------|--------------------------------------------------------------|
-| `ANTHROPIC_API_KEY`   | *(unset)*          | If unset, uses the rule-based `NoopAnalyzer`.                |
-| `CAUSAL_MODEL`        | `claude-opus-4-7`  | Anthropic model identifier.                                  |
-| `CAUSAL_DISABLED`     | *(unset)*          | Set to `true` to force the noop analyzer even if a key is set. |
+| Env var                            | Default            | Description                                                                                                    |
+|------------------------------------|--------------------|----------------------------------------------------------------------------------------------------------------|
+| `LLM_PROVIDERS`                    | *(unset)*          | Ordered failover chain, e.g. `anthropic:claude-sonnet-4-5,openai:gpt-4o-mini,ollama:llama3`. Used by both the causal analyzer and the chat/SLO handlers. |
+| `LLM_PROVIDER` / `LLM_MODEL`       | *(unset)*          | Legacy single-provider form. Ignored when `LLM_PROVIDERS` is set.                                               |
+| `ANTHROPIC_API_KEY`                | *(unset)*          | If no provider is configured at all, the rule-based `NoopAnalyzer` is used.                                    |
+| `OPENAI_API_KEY`, `GEMINI_API_KEY` | *(unset)*          | Credentials for the corresponding providers. A provider whose key is missing is skipped at startup.            |
+| `OPENAI_BASE_URL`, `OLLAMA_ENDPOINT` | *(unset)*        | Per-provider endpoint overrides. Prefer these over the shared `LLM_ENDPOINT`, which is ambiguous when chaining. |
+| `CAUSAL_DISABLED`                  | *(unset)*          | Set to `true` to force the noop analyzer even if a provider is configured.                                     |
+
+Providers in a chain are tried in order. One that errors is skipped for a
+cooldown window (30s, doubling per consecutive failure) so a hard-down provider
+doesn't add its timeout to every incident — but it is never permanently
+evicted, and if all providers are cooling down the chain retries them anyway.
+A failed chain still falls back to the deterministic `NoopAnalyzer`, so the
+incident pipeline never blocks on an LLM.
+
+---
+
+## Self-Healing & the Approval Gate
+
+When causal AI proposes a recovery playbook, whether PulseTrace may act on it
+is a policy decision, not a confidence score. `REMEDIATION_MODE` governs it,
+and **every service in the chain enforces it independently** — correlation-service
+decides, topology-service and action-service execute, and each one can veto. An
+on-prem agent pinned to `dry-run` stays dry-run no matter what the control
+plane asks of it.
+
+| Mode      | Behaviour                                                                          |
+|-----------|------------------------------------------------------------------------------------|
+| `off`     | Never executes. Playbooks are recorded as suggestions only.                        |
+| `dry-run` | Plans the remediation and records exactly what would run. Changes nothing.         |
+| `manual`  | **Default.** Requires a human to approve each remediation before it executes.      |
+| `auto`    | Executes unattended once confidence clears `REMEDIATION_CONFIDENCE_THRESHOLD` (0.70). |
+
+An unrecognized value is rejected and the service falls back to `manual` rather
+than failing open. The local `docker-compose` stack sets `auto` so the demo
+still shows remediation end-to-end; the Kubernetes manifests set `manual`.
+
+Approval endpoints (proxied through the gateway, tenant-scoped, and attributed
+to the gateway-verified user — never to a name supplied in the request body):
+
+```
+GET  /api/v1/remediation/policy                  # current mode, for the UI
+POST /api/v1/incidents/{id}/playbook/dry-run     # show what it would do
+POST /api/v1/incidents/{id}/playbook/approve     # authorize and execute
+POST /api/v1/incidents/{id}/playbook/reject      # decline, with an optional reason
+```
+
+The approver's identity and timestamp are recorded on the playbook *before*
+execution begins, so "who authorized this" stays answerable even if the run
+itself crashes. The `dry_run` flag is covered by the HMAC that signs agent
+requests, so a captured dry-run request can't be replayed as a live change.
 
 ---
 

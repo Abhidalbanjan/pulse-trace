@@ -39,12 +39,44 @@ type CausalLink struct {
 	At          time.Time `json:"at"`
 }
 
-// PlaybookAction represents a suggested or executed recovery action.
+// Playbook lifecycle statuses.
+//
+// Which of these a playbook lands in is decided by the remediation policy
+// (see shared/remediation) rather than by confidence alone: a high-confidence
+// hypothesis under a manual-approval policy becomes PENDING_APPROVAL, not
+// EXECUTING.
+const (
+	PlaybookSuggested       = "SUGGESTED"        // recorded only; confidence too low to act on
+	PlaybookSuppressed      = "SUPPRESSED"       // remediation is switched off entirely
+	PlaybookDryRun          = "DRY_RUN"          // planned and recorded, nothing was changed
+	PlaybookPendingApproval = "PENDING_APPROVAL" // waiting on a human
+	PlaybookRejected        = "REJECTED"         // a human declined it
+	PlaybookExecuting       = "EXECUTING"
+	PlaybookExecuted        = "EXECUTED"
+	PlaybookFailed          = "FAILED"
+)
+
+// PlaybookAction represents a suggested, awaiting-approval, or executed
+// recovery action.
 type PlaybookAction struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
-	Status      string `json:"status"` // SUGGESTED, EXECUTING, EXECUTED, FAILED
+	Status      string `json:"status"` // one of the Playbook* constants above
 	Output      string `json:"output,omitempty"`
+
+	// DryRun records that this run was a plan, not a change. Kept separate
+	// from Status because a dry run can still fail (the plan couldn't even be
+	// computed), and "FAILED, and also nothing was touched" is a materially
+	// different thing to show an on-call engineer than a failed real run.
+	DryRun bool `json:"dry_run,omitempty"`
+
+	// Approval audit trail. Who authorized a change to production, and when,
+	// is the question an auditor asks first; recording it on the playbook
+	// keeps the answer attached to the incident it belongs to.
+	ApprovedBy string     `json:"approved_by,omitempty"`
+	ApprovedAt *time.Time `json:"approved_at,omitempty"`
+	RejectedBy string     `json:"rejected_by,omitempty"`
+	RejectedAt *time.Time `json:"rejected_at,omitempty"`
 }
 
 // CausalAnalysis is the structured output of the causal-AI analyzer. It is

@@ -17,6 +17,7 @@ import (
 
 	"github.com/pulsetrace/shared/db"
 	"github.com/pulsetrace/shared/jsonpool"
+	"github.com/pulsetrace/shared/remediation"
 	"github.com/pulsetrace/topology-service/internal/repository"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -38,13 +39,37 @@ func execCommandRunner(ctx context.Context, name string, args ...string) (string
 	return strings.TrimSpace(out.String()), err
 }
 
+// Playbook execution statuses reported back to the control plane. They mirror
+// the models.Playbook* constants; duplicated as local names to keep the
+// agent's wire contract explicit at the point it's produced.
+const (
+	PlaybookStatusExecuted = "EXECUTED"
+	PlaybookStatusFailed   = "FAILED"
+	PlaybookStatusDryRun   = "DRY_RUN"
+)
+
 type API struct {
 	repo         *repository.Neo4jRepository
 	sharedSecret []byte
 	runCmd       commandRunner
+
+	// policy is this agent's own remediation posture, independent of the
+	// control plane's. See handleExecutePlaybook for why it's enforced twice.
+	policy remediation.Policy
 }
 
 func NewAPI(repo *repository.Neo4jRepository, secret string) *API {
+	policy, err := remediation.PolicyFromEnv()
+	if err != nil {
+		// PolicyFromEnv returns the restrictive default alongside its error,
+		// so a typo'd REMEDIATION_MODE degrades to "won't touch anything"
+		// rather than to unrestricted execution.
+		log.Printf("agent-handler: WARNING: %v — falling back to remediation policy %q", err, policy.Mode)
+	}
+	return NewAPIWithPolicy(repo, secret, policy)
+}
+
+func NewAPIWithPolicy(repo *repository.Neo4jRepository, secret string, policy remediation.Policy) *API {
 	if secret == "" {
 		secret = "pulsetrace_secure_playbook_hmac_secret"
 	}
@@ -52,6 +77,7 @@ func NewAPI(repo *repository.Neo4jRepository, secret string) *API {
 		repo:         repo,
 		sharedSecret: []byte(secret),
 		runCmd:       execCommandRunner,
+		policy:       policy,
 	}
 }
 
@@ -391,7 +417,28 @@ type SignedPlaybookRequest struct {
 	PlaybookName string `json:"playbook_name"`
 	ServiceName  string `json:"service_name"`
 	Timestamp    string `json:"timestamp"` // RFC3339
-	Signature    string `json:"signature"`
+	// DryRun asks the agent to report what it would do without doing it. It
+	// is covered by the HMAC (see the signed payload below) because the
+	// dangerous direction is an attacker flipping a captured dry-run request
+	// into a live production change.
+	DryRun    bool   `json:"dry_run"`
+	Signature string `json:"signature"`
+}
+
+// playbookPlan describes what a playbook would do, for dry-run responses.
+// Each case in the executor produces one before deciding whether to act, so
+// the plan and the real thing cannot drift apart.
+type playbookPlan struct {
+	summary string
+	steps   []string
+}
+
+func (p playbookPlan) render(serviceName string) string {
+	out := fmt.Sprintf("DRY RUN — nothing was changed on %s.\n%s", serviceName, p.summary)
+	for _, s := range p.steps {
+		out += "\n  would run: " + s
+	}
+	return out
 }
 
 func (a *API) handleExecutePlaybook(w http.ResponseWriter, r *http.Request) {
@@ -415,8 +462,10 @@ func (a *API) handleExecutePlaybook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Verify HMAC signature
-	expectedPayload := fmt.Sprintf("%s:%s:%s:%d", req.IncidentID, req.PlaybookName, req.ServiceName, ts.Unix())
+	// 2. Verify HMAC signature. dry_run is part of the signed payload so a
+	// captured dry-run request cannot be replayed as a live change.
+	expectedPayload := fmt.Sprintf("%s:%s:%s:%d:dry_run=%t",
+		req.IncidentID, req.PlaybookName, req.ServiceName, ts.Unix(), req.DryRun)
 	mac := hmac.New(sha256.New, a.sharedSecret)
 	mac.Write([]byte(expectedPayload))
 	expectedSig := hex.EncodeToString(mac.Sum(nil))
@@ -431,76 +480,123 @@ func (a *API) handleExecutePlaybook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Execute the playbook (real command execution)
-	log.Printf("agent-handler: SUCCESSFUL signature verified. Executing playbook %q on service %q for incident %q",
-		req.PlaybookName, req.ServiceName, req.IncidentID)
+	// 3. Enforce the agent's own remediation policy, independently of what the
+	// control plane asked for.
+	//
+	// This is not redundant with the check in correlation-service's
+	// AutomationRouter. This service is where commands actually run, it is the
+	// component an enterprise customer deploys inside their own cluster, and
+	// the caller is a different process across a network boundary. An operator
+	// who pins this agent to dry-run means it — a compromised or misconfigured
+	// control plane must not be able to talk it into mutating their
+	// infrastructure.
+	dryRun := req.DryRun
+	if !dryRun && !a.policy.AllowsExecution() {
+		log.Printf("agent-handler: downgrading a live request to dry-run — this agent's REMEDIATION_MODE is %q",
+			a.policy.Mode)
+		dryRun = true
+	}
 
-	var output string
-	var status = "EXECUTED"
+	verb := "Executing"
+	if dryRun {
+		verb = "Planning (dry-run)"
+	}
+	log.Printf("agent-handler: SUCCESSFUL signature verified. %s playbook %q on service %q for incident %q",
+		verb, req.PlaybookName, req.ServiceName, req.IncidentID)
 
+	status, output := a.runPlaybook(r.Context(), req, dryRun)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":  status,
+		"output":  output,
+		"dry_run": dryRun,
+	})
+}
+
+// runPlaybook computes what a playbook would do and — unless this is a dry run
+// — does it.
+//
+// Every case builds its plan first and returns early when dryRun is set, so
+// the planned commands and the executed ones are literally the same strings.
+// A dry-run mode that describes something other than what would really happen
+// is worse than no dry-run mode, because it manufactures false confidence.
+func (a *API) runPlaybook(ctx context.Context, req SignedPlaybookRequest, dryRun bool) (status, output string) {
 	switch req.PlaybookName {
 	case "recycle_db_pool":
-		// Recycle database connection pools (terminate idle-in-transaction connections)
-		pgPool, err := db.NewPostgresPool(r.Context())
-		if err != nil {
-			status = "FAILED"
-			output = fmt.Sprintf("Failed to connect to database for recycling connection pool: %v", err)
-		} else {
-			defer pgPool.Close()
-			query := `
-				SELECT pg_terminate_backend(pid)
-				FROM pg_stat_activity
-				WHERE state = 'idle in transaction'
-				  AND state_change < NOW() - INTERVAL '1 minute'
-			`
-			tag, err := pgPool.Exec(r.Context(), query)
-			if err != nil {
-				status = "FAILED"
-				output = fmt.Sprintf("Recycle DB pool failed: %v", err)
-			} else {
-				output = fmt.Sprintf("Successfully recycled database connection pool. Terminated connections: %d.", tag.RowsAffected())
-			}
+		const recycleQuery = `
+			SELECT pg_terminate_backend(pid)
+			FROM pg_stat_activity
+			WHERE state = 'idle in transaction'
+			  AND state_change < NOW() - INTERVAL '1 minute'
+		`
+		plan := playbookPlan{
+			summary: "Would terminate Postgres backends idle in transaction for over a minute.",
+			steps:   []string{"SQL: " + strings.Join(strings.Fields(recycleQuery), " ")},
 		}
+		if dryRun {
+			return PlaybookStatusDryRun, plan.render(req.ServiceName)
+		}
+
+		pgPool, err := db.NewPostgresPool(ctx)
+		if err != nil {
+			return PlaybookStatusFailed, fmt.Sprintf("Failed to connect to database for recycling connection pool: %v", err)
+		}
+		defer pgPool.Close()
+
+		tag, err := pgPool.Exec(ctx, recycleQuery)
+		if err != nil {
+			return PlaybookStatusFailed, fmt.Sprintf("Recycle DB pool failed: %v", err)
+		}
+		return PlaybookStatusExecuted, fmt.Sprintf("Successfully recycled database connection pool. Terminated connections: %d.", tag.RowsAffected())
 
 	case "restart_service":
-		// Try Kubectl restart, falling back to Docker.
-		kOut, kErr := a.runCmd(r.Context(), "kubectl", "rollout", "restart", "deployment/"+req.ServiceName)
-		if kErr != nil {
-			log.Printf("agent-handler: kubectl restart failed, trying docker restart fallback: %v", kErr)
-			dOut, dErr := a.runCmd(r.Context(), "docker", "restart", "pulsetrace-"+req.ServiceName)
-			if dErr != nil {
-				log.Printf("agent-handler: docker restart fallback failed: %v", dErr)
-				status = "FAILED"
-				output = fmt.Sprintf("Failed to restart service %q. Kubectl error: %v (output: %q). Docker error: %v (output: %q).",
-					req.ServiceName, kErr, kOut, dErr, dOut)
-			} else {
-				output = fmt.Sprintf("Successfully restarted container pulsetrace-%s using Docker. Output: %s", req.ServiceName, dOut)
-			}
-		} else {
-			output = fmt.Sprintf("Successfully executed rolling restart on Kubernetes for deployment/%s. Output: %s", req.ServiceName, kOut)
+		plan := playbookPlan{
+			summary: fmt.Sprintf("Would perform a rolling restart of %s, falling back to Docker if Kubernetes is unavailable.", req.ServiceName),
+			steps: []string{
+				"kubectl rollout restart deployment/" + req.ServiceName,
+				"docker restart pulsetrace-" + req.ServiceName + "   (only if the kubectl step fails)",
+			},
 		}
+		if dryRun {
+			return PlaybookStatusDryRun, plan.render(req.ServiceName)
+		}
+
+		kOut, kErr := a.runCmd(ctx, "kubectl", "rollout", "restart", "deployment/"+req.ServiceName)
+		if kErr == nil {
+			return PlaybookStatusExecuted, fmt.Sprintf("Successfully executed rolling restart on Kubernetes for deployment/%s. Output: %s", req.ServiceName, kOut)
+		}
+
+		log.Printf("agent-handler: kubectl restart failed, trying docker restart fallback: %v", kErr)
+		dOut, dErr := a.runCmd(ctx, "docker", "restart", "pulsetrace-"+req.ServiceName)
+		if dErr != nil {
+			log.Printf("agent-handler: docker restart fallback failed: %v", dErr)
+			return PlaybookStatusFailed, fmt.Sprintf("Failed to restart service %q. Kubectl error: %v (output: %q). Docker error: %v (output: %q).",
+				req.ServiceName, kErr, kOut, dErr, dOut)
+		}
+		return PlaybookStatusExecuted, fmt.Sprintf("Successfully restarted container pulsetrace-%s using Docker. Output: %s", req.ServiceName, dOut)
 
 	case "scale_replicas":
-		kOut, kErr := a.runCmd(r.Context(), "kubectl", "scale", "deployment/"+req.ServiceName, "--replicas=4")
-		if kErr != nil {
-			log.Printf("agent-handler: kubectl scale failed: %v", kErr)
-			status = "FAILED"
-			output = fmt.Sprintf("Failed to scale deployment/%s. Kubectl error: %v (output: %q).",
-				req.ServiceName, kErr, kOut)
-		} else {
-			output = fmt.Sprintf("Successfully scaled deployment/%s to 4 replicas. Output: %s", req.ServiceName, kOut)
+		plan := playbookPlan{
+			summary: fmt.Sprintf("Would scale %s to 4 replicas.", req.ServiceName),
+			steps:   []string{"kubectl scale deployment/" + req.ServiceName + " --replicas=4"},
+		}
+		if dryRun {
+			return PlaybookStatusDryRun, plan.render(req.ServiceName)
 		}
 
-	default:
-		status = "FAILED"
-		output = fmt.Sprintf("Unknown playbook %q — no handler registered for service %q.", req.PlaybookName, req.ServiceName)
-	}
+		kOut, kErr := a.runCmd(ctx, "kubectl", "scale", "deployment/"+req.ServiceName, "--replicas=4")
+		if kErr != nil {
+			log.Printf("agent-handler: kubectl scale failed: %v", kErr)
+			return PlaybookStatusFailed, fmt.Sprintf("Failed to scale deployment/%s. Kubectl error: %v (output: %q).",
+				req.ServiceName, kErr, kOut)
+		}
+		return PlaybookStatusExecuted, fmt.Sprintf("Successfully scaled deployment/%s to 4 replicas. Output: %s", req.ServiceName, kOut)
 
-	resp := map[string]string{
-		"status": status,
-		"output": output,
+	default:
+		// An unknown playbook is a failure in both modes: a dry run that
+		// reported "nothing to do" would hide the misconfiguration.
+		return PlaybookStatusFailed, fmt.Sprintf("Unknown playbook %q — no handler registered for service %q.", req.PlaybookName, req.ServiceName)
 	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

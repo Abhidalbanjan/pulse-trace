@@ -302,10 +302,16 @@ services:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-pulsetrace}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-pulsetrace_secret}
-      # LangChain Go Multi-LLM support config
+      # LangChain Go Multi-LLM support config.
+      # LLM_PROVIDERS is an ordered failover chain ("anthropic:model,openai,ollama")
+      # used by both the causal analyzer and the chat/SLO handlers; LLM_PROVIDER
+      # and LLM_MODEL remain as the legacy single-provider form. See .env.example.
+      LLM_PROVIDERS: ${LLM_PROVIDERS:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_ENDPOINT: ${LLM_ENDPOINT:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OLLAMA_ENDPOINT: ${OLLAMA_ENDPOINT:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
@@ -316,6 +322,11 @@ services:
       # topology-service so they interoperate out of the box locally. Override
       # PLAYBOOK_HMAC_SECRET in any shared/staging/production deployment; see .env.example.
       PLAYBOOK_HMAC_SECRET: ${PLAYBOOK_HMAC_SECRET:-pulsetrace_secure_playbook_hmac_secret}
+      # Self-healing posture. The local demo stack defaults to "auto" so
+      # demo_incident.sh still shows remediation end-to-end; the code default
+      # (used by any deployment that doesn't set this) is "manual". See .env.example.
+      REMEDIATION_MODE: ${REMEDIATION_MODE:-auto}
+      REMEDIATION_CONFIDENCE_THRESHOLD: ${REMEDIATION_CONFIDENCE_THRESHOLD:-}
     ports:
       - "8083:8083"
     depends_on:
@@ -353,6 +364,11 @@ services:
       # topology-service so they interoperate out of the box locally. Override
       # PLAYBOOK_HMAC_SECRET in any shared/staging/production deployment; see .env.example.
       PLAYBOOK_HMAC_SECRET: ${PLAYBOOK_HMAC_SECRET:-pulsetrace_secure_playbook_hmac_secret}
+      # Self-healing posture. The local demo stack defaults to "auto" so
+      # demo_incident.sh still shows remediation end-to-end; the code default
+      # (used by any deployment that doesn't set this) is "manual". See .env.example.
+      REMEDIATION_MODE: ${REMEDIATION_MODE:-auto}
+      REMEDIATION_CONFIDENCE_THRESHOLD: ${REMEDIATION_CONFIDENCE_THRESHOLD:-}
       DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
     ports:
       - "8084:8084"
@@ -458,6 +474,11 @@ services:
       dockerfile: action-service/Dockerfile
     container_name: pulsetrace-action-service
     restart: unless-stopped
+    environment:
+      # Enforced independently of the control plane: this is the process that
+      # actually mutates the cluster, so it gets its own veto. See .env.example.
+      REMEDIATION_MODE: ${REMEDIATION_MODE:-auto}
+      K8S_TARGET_NAMESPACE: ${K8S_TARGET_NAMESPACE:-}
     ports:
       - "8085:8085"
     volumes:

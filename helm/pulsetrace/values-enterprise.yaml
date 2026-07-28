@@ -1,0 +1,54 @@
+# Enterprise on-prem overlay:
+#   helm install pulsetrace ./helm/pulsetrace -f helm/pulsetrace/values-enterprise.yaml
+#
+# Differences from the SaaS default:
+#   - Images come from the customer's own registry, pinned to an immutable tag
+#     (never :latest) so deploys are reproducible and auditable.
+#   - Autoscaling is off: on-prem clusters usually run fixed, capacity-planned
+#     sizing and may not have metrics-server. Replicas are set explicitly; PDBs
+#     still protect them through node drains.
+#   - Ingress uses the customer's hostname/class and expects real TLS.
+#   - REQUIRE_INGESTION_KEY lives in the Secret (not here) — set it to "true" for
+#     any multi-tenant on-prem install so tenant identity can't be header-spoofed.
+
+image:
+  registry: "registry.internal.example.com/pulsetrace/" # customer registry
+  tag: "1.0.0" # pin an immutable tag, never :latest
+  pullPolicy: IfNotPresent
+
+config:
+  # Keep remediation human-approved on a customer's production cluster.
+  REMEDIATION_MODE: "manual"
+
+services:
+  gateway:
+    replicas: 3
+    autoscaling:
+      enabled: false
+    pdb:
+      enabled: true
+      minAvailable: 2
+  log-service:
+    replicas: 3
+    autoscaling:
+      enabled: false
+    pdb:
+      enabled: true
+      minAvailable: 2
+  alert-service:
+    replicas: 2
+  notification-service:
+    replicas: 2
+    autoscaling:
+      enabled: false
+
+ingress:
+  enabled: true
+  className: nginx
+  host: pulsetrace.example.com
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+  tls:
+    - secretName: pulsetrace-tls
+      hosts:
+        - pulsetrace.example.com

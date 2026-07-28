@@ -1,0 +1,140 @@
+# Default values — a shared-cluster (SaaS-style) deployment. Enterprise on-prem
+# overrides live in values-enterprise.yaml (helm install -f values-enterprise.yaml).
+
+image:
+  # registry is prepended to each service's image name. Empty = local images
+  # (matches the raw k8s/ manifests: pulse-trace-<svc>:latest). For a real
+  # deployment set e.g. "ghcr.io/pulsetrace/" (keep the trailing slash).
+  registry: ""
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# The chart NEVER creates the Secret holding credentials — secrets don't belong
+# in values or git. It references an existing Secret every pod pulls env from.
+# Create it out of band: k8s/secret.yaml.example (dev) or the External Secrets
+# Operator (prod, k8s/externalsecret.yaml.example). Must be named this.
+existingSecret: pulsetrace-secrets
+
+# Non-secret configuration, rendered verbatim into the pulsetrace-config
+# ConfigMap and injected into every pod via envFrom. Mirrors k8s/configmap.yaml.
+config:
+  # Self-healing posture. "manual" is the safe default for a real cluster (a
+  # human approves each remediation); set "auto" only once dry-run is trusted.
+  REMEDIATION_MODE: "manual"
+  KAFKA_BROKERS: "kafka:29092"
+  POSTGRES_DB: "pulsetrace"
+  POSTGRES_USER: "pulsetrace"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+  LOG_SERVICE_URL: "http://log-service:8081"
+  ALERT_SERVICE_URL: "http://alert-service:8082"
+  CORRELATION_SERVICE_URL: "http://correlation-service:8083"
+  TOPOLOGY_SERVICE_URL: "http://topology-service:8084"
+  ACTION_SERVICE_URL: "http://action-service:8085"
+  GATEWAY_URL: "http://gateway:8080"
+  CLICKHOUSE_URL: "http://clickhouse:8123"
+  CLICKHOUSE_USER: "pulsetrace"
+  NEO4J_URI: "bolt://neo4j:7687"
+  REDIS_ADDR: "redis:6379"
+  CAUSAL_MODEL: "claude-opus-4-7"
+  # The namespace action-service remediates into (where the monitored workloads
+  # run) — not necessarily this release's namespace.
+  K8S_TARGET_NAMESPACE: "pulsetrace"
+
+# Default resource envelope, applied to any service that doesn't override it.
+defaultResources:
+  requests:
+    cpu: "100m"
+    memory: "64Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+# Per-service definitions. The templates range over this map, so adding a
+# service is a values change, not a new manifest. Keys:
+#   image        image name (registry + this + :tag)
+#   port         HTTP port; omit for a portless background consumer (no Service,
+#                no probes)
+#   replicas     baseline replica count (ignored when autoscaling.enabled)
+#   serviceAccount  name of an existing SA to run as (action-service only)
+#   autoscaling  { enabled, minReplicas, maxReplicas, targetCPU[, targetMemory] }
+#   pdb          { enabled, minAvailable }
+#   resources    overrides defaultResources
+services:
+  gateway:
+    image: pulse-trace-gateway
+    port: 8080
+    replicas: 2
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 8
+      targetCPU: 70
+    pdb:
+      enabled: true
+      minAvailable: 1
+
+  log-service:
+    image: pulse-trace-log-service
+    port: 8081
+    replicas: 2
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+      targetCPU: 70
+      targetMemory: 80
+    pdb:
+      enabled: true
+      minAvailable: 1
+
+  alert-service:
+    image: pulse-trace-alert-service
+    port: 8082
+    replicas: 2
+    pdb:
+      enabled: true
+      minAvailable: 1
+
+  correlation-service:
+    image: pulse-trace-correlation-service
+    port: 8083
+    replicas: 1 # hosts background singletons (anomaly detector, automation router)
+
+  topology-service:
+    image: pulse-trace-topology-service
+    port: 8084
+    replicas: 1
+
+  action-service:
+    image: pulse-trace-action-service
+    port: 8085
+    replicas: 1
+    serviceAccount: action-service # needs RBAC to remediate deployments
+
+  notification-service:
+    image: pulse-trace-notification-service
+    # no port: it's a RabbitMQ consumer with no HTTP server → no Service/probes
+    replicas: 2
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 6
+      targetCPU: 75
+    pdb:
+      enabled: true
+      minAvailable: 1
+
+# action-service remediates Deployments in the cluster, so it needs a
+# ServiceAccount + Role/RoleBinding. Scoped to this release's namespace by
+# default (see config.K8S_TARGET_NAMESPACE for where it actually acts).
+actionServiceRBAC:
+  create: true
+  serviceAccountName: action-service
+
+ingress:
+  enabled: true
+  className: nginx
+  host: pulsetrace.local
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+  tls: [] # e.g. [{ secretName: pulsetrace-tls, hosts: [pulsetrace.example.com] }]

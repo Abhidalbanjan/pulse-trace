@@ -1,0 +1,18 @@
+apiVersion: v2
+name: pulsetrace
+description: >-
+  PulseTrace observability platform — the application microservices (gateway,
+  log, alert, correlation, topology, action, notification). Data stores
+  (PostgreSQL, ClickHouse, Neo4j, Kafka, Redis, RabbitMQ) are NOT part of this
+  chart: point the chart at managed services (SaaS) or the customer's own
+  operators (enterprise) via values + the referenced Secret.
+type: application
+# Chart version tracks packaging changes; appVersion tracks the images deployed.
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - observability
+  - tracing
+  - logging
+  - apm
+home: https://github.com/pulsetrace/pulse-trace

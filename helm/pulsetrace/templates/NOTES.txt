@@ -1,0 +1,26 @@
+PulseTrace {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Services installed:
+{{- range $name, $svc := .Values.services }}
+  - {{ $name }}{{ if $svc.port }} (:{{ $svc.port }}){{ else }} (background consumer){{ end }}
+{{- end }}
+
+IMPORTANT — credentials:
+  This chart does NOT create the "{{ .Values.existingSecret }}" Secret. Create it
+  before (or right after) install, or pods will fail to start:
+    • dev:  kubectl apply -f k8s/secret.yaml         (from secret.yaml.example)
+    • prod: External Secrets Operator (k8s/externalsecret.yaml.example)
+
+Data stores (PostgreSQL, ClickHouse, Neo4j, Kafka, Redis, RabbitMQ) are not part
+of this chart. Point the app at them via .Values.config and the Secret.
+
+{{- if .Values.ingress.enabled }}
+
+Reach the UI/API at: http://{{ .Values.ingress.host }}/
+  (ensure an ingress controller of class "{{ .Values.ingress.className }}" is installed
+   and {{ .Values.ingress.host }} resolves to it)
+{{- else }}
+
+Ingress is disabled — port-forward the gateway to reach it:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/gateway {{ .Values.services.gateway.port }}:{{ .Values.services.gateway.port }}
+{{- end }}

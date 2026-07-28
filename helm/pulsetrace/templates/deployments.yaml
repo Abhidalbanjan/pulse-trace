@@ -1,0 +1,63 @@
+{{- range $name, $svc := .Values.services }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    app: {{ $name }}
+    {{- include "pulsetrace.labels" $ | nindent 4 }}
+spec:
+  {{- if not (and $svc.autoscaling $svc.autoscaling.enabled) }}
+  # Fixed replica count. When autoscaling is enabled the HPA owns replicas, so
+  # this is intentionally omitted to avoid helm and the HPA fighting over it.
+  replicas: {{ $svc.replicas | default 1 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+        {{- include "pulsetrace.labels" $ | nindent 8 }}
+    spec:
+      {{- if $svc.serviceAccount }}
+      serviceAccountName: {{ $svc.serviceAccount }}
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "pulsetrace.image" (dict "root" $ "svc" $svc) }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          # Every pod pulls the full non-secret config and the credential Secret;
+          # a service simply ignores keys it doesn't use. This keeps the template
+          # uniform instead of enumerating env per service.
+          envFrom:
+            - configMapRef:
+                name: pulsetrace-config
+            - secretRef:
+                name: {{ $.Values.existingSecret }}
+          {{- if $svc.port }}
+          env:
+            - name: PORT
+              value: {{ $svc.port | quote }}
+          ports:
+            - containerPort: {{ $svc.port }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $svc.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $svc.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          {{- end }}
+          resources:
+            {{- toYaml (default $.Values.defaultResources $svc.resources) | nindent 12 }}
+{{- end }}

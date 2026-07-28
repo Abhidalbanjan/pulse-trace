@@ -1,0 +1,42 @@
+{{- if .Values.actionServiceRBAC.create }}
+# action-service reaches into the cluster to remediate Deployments (roll back,
+# restart, scale — see action-service/internal/k8s/operator.go), so it runs as
+# its own ServiceAccount with a narrowly-scoped Role: only the apps resources it
+# actually mutates, only in this release's namespace. Widen to a
+# ClusterRole/Binding only if it must remediate across namespaces.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.actionServiceRBAC.serviceAccountName }}
+  labels:
+    {{- include "pulsetrace.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: action-service-remediator
+  labels:
+    {{- include "pulsetrace.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: action-service-remediator-binding
+  labels:
+    {{- include "pulsetrace.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.actionServiceRBAC.serviceAccountName }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: action-service-remediator
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

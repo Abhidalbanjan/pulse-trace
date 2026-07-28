@@ -3,6 +3,11 @@
 Raw manifests for a full PulseTrace deployment. Apply `namespace.yaml` first,
 then the secret (see below), then `configmap.yaml` and the per-service manifests.
 
+> Prefer a parameterized, multi-environment install? Use the Helm chart in
+> [`helm/pulsetrace`](../helm/pulsetrace/README.md) — it renders these same
+> resources with SaaS and enterprise value sets. These raw manifests remain the
+> reference.
+
 ## Secrets
 
 `k8s/secret.yaml` is **git-ignored** — it must never be committed, because real

@@ -213,6 +213,27 @@ jobs:
         if: always()
         run: docker compose down -v
 
+  helm:
+    name: helm chart (lint + template)
+    runs-on: ubuntu-latest
+    # Validates the chart renders for both deployment shapes on every change, so
+    # a templating mistake can't reach a cluster. Doesn't need the app stack.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: Lint (default + enterprise values)
+        run: |
+          helm lint helm/pulsetrace
+          helm lint helm/pulsetrace -f helm/pulsetrace/values-enterprise.yaml
+
+      - name: Template renders cleanly (both value sets)
+        run: |
+          helm template pulsetrace helm/pulsetrace -n pulsetrace >/dev/null
+          helm template pulsetrace helm/pulsetrace -n pulsetrace \
+            -f helm/pulsetrace/values-enterprise.yaml >/dev/null
+
   docker-build:
     name: docker build / ${{ matrix.service }}
     runs-on: ubuntu-latest

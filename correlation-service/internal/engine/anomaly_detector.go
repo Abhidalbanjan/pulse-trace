@@ -2,19 +2,24 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/pulsetrace/shared/client"
 )
 
-// serviceBaseline tracks a per-service exponential moving average (EWMA) of
-// p99 latency, built up from real polls, plus how many samples have gone
-// into it. We require a minimum sample count before we trust the baseline
-// enough to fire a warning, so a service isn't flagged the moment it's first seen.
+// serviceBaseline tracks a per-service exponential moving average (EWMA) of the
+// three RED signals — p99 latency, error rate, and throughput — built up from
+// real polls, plus how many samples have gone into it. We require a minimum
+// sample count before we trust the baseline enough to fire a warning, so a
+// service isn't flagged the moment it's first seen.
 type serviceBaseline struct {
-	ewmaP99Ms float64
-	samples   int
+	ewmaP99Ms     float64
+	ewmaErrorRate float64 // percent (0-100)
+	ewmaRequests  float64 // requests per poll window
+	samples       int
 }
 
 // ratio returns how many times the given p99 is over this baseline. Shared
@@ -56,12 +61,25 @@ const (
 	// is at least this many times its own recent baseline.
 	warnMultiplier = 1.6
 
+	// errorRateJumpPoints: flag when the current error rate is at least this many
+	// percentage points above the service's baseline (an absolute jump, not a
+	// ratio — a jump from 0.1% to 0.5% is 5x but not worth paging on).
+	errorRateJumpPoints = 5.0
+
+	// minErrorRateToWarn: an absolute floor so a service that normally runs near
+	// zero doesn't page on statistical noise; the error rate must clear this too.
+	minErrorRateToWarn = 5.0
+
+	// throughputDropRatio: flag when throughput falls to at most this fraction of
+	// its baseline — a sharp traffic drop is a classic upstream-outage signal.
+	throughputDropRatio = 0.4
+
 	// minSamplesToWarn: don't fire until a service has enough poll history to
 	// trust the baseline — avoids flagging a service the moment it's first seen.
 	minSamplesToWarn = 4
 
-	// minRequestsToConsider: skip near-idle services in a given window; a p99
-	// computed from a handful of requests is too noisy to act on.
+	// minRequestsToConsider: skip near-idle services in a given window; RED
+	// metrics computed from a handful of requests are too noisy to act on.
 	minRequestsToConsider = 5
 )
 
@@ -102,23 +120,59 @@ func (a *AnomalyDetector) pollOnce(ctx context.Context) {
 		baseline, ok := a.baselines[key]
 		if !ok {
 			// First time we've seen this service: seed the baseline with its
-			// current p99 rather than comparing against zero.
-			a.baselines[key] = &serviceBaseline{ewmaP99Ms: row.P99Ms, samples: 1}
+			// current values rather than comparing against zero.
+			a.baselines[key] = &serviceBaseline{
+				ewmaP99Ms:     row.P99Ms,
+				ewmaErrorRate: row.ErrorRate(),
+				ewmaRequests:  float64(row.Requests),
+				samples:       1,
+			}
 			continue
 		}
 
-		// Compare against the *existing* baseline before folding this sample in,
+		// Evaluate against the *existing* baseline before folding this sample in,
 		// so the update below doesn't chase its own tail.
-		if baseline.samples >= minSamplesToWarn && baseline.ewmaP99Ms > 0 && row.P99Ms >= baseline.ewmaP99Ms*warnMultiplier {
-			log.Printf("anomaly_detector: ⚠️ %s/%s p99 latency %.1fms is %.1fx its baseline (%.1fms) — PREDICTIVE_WARNING",
-				row.tenantOrDefault(), row.Service, row.P99Ms, row.P99Ms/baseline.ewmaP99Ms, baseline.ewmaP99Ms)
-
+		if reasons := detectAnomalies(baseline, row); len(reasons) > 0 {
+			log.Printf("anomaly_detector: ⚠️ %s/%s — %s — PREDICTIVE_WARNING",
+				row.tenantOrDefault(), row.Service, strings.Join(reasons, "; "))
 			if err := a.topoclient.UpdateServiceState(ctx, row.tenantOrDefault(), row.Service, "PREDICTIVE_WARNING"); err != nil {
 				log.Printf("anomaly_detector: failed to update predictive state for %s: %v", row.Service, err)
 			}
 		}
 
 		baseline.ewmaP99Ms = (ewmaAlpha * row.P99Ms) + ((1 - ewmaAlpha) * baseline.ewmaP99Ms)
+		baseline.ewmaErrorRate = (ewmaAlpha * row.ErrorRate()) + ((1 - ewmaAlpha) * baseline.ewmaErrorRate)
+		baseline.ewmaRequests = (ewmaAlpha * float64(row.Requests)) + ((1 - ewmaAlpha) * baseline.ewmaRequests)
 		baseline.samples++
 	}
+}
+
+// detectAnomalies returns a human-readable reason for each RED signal that has
+// drifted anomalously from the service's own baseline — latency spike, error-rate
+// jump, or throughput drop. Empty means healthy. Pure (no I/O) so it's unit
+// tested directly. Requires enough baseline history first (minSamplesToWarn).
+func detectAnomalies(b *serviceBaseline, row serviceRow) []string {
+	if b == nil || b.samples < minSamplesToWarn {
+		return nil
+	}
+	var reasons []string
+
+	// 1. Latency: p99 well above its own recent baseline.
+	if b.ewmaP99Ms > 0 && row.P99Ms >= b.ewmaP99Ms*warnMultiplier {
+		reasons = append(reasons, fmt.Sprintf("p99 latency %.1fms is %.1fx baseline (%.1fms)",
+			row.P99Ms, row.P99Ms/b.ewmaP99Ms, b.ewmaP99Ms))
+	}
+
+	// 2. Error rate: an absolute jump above baseline that also clears the floor.
+	if er := row.ErrorRate(); er >= minErrorRateToWarn && er >= b.ewmaErrorRate+errorRateJumpPoints {
+		reasons = append(reasons, fmt.Sprintf("error rate %.1f%% (baseline %.1f%%)", er, b.ewmaErrorRate))
+	}
+
+	// 3. Throughput: a sharp traffic drop relative to baseline (upstream outage).
+	if b.ewmaRequests >= minRequestsToConsider && float64(row.Requests) <= b.ewmaRequests*throughputDropRatio {
+		reasons = append(reasons, fmt.Sprintf("throughput dropped to %d req (%.0f%% of baseline %.0f)",
+			row.Requests, float64(row.Requests)/b.ewmaRequests*100, b.ewmaRequests))
+	}
+
+	return reasons
 }

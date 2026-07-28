@@ -67,7 +67,7 @@ A production-grade, event-driven observability platform for microservices, built
 | Component                  | Responsibility                                                                          |
 |----------------------------|-----------------------------------------------------------------------------------------|
 | `gateway-service`          | Reverse proxy, W3C trace context, OTLP passthrough, RBAC, Synthetics engine, RUM endpoint |
-| `log-service`              | Ingest logs → publish to Kafka; batch consumer writes to ClickHouse; serves query API  |
+| `log-service`              | Ingest logs → publish to Kafka; batch consumer writes to ClickHouse; serves query API (service/level/trace filters, phrase + regex, time range) |
 | `alert-service`            | Consume `logs` topic, create alerts for ERROR/FATAL, publish to `alerts` topic          |
 | `correlation-service`      | Consume `alerts`, group into incidents, infer root cause, SLO burn rate engine          |
 | `topology-service`         | Auto-discovers service dependencies and maintains ownership Catalog in Neo4j              |

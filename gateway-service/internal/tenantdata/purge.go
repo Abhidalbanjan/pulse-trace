@@ -53,7 +53,7 @@ type Result struct {
 	Errors   []string `json:"errors"`
 }
 
-func (r *Result) ok(step string)          { r.Steps = append(r.Steps, step) }
+func (r *Result) ok(step string) { r.Steps = append(r.Steps, step) }
 func (r *Result) fail(step string, e error) {
 	r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", step, e))
 }
@@ -203,6 +203,7 @@ func (p *Purger) purgePostgres(ctx context.Context, tenantID string, full bool, 
 		// Account teardown: config + identity + the tenant row itself.
 		steps = append(steps,
 			struct{ name, stmt string }{"alert_rules", "DELETE FROM alert_rules WHERE tenant_id = $1"},
+			struct{ name, stmt string }{"saved_searches", "DELETE FROM saved_searches WHERE tenant_id = $1"},
 			struct{ name, stmt string }{"ingestion_keys", "DELETE FROM ingestion_keys WHERE tenant_id = $1"},
 			struct{ name, stmt string }{"users", "DELETE FROM users WHERE tenant_id = $1"},
 			struct{ name, stmt string }{"tenants", "DELETE FROM tenants WHERE id = $1"},

@@ -21,8 +21,8 @@ import (
 	"github.com/pulsetrace/gateway-service/internal/proxy"
 	"github.com/pulsetrace/gateway-service/internal/quota"
 	"github.com/pulsetrace/gateway-service/internal/tenantdata"
-	"github.com/pulsetrace/shared/metering"
 	gatewaymigrations "github.com/pulsetrace/gateway-service/migrations"
+	"github.com/pulsetrace/shared/metering"
 	"github.com/pulsetrace/shared/middleware"
 	"github.com/pulsetrace/shared/migrate"
 	"github.com/pulsetrace/shared/telemetry"
@@ -171,7 +171,7 @@ func main() {
 		mux.HandleFunc("POST /api/v1/auth/signup", tenantStore.Signup)
 		// The caller's own tenant (plan/status) — authenticated.
 		mux.HandleFunc("GET /api/v1/tenant", tenantStore.GetCurrentTenant)
-	// Metered usage for the current billing period.
+		// Metered usage for the current billing period.
 		usageHandler := handler.NewUsageHandler(authHandler.GetDB())
 		mux.HandleFunc("GET /api/v1/usage", usageHandler.GetUsage)
 
@@ -236,6 +236,15 @@ func main() {
 		mux.HandleFunc("POST /api/v1/admin/alert-rules", alertRuleHandler.CreateAlertRule)
 		mux.HandleFunc("PUT /api/v1/admin/alert-rules/{id}", alertRuleHandler.UpdateAlertRule)
 		mux.HandleFunc("DELETE /api/v1/admin/alert-rules/{id}", alertRuleHandler.DeleteAlertRule)
+
+		// Saved searches — per-user named log/trace queries. Not under /admin:
+		// any user may manage their own (owner-scoped in the handler), and the
+		// default viewer role's read / editor role's write permissions apply.
+		savedSearchHandler := handler.NewSavedSearchHandler(authHandler.GetDB())
+		mux.HandleFunc("GET /api/v1/saved-searches", savedSearchHandler.List)
+		mux.HandleFunc("POST /api/v1/saved-searches", savedSearchHandler.Create)
+		mux.HandleFunc("PUT /api/v1/saved-searches/{id}", savedSearchHandler.Update)
+		mux.HandleFunc("DELETE /api/v1/saved-searches/{id}", savedSearchHandler.Delete)
 	}
 
 	// Analytics APIs (powered by ClickHouse)

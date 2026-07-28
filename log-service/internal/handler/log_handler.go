@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,7 +20,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-
 
 	"github.com/pulsetrace/shared/jsonpool"
 	"github.com/pulsetrace/shared/kafka"
@@ -34,7 +35,6 @@ const (
 
 // LogHandler exposes HTTP endpoints for log ingestion and querying.
 type LogHandler struct {
-
 	producer      *kafka.Producer
 	logQueue      chan *models.LogEntry
 	batchSize     int
@@ -56,8 +56,8 @@ func NewLogHandler(producer *kafka.Producer, quickwitURL string, meter *metering
 	h := &LogHandler{
 		producer:      producer,
 		logQueue:      make(chan *models.LogEntry, 100000), // 100k buffered elements shock absorber
-		batchSize:     2000,                               // bulk pgx/kafka batch threshold
-		flushInterval: 100 * time.Millisecond,             // maximum latency threshold
+		batchSize:     2000,                                // bulk pgx/kafka batch threshold
+		flushInterval: 100 * time.Millisecond,              // maximum latency threshold
 		closeChan:     make(chan struct{}),
 		quickwitURL:   quickwitURL,
 		httpClient:    &http.Client{Timeout: 10 * time.Second},
@@ -319,7 +319,12 @@ type quickwitSearchResponse struct {
 // buildLogQuery translates ListLogs' query params into a Quickwit query
 // string. Every clause is deliberately quoted/escaped rather than
 // concatenated raw, since these values come straight from the request.
-func buildLogQuery(r *http.Request, tenantID string) string {
+//
+// It returns an error (surfaced as 400) for malformed operator input — a bad
+// timestamp or an un-compilable regex — rather than silently dropping the
+// clause and returning a wider result set than the operator asked for, which
+// during an incident is a dangerous way to be wrong.
+func buildLogQuery(r *http.Request, tenantID string) (string, error) {
 	clauses := []string{fmt.Sprintf("tenant_id:%q", tenantID)}
 
 	if svc := r.URL.Query().Get("service"); svc != "" {
@@ -332,15 +337,108 @@ func buildLogQuery(r *http.Request, tenantID string) string {
 		clauses = append(clauses, fmt.Sprintf("trace_id:%q", traceID))
 	}
 	if q := r.URL.Query().Get("q"); q != "" {
+		// Phrase match on the full-text message field.
 		clauses = append(clauses, fmt.Sprintf("message:%q", q))
 	}
+	if pattern := r.URL.Query().Get("regex"); pattern != "" {
+		clause, err := regexClause(pattern)
+		if err != nil {
+			return "", err
+		}
+		clauses = append(clauses, clause)
+	}
 
-	return strings.Join(clauses, " AND ")
+	timeClause, err := timeRangeClause(r.URL.Query())
+	if err != nil {
+		return "", err
+	}
+	if timeClause != "" {
+		clauses = append(clauses, timeClause)
+	}
+
+	return strings.Join(clauses, " AND "), nil
+}
+
+// regexClause builds a Quickwit regex query (message:/pattern/) against the
+// full-text message field. The pattern is validated with Go's regexp engine —
+// whose syntax matches the tantivy engine Quickwit uses closely enough to catch
+// the mistakes an operator actually makes (unbalanced groups, bad escapes) —
+// and any '/' is escaped so it can't terminate the literal early.
+func regexClause(pattern string) (string, error) {
+	if _, err := regexp.Compile(pattern); err != nil {
+		return "", fmt.Errorf("invalid regex %q: %w", pattern, err)
+	}
+	escaped := strings.ReplaceAll(pattern, `/`, `\/`)
+	return "message:/" + escaped + "/", nil
+}
+
+// timeRangeClause builds a Quickwit datetime range clause on the timestamp
+// field from either absolute (start/end, RFC3339) or relative (since, e.g. 15m,
+// 2h, 7d) bounds. Relative "since" is a convenience that sets the lower bound to
+// now-duration; an explicit start always wins over it. Returns "" when no time
+// bound is requested (the caller then searches all retained data).
+func timeRangeClause(params url.Values) (string, error) {
+	start := strings.TrimSpace(params.Get("start"))
+	end := strings.TrimSpace(params.Get("end"))
+
+	if start == "" {
+		if since := strings.TrimSpace(params.Get("since")); since != "" {
+			d, err := parseSince(since)
+			if err != nil {
+				return "", err
+			}
+			start = time.Now().UTC().Add(-d).Format(time.RFC3339)
+		}
+	} else if _, err := time.Parse(time.RFC3339, start); err != nil {
+		return "", fmt.Errorf("invalid start time %q (want RFC3339): %w", start, err)
+	}
+
+	if end != "" {
+		if _, err := time.Parse(time.RFC3339, end); err != nil {
+			return "", fmt.Errorf("invalid end time %q (want RFC3339): %w", end, err)
+		}
+	}
+
+	if start == "" && end == "" {
+		return "", nil
+	}
+
+	// Quickwit range syntax: [lower TO upper], with '*' for an unbounded side.
+	lower, upper := start, end
+	if lower == "" {
+		lower = "*"
+	}
+	if upper == "" {
+		upper = "*"
+	}
+	return fmt.Sprintf("timestamp:[%s TO %s]", lower, upper), nil
+}
+
+// parseSince extends Go's duration parsing with a 'd' (days) unit, since
+// operators reach for "7d" far more naturally than "168h" when scoping a log
+// search. Everything else falls through to time.ParseDuration.
+func parseSince(s string) (time.Duration, error) {
+	if strings.HasSuffix(s, "d") {
+		days, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil || days < 0 {
+			return 0, fmt.Errorf("invalid since %q (want e.g. 15m, 2h, 7d)", s)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("invalid since %q (want e.g. 15m, 2h, 7d)", s)
+	}
+	return d, nil
 }
 
 // ListLogs searches recent logs via Quickwit, scoped to the caller's tenant.
 //
-//	GET /api/v1/logs?service=&level=&trace_id=&q=&limit=
+//	GET /api/v1/logs?service=&level=&trace_id=&q=&regex=&start=&end=&since=&limit=
+//
+// q is a phrase match on the message; regex is a full regex on the message
+// (message:/pattern/). Time is bounded by absolute start/end (RFC3339) or a
+// relative since (e.g. 15m, 2h, 7d); an explicit start wins over since.
 func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 	tracer := otel.Tracer(serviceName)
 	ctx, span := tracer.Start(r.Context(), "log.list")
@@ -363,8 +461,15 @@ func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	query, err := buildLogQuery(r, tenantID)
+	if err != nil {
+		span.SetStatus(codes.Error, "invalid query params")
+		writeJSON(w, http.StatusBadRequest, models.Fail(err.Error()))
+		return
+	}
+
 	req := quickwitSearchRequest{
-		Query:       buildLogQuery(r, tenantID),
+		Query:       query,
 		MaxHits:     limit,
 		SortByField: "-timestamp",
 	}

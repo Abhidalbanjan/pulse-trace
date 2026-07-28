@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/pulsetrace/shared/models"
 )
@@ -180,6 +183,128 @@ func TestIngest_QueueFullReturns503(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 when queue is full", rr.Code)
 	}
+}
+
+// buildQuery is a helper that runs buildLogQuery against a URL's query string.
+func buildQuery(t *testing.T, rawQuery, tenantID string) (string, error) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/logs?"+rawQuery, nil)
+	return buildLogQuery(req, tenantID)
+}
+
+func TestBuildLogQuery_TenantScopeAlwaysPresent(t *testing.T) {
+	// Even with no params, the query must be scoped to the caller's tenant —
+	// this is the cross-tenant isolation guarantee, not a nicety.
+	q, err := buildQuery(t, "", "acme")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(q, `tenant_id:"acme"`) {
+		t.Fatalf("query missing tenant scope: %q", q)
+	}
+}
+
+func TestBuildLogQuery_FiltersAndRegex(t *testing.T) {
+	rawQuery := "service=api&level=error&trace_id=abc&q=timeout&regex=" + url.QueryEscape("user_[0-9]+")
+	q, err := buildQuery(t, rawQuery, "t1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		`tenant_id:"t1"`,
+		`service_name:"api"`,
+		`level:"ERROR"`, // level is upper-cased to match the raw-tokenized field
+		`trace_id:"abc"`,
+		`message:"timeout"`,
+		`message:/user_[0-9]+/`,
+	} {
+		if !strings.Contains(q, want) {
+			t.Errorf("query missing %q; got %q", want, q)
+		}
+	}
+}
+
+func TestBuildLogQuery_InvalidRegexRejected(t *testing.T) {
+	// An un-compilable regex must be a 400-worthy error, not a clause silently
+	// dropped (which would widen the result set mid-incident).
+	if _, err := buildQuery(t, "regex="+url.QueryEscape("user_[0-9"), "t1"); err == nil {
+		t.Fatal("expected an error for an unbalanced regex")
+	}
+}
+
+func TestBuildLogQuery_AbsoluteTimeRange(t *testing.T) {
+	q, err := buildQuery(t, "start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z", "t1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(q, "timestamp:[2026-01-01T00:00:00Z TO 2026-01-02T00:00:00Z]") {
+		t.Fatalf("absolute range clause wrong: %q", q)
+	}
+}
+
+func TestBuildLogQuery_UnboundedUpper(t *testing.T) {
+	q, err := buildQuery(t, "start=2026-01-01T00:00:00Z", "t1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(q, "timestamp:[2026-01-01T00:00:00Z TO *]") {
+		t.Fatalf("unbounded upper bound wrong: %q", q)
+	}
+}
+
+func TestBuildLogQuery_RelativeSince(t *testing.T) {
+	q, err := buildQuery(t, "since=2h", "t1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(q, "timestamp:[") || !strings.Contains(q, " TO *]") {
+		t.Fatalf("relative since should produce a lower-bounded open range: %q", q)
+	}
+	// The computed lower bound must be ~2h ago, not now or the epoch.
+	lo := extractLowerBound(t, q)
+	if age := time.Since(lo); age < 110*time.Minute || age > 130*time.Minute {
+		t.Fatalf("since=2h produced lower bound %s ago, want ~2h", age)
+	}
+}
+
+func TestBuildLogQuery_SinceDaysUnit(t *testing.T) {
+	// 'd' (days) is our extension over Go's ParseDuration, which stops at hours.
+	q, err := buildQuery(t, "since=7d", "t1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	lo := extractLowerBound(t, q)
+	if age := time.Since(lo); age < 167*time.Hour || age > 169*time.Hour {
+		t.Fatalf("since=7d produced lower bound %s ago, want ~168h", age)
+	}
+}
+
+func TestBuildLogQuery_BadTimeRejected(t *testing.T) {
+	for _, bad := range []string{"start=yesterday", "end=not-a-time", "since=lots"} {
+		if _, err := buildQuery(t, bad, "t1"); err == nil {
+			t.Errorf("expected an error for %q", bad)
+		}
+	}
+}
+
+// extractLowerBound pulls the RFC3339 lower bound out of a timestamp:[lo TO hi]
+// clause so tests can assert on the computed relative time.
+func extractLowerBound(t *testing.T, query string) time.Time {
+	t.Helper()
+	i := strings.Index(query, "timestamp:[")
+	if i < 0 {
+		t.Fatalf("no timestamp clause in %q", query)
+	}
+	rest := query[i+len("timestamp:["):]
+	lo, _, ok := strings.Cut(rest, " TO ")
+	if !ok {
+		t.Fatalf("malformed range clause in %q", query)
+	}
+	ts, err := time.Parse(time.RFC3339, lo)
+	if err != nil {
+		t.Fatalf("lower bound %q not RFC3339: %v", lo, err)
+	}
+	return ts
 }
 
 func TestIngest_ValidLevelsPassThrough(t *testing.T) {

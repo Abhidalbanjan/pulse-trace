@@ -35,20 +35,26 @@ export function RUMView() {
       .finally(() => setLoading(false));
   }, []);
 
-  const getMetricAvg = (name: string) => {
+  // Core Web Vitals are rated at the 75th percentile (Google's methodology), so
+  // read p75_value — the number the good/needs-improvement/poor thresholds below
+  // are actually defined against. Falls back to avg_value for older API responses.
+  const getMetricP75 = (name: string) => {
     const m = metrics.find(x => x.MetricName === name);
-    return m ? Math.round(m.avg_value) : 0;
+    if (!m) return 0;
+    const v = m.p75_value ?? m.avg_value;
+    return name === 'CLS' ? Number(v) : Math.round(v);
   };
 
   const getMetricCount = (type: string) => {
     return metrics.filter(x => x.Type === type).reduce((acc, curr) => acc + parseInt(curr.count, 10), 0);
   };
 
-  const lcp = getMetricAvg('LCP');
-  const cls = getMetricAvg('CLS');
+  const lcp = getMetricP75('LCP');
+  const cls = getMetricP75('CLS');
   const pageViews = getMetricCount('page_view');
 
-  // Format based on Datadog thresholds
+  // Core Web Vitals thresholds (evaluated at p75): LCP good < 2.5s / poor > 4s;
+  // CLS good < 0.1 / poor > 0.25.
   const lcpColor = lcp === 0 ? t.text2 : lcp < 2500 ? t.green : lcp < 4000 ? t.amber : t.red;
   const clsColor = cls === 0 ? t.text2 : cls < 0.1 ? t.green : cls < 0.25 ? t.amber : t.red;
 
@@ -100,7 +106,7 @@ export function RUMView() {
               <h3 style={{ fontSize: '16px', fontWeight: 700, margin: '0 0 20px' }}>Core Web Vitals</h3>
 
               <div>
-                <div style={{ fontSize: '13px', color: t.text2, marginBottom: '6px' }}>Largest Contentful Paint (LCP)</div>
+                <div style={{ fontSize: '13px', color: t.text2, marginBottom: '6px' }}>Largest Contentful Paint (LCP) · p75</div>
                 <div style={{ fontSize: '30px', fontWeight: 700, color: lcpColor }}>
                   {lcp === 0 ? '--' : `${(lcp / 1000).toFixed(2)}s`}
                 </div>
@@ -108,7 +114,7 @@ export function RUMView() {
               </div>
 
               <div style={{ marginTop: '20px', paddingTop: '20px', borderTop: '1px solid ' + t.panelBorder }}>
-                <div style={{ fontSize: '13px', color: t.text2, marginBottom: '6px' }}>Cumulative Layout Shift (CLS)</div>
+                <div style={{ fontSize: '13px', color: t.text2, marginBottom: '6px' }}>Cumulative Layout Shift (CLS) · p75</div>
                 <div style={{ fontSize: '30px', fontWeight: 700, color: clsColor }}>
                   {cls === 0 ? '--' : cls.toFixed(3)}
                 </div>

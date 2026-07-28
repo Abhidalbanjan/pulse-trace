@@ -45,6 +45,19 @@ export function SyntheticsView() {
     }
   };
 
+  const handleDelete = async (url: string) => {
+    if (!confirm(`Stop monitoring ${url}?`)) return;
+    try {
+      const res = await fetchWithAuth(`/api/v1/synthetics/tests?url=${encodeURIComponent(url)}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setResults((prev) => prev.filter((r) => r.URL !== url));
+    } catch (err: any) {
+      alert(`Failed to delete test: ${err.message}`);
+    }
+  };
+
   const totalTests = results.length;
   const failingTests = results.filter(r => r.uptime_percent < 100).length;
   const globalUptime = totalTests > 0
@@ -199,12 +212,13 @@ export function SyntheticsView() {
                   <th style={{ padding: '16px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Endpoint URL</th>
                   <th style={{ padding: '16px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Avg Latency</th>
                   <th style={{ padding: '16px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Uptime (1h)</th>
+                  <th style={{ padding: '16px', fontWeight: 600, color: t.text2, fontSize: '12.5px', width: '60px' }}></th>
                 </tr>
               </thead>
               <tbody>
                 {results.length === 0 ? (
                   <tr>
-                    <td colSpan={4} style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>No synthetic tests have run yet.</td>
+                    <td colSpan={5} style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>No synthetic tests have run yet.</td>
                   </tr>
                 ) : (
                   results.map((r, i) => (
@@ -227,6 +241,15 @@ export function SyntheticsView() {
                       </td>
                       <td style={{ padding: '16px', fontSize: '13.5px', color: parseFloat(r.uptime_percent) >= 99.9 ? t.green : t.red }}>
                         {parseFloat(r.uptime_percent).toFixed(2)}%
+                      </td>
+                      <td style={{ padding: '16px', textAlign: 'right' }}>
+                        <button
+                          onClick={() => handleDelete(r.URL)}
+                          title="Stop monitoring this endpoint"
+                          style={{ background: 'transparent', border: 'none', color: t.text2, cursor: 'pointer', fontSize: '16px', lineHeight: 1, padding: '2px 6px' }}
+                        >
+                          ✕
+                        </button>
                       </td>
                     </tr>
                   ))

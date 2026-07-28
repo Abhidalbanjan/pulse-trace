@@ -279,6 +279,7 @@ func main() {
 	// Synthetics API
 	mux.HandleFunc("GET /api/v1/synthetics/results", syntheticsHandler.GetResults)
 	mux.HandleFunc("POST /api/v1/synthetics/tests", syntheticsHandler.CreateTarget)
+	mux.HandleFunc("DELETE /api/v1/synthetics/tests", syntheticsHandler.DeleteTarget)
 
 	// Mock SaaS Control Plane endpoint for Zero-Data-Egress metadata
 	mux.HandleFunc("POST /api/v1/control-plane/incidents", func(w http.ResponseWriter, r *http.Request) {

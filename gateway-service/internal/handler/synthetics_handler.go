@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -141,6 +144,12 @@ func (h *SyntheticsHandler) StartWorker() {
 			now := time.Now()
 
 			for _, tgt := range endpoints {
+				// Belt-and-suspenders: skip any target that fails SSRF validation,
+				// in case a row predates validateProbeURL or was inserted out of band.
+				if err := validateProbeURL(tgt.url); err != nil {
+					log.Printf("[SyntheticsWorker] skipping disallowed target %q: %v", tgt.url, err)
+					continue
+				}
 				start := time.Now()
 				resp, err := client.Get(tgt.url)
 				latency := float64(time.Since(start).Milliseconds())
@@ -212,7 +221,7 @@ func (h *SyntheticsHandler) flushResults(results []SyntheticResult) {
 
 	req, _ := http.NewRequest("POST", h.ClickHouseURL, &insertQuery)
 	req.SetBasicAuth(clickhouseUser, clickhousePassword)
-	
+
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -261,12 +270,75 @@ func (h *SyntheticsHandler) GetResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode == http.StatusNotFound {
 		io.WriteString(w, `{"data": []}`)
 		return
 	}
 	io.Copy(w, resp.Body)
+}
+
+// validateProbeURL guards against SSRF: the synthetics worker runs inside the
+// cluster and will issue a GET to whatever URL a tenant registers, so an
+// unvalidated target could be pointed at the cloud metadata endpoint
+// (169.254.169.254), localhost, or a private-range internal service. This
+// rejects anything that isn't a plain http(s) URL to a public host.
+//
+// It's pure (no DNS) so it's unit-testable and can't be defeated by a slow
+// resolver; the handler layers a best-effort DNS resolution check on top for
+// hostnames that resolve into private ranges. Literal-IP targets — the direct
+// attack — are fully blocked here.
+func validateProbeURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("not a valid URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("only http and https URLs may be probed")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("URL has no host")
+	}
+	if strings.EqualFold(host, "localhost") {
+		return fmt.Errorf("localhost is not a permitted probe target")
+	}
+	// If the host is a literal IP, classify it directly.
+	if ip := net.ParseIP(host); ip != nil && !isPublicIP(ip) {
+		return fmt.Errorf("private, loopback, or link-local addresses may not be probed")
+	}
+	return nil
+}
+
+// isPublicIP reports whether ip is a globally routable unicast address — i.e.
+// not loopback, private (RFC1918 / ULA), link-local (incl. 169.254.0.0/16
+// cloud metadata), or unspecified.
+func isPublicIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	return true
+}
+
+// resolvesToPrivate is the handler-side DNS check: a hostname that resolves
+// entirely (or partly) into non-public space is refused too, catching
+// internal.corp-style names pointing at private IPs. Best-effort — a resolution
+// failure is treated as "can't confirm private" and left to the literal checks.
+func resolvesToPrivate(host string) bool {
+	if net.ParseIP(host) != nil {
+		return false // literal IPs are handled by validateProbeURL
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return false
+	}
+	for _, ip := range ips {
+		if !isPublicIP(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateTarget registers a new synthetic endpoint
@@ -276,6 +348,15 @@ func (h *SyntheticsHandler) CreateTarget(w http.ResponseWriter, r *http.Request)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.URL == "" {
 		http.Error(w, "invalid JSON or missing url", http.StatusBadRequest)
+		return
+	}
+
+	if err := validateProbeURL(payload.URL); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if u, _ := url.Parse(strings.TrimSpace(payload.URL)); u != nil && resolvesToPrivate(u.Hostname()) {
+		http.Error(w, "host resolves to a private or loopback address", http.StatusBadRequest)
 		return
 	}
 
@@ -298,4 +379,38 @@ func (h *SyntheticsHandler) CreateTarget(w http.ResponseWriter, r *http.Request)
 
 	w.WriteHeader(http.StatusCreated)
 	io.WriteString(w, `{"status":"ok"}`)
+}
+
+// DeleteTarget removes a synthetic endpoint for the caller's tenant.
+//
+//	DELETE /api/v1/synthetics/tests?url=<url>
+func (h *SyntheticsHandler) DeleteTarget(w http.ResponseWriter, r *http.Request) {
+	target := r.URL.Query().Get("url")
+	if target == "" {
+		http.Error(w, "url query parameter is required", http.StatusBadRequest)
+		return
+	}
+	if h.DB == nil {
+		http.Error(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	res, err := h.DB.Exec("DELETE FROM synthetic_targets WHERE tenant_id = $1 AND url = $2", tenantID, target)
+	if err != nil {
+		log.Printf("[SyntheticsHandler] Failed to delete target: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		http.Error(w, "target not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	io.WriteString(w, `{"status":"deleted"}`)
 }

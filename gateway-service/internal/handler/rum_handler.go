@@ -144,7 +144,7 @@ func (h *RUMHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 
 	req, _ := http.NewRequest("POST", h.ClickHouseURL, &insertQuery)
 	req.SetBasicAuth(clickhouseUser, clickhousePassword)
-	
+
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -186,11 +186,18 @@ func (h *RUMHandler) tenantQuery(r *http.Request, query string) (*http.Response,
 func (h *RUMHandler) GetAnalytics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
+	// Web Vitals are reported at the 75th percentile per Google's Core Web Vitals
+	// methodology (a p75 LCP is what a "good/needs-improvement/poor" rating keys
+	// off), so p75 is the number that actually matters — avg understates the tail
+	// real users feel. We surface both: p75_value for the rating, avg_value for
+	// the trend line, and p95_value for the worst-case.
 	query := `
 		SELECT
 			Type,
 			MetricName,
 			avg(MetricValue) as avg_value,
+			quantile(0.75)(MetricValue) as p75_value,
+			quantile(0.95)(MetricValue) as p95_value,
 			count() as count
 		FROM pulsetrace.rum_events
 		WHERE TenantID = {tenant:String} AND Timestamp >= now() - INTERVAL 24 HOUR

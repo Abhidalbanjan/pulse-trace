@@ -1,10 +1,12 @@
 package otlp
 
 import (
+	"crypto/tls"
 	"log"
 	"net"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -48,12 +50,25 @@ func NewReceiver(resolver TenantResolver, requireKey bool, upstreamAddr string, 
 // Start binds listenAddr and serves the OTLP trace/metrics/logs services in a
 // background goroutine. Returns once the listener is bound (or an error if the
 // bind fails), so startup ordering is deterministic.
-func (r *Receiver) Start(listenAddr string) error {
+//
+// tlsConfig (from BuildServerTLS) serves the receiver over TLS/mTLS so the
+// ingestion key isn't sent in cleartext; nil keeps a plaintext listener and logs
+// a warning, since that's only safe behind a TLS-terminating LB/ingress.
+func (r *Receiver) Start(listenAddr string, tlsConfig *tls.Config) error {
 	lis, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return err
 	}
-	r.grpcServer = grpc.NewServer()
+
+	var opts []grpc.ServerOption
+	if tlsConfig != nil {
+		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
+		mtls := tlsConfig.ClientAuth == tls.RequireAndVerifyClientCert
+		log.Printf("otlp: gRPC receiver TLS enabled (mTLS client-cert required: %v)", mtls)
+	} else {
+		log.Printf("otlp: WARNING — gRPC receiver on %s is plaintext; the ingestion key travels in the clear unless a TLS-terminating LB/ingress fronts it. Set OTLP_TLS_CERT_FILE/OTLP_TLS_KEY_FILE to serve TLS directly.", listenAddr)
+	}
+	r.grpcServer = grpc.NewServer(opts...)
 	coltracepb.RegisterTraceServiceServer(r.grpcServer, &traceServer{stamper: r.stamper, up: r.traceClient})
 	colmetricspb.RegisterMetricsServiceServer(r.grpcServer, &metricsServer{stamper: r.stamper, up: r.metricsClient})
 	collogspb.RegisterLogsServiceServer(r.grpcServer, &logsServer{stamper: r.stamper, up: r.logsClient})

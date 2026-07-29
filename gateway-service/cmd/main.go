@@ -337,7 +337,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("gateway-service: failed to create OTLP receiver: %v", err)
 	}
-	if err := otlpReceiver.Start(":4317"); err != nil {
+	// Optional TLS/mTLS for the OTLP/gRPC listener, so the per-tenant ingestion
+	// key isn't carried in cleartext. Disabled by default (plaintext) for local
+	// dev and for deployments that terminate TLS at an upstream LB/ingress.
+	otlpTLS, err := otlp.BuildServerTLS(
+		getEnv("OTLP_TLS_CERT_FILE", ""),
+		getEnv("OTLP_TLS_KEY_FILE", ""),
+		getEnv("OTLP_TLS_CLIENT_CA_FILE", ""),
+	)
+	if err != nil {
+		log.Fatalf("gateway-service: invalid OTLP TLS configuration: %v", err)
+	}
+	if err := otlpReceiver.Start(":4317", otlpTLS); err != nil {
 		log.Fatalf("gateway-service: failed to start OTLP receiver: %v", err)
 	}
 

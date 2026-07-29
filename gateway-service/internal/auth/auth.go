@@ -198,10 +198,12 @@ func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
 			r.Header.Del("X-User-Subject")
 
 			// Route classification.
-			// NOTE: the OTLP/gRPC path (port 4317) is a raw TCP tunnel that bypasses
-			// this middleware entirely, so it can't be key-authenticated here — that
-			// needs collector-level auth and is tracked as a follow-up. This covers
-			// every HTTP ingestion path.
+			// NOTE: this middleware covers only the HTTP ingestion paths below. The
+			// OTLP/gRPC path (:4317) is NOT a bypass — it's terminated in-process by
+			// the otlp.Receiver, which does its own ingestion-key auth, scope check,
+			// tenant stamping, quota and metering on every export (see
+			// internal/otlp/tenant.go). It just can't reuse this HTTP middleware, so
+			// the equivalent checks live there instead.
 			isOTLPHTTP := strings.HasPrefix(r.URL.Path, "/v1/traces") ||
 				strings.HasPrefix(r.URL.Path, "/v1/metrics") ||
 				strings.HasPrefix(r.URL.Path, "/v1/logs")

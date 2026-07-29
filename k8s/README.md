@@ -56,5 +56,7 @@ customer's in-cluster Vault (enterprise on-prem).
 | Key | Why it matters |
 | --- | --- |
 | `JWT_SECRET` | Required. If unset, gateway-service uses a random per-process secret and every session dies on restart. |
-| `REQUIRE_INGESTION_KEY` | Set `"true"` for any multi-tenant deployment. When true, telemetry ingestion must present a valid per-tenant ingestion key (`Authorization: Bearer <key>`), so tenant identity can't be spoofed via a header. Mint keys with `POST /api/v1/admin/ingestion-keys`. |
+| `REQUIRE_INGESTION_KEY` | Set `"true"` for any multi-tenant deployment. When true, telemetry ingestion must present a valid per-tenant ingestion key (`Authorization: Bearer <key>`), so tenant identity can't be spoofed via a header. Enforced identically on the HTTP paths **and** the in-process OTLP/gRPC receiver (:4317). Mint keys with `POST /api/v1/admin/ingestion-keys`. |
+| `OTLP_TLS_CERT_FILE` / `OTLP_TLS_KEY_FILE` | Serve the OTLP/gRPC receiver (:4317) over TLS so the ingestion key isn't sent in cleartext. Mount the cert/key from a Secret and point these at the files. Omit both only when a TLS-terminating LB/ingress already fronts :4317. Setting just one fails startup. |
+| `OTLP_TLS_CLIENT_CA_FILE` | Optional. Requires mTLS on :4317 — clients must present a cert signed by this CA, a transport-level auth factor on top of the ingestion key. |
 | `PLAYBOOK_HMAC_SECRET` | Must be identical on correlation-service and topology-service. |

@@ -23,6 +23,7 @@ import (
 	"github.com/pulsetrace/gateway-service/internal/quota"
 	"github.com/pulsetrace/gateway-service/internal/tenantdata"
 	gatewaymigrations "github.com/pulsetrace/gateway-service/migrations"
+	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/metering"
 	"github.com/pulsetrace/shared/middleware"
 	"github.com/pulsetrace/shared/migrate"
@@ -346,6 +347,19 @@ func main() {
 	// before the server starts serving (below), so it's race-free even though the
 	// mux is already wrapped by the middleware chain.
 	migrationProxy := ingestproxy.New(otlpReceiver, ingestionKeys, auth.RequireIngestionKey())
+	// Route migration logs (Datadog /api/v2/logs, Splunk HEC) through the native
+	// log path — published to Kafka as LogEntry records so Quickwit indexes them
+	// into the pulsetrace-logs index the log explorer reads, instead of only
+	// reaching ClickHouse otel_logs (which the explorer never queries). If Kafka
+	// isn't reachable at startup, we log and leave the proxy on its OTLP fallback
+	// rather than blocking gateway boot on the optional migration feature.
+	if logProducer, err := kafka.NewProducer(); err != nil {
+		log.Printf("WARNING: migration log publishing to Quickwit disabled (kafka unavailable): %v", err)
+	} else {
+		defer logProducer.Close()
+		migrationProxy.SetLogSink(logProducer, usageMeter.Record, quotaEnforcer.Allow)
+		log.Printf("migration logs → Kafka topic 'logs' → Quickwit (log explorer)")
+	}
 	migrationProxy.RegisterRoutes(mux)
 	// Optional TLS/mTLS for the OTLP/gRPC listener, so the per-tenant ingestion
 	// key isn't carried in cleartext. Disabled by default (plaintext) for local

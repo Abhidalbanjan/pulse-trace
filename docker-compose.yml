@@ -456,6 +456,11 @@ services:
       # collector, not the default localhost:4317 — otherwise the gateway
       # forwards to its own :4317 receiver in an infinite loop.
       OTEL_COLLECTOR_GRPC_ADDR: otel-collector:4317
+      # Publishes Datadog/Splunk migration logs to the 'logs' topic so Quickwit
+      # indexes them into pulsetrace-logs (the log explorer's source), the same
+      # native path log-service uses. Without a broker the gateway still boots
+      # and falls back to forwarding migration logs to ClickHouse via OTLP.
+      KAFKA_BROKERS: kafka:29092
       REDIS_ADDR: redis:6379
       PORT: "8080"
       CLICKHOUSE_URL: http://clickhouse:8123
@@ -474,6 +479,7 @@ services:
       - topology-service
       - otel-collector
       - redis
+      - kafka
 
   # ── Action Service (Auto-Remediation Engine) ────────────────────────────────────
   # Previously built but never wired into docker-compose, so RESTART_PODS/SCALE/

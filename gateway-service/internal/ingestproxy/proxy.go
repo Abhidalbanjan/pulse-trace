@@ -20,6 +20,7 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 
 	"github.com/pulsetrace/gateway-service/internal/auth"
+	"github.com/pulsetrace/shared/models"
 )
 
 // Forwarder is the tenant-stamping OTLP forward path (satisfied by
@@ -52,10 +54,63 @@ type Proxy struct {
 	fwd        Forwarder
 	resolver   TenantResolver
 	requireKey bool
+
+	// Optional log sink. When logPub is set, migration logs are published as
+	// native LogEntry records to Kafka (→ Quickwit → log explorer) instead of
+	// being forwarded as OTLP to ClickHouse otel_logs, and are metered/quota-
+	// checked here (meter/allow) since they no longer traverse the OTLP forward.
+	logPub LogPublisher
+	meter  MeterFunc
+	allow  QuotaFunc
 }
 
 func New(fwd Forwarder, resolver TenantResolver, requireKey bool) *Proxy {
 	return &Proxy{fwd: fwd, resolver: resolver, requireKey: requireKey}
+}
+
+// SetLogSink wires the native log path for migration logs. Once set, DatadogLogs
+// and the Splunk HEC log events publish LogEntry records to Kafka (so they land
+// in the same Quickwit index the log explorer reads) rather than forwarding OTLP
+// logs to ClickHouse. meter/allow keep per-tenant usage accounting and quotas
+// intact on that path. When it isn't set (e.g. unit tests, or Kafka unavailable
+// at startup), the handlers fall back to the OTLP forward.
+func (p *Proxy) SetLogSink(pub LogPublisher, meter MeterFunc, allow QuotaFunc) {
+	p.logPub, p.meter, p.allow = pub, meter, allow
+}
+
+// publishLogs meters, quota-checks, and publishes native LogEntry records for a
+// migration request. Returns (handled, err): handled=false means no log sink is
+// wired and the caller should fall back to the OTLP forward. A quota rejection is
+// surfaced as an error the caller maps to 429.
+func (p *Proxy) publishLogs(ctx context.Context, tenantID string, entries []*models.LogEntry) (handled bool, err error) {
+	if p.logPub == nil {
+		return false, nil
+	}
+	if len(entries) == 0 {
+		return true, nil
+	}
+	if p.allow != nil && !p.allow(ctx, tenantID, "logs") {
+		return true, errQuotaExceeded
+	}
+	if err := p.logPub.PublishBatch(ctx, logsTopic, entries); err != nil {
+		return true, err
+	}
+	if p.meter != nil {
+		p.meter(ctx, tenantID, "logs", int64(len(entries)))
+	}
+	return true, nil
+}
+
+// errQuotaExceeded is mapped to HTTP 429 by writeLogSinkError.
+var errQuotaExceeded = errors.New("ingestion quota exceeded")
+
+// writeLogSinkError translates a publishLogs error into an HTTP response.
+func writeLogSinkError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errQuotaExceeded) {
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		return
+	}
+	http.Error(w, "failed to publish logs", http.StatusBadGateway)
 }
 
 // RegisterRoutes wires the Datadog trace-agent and Splunk HEC intake endpoints.

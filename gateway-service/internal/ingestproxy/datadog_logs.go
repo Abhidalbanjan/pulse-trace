@@ -42,7 +42,16 @@ func (p *Proxy) DatadogLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid Datadog logs payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req := ddLogsToOTLP(logs); len(req.GetResourceLogs()) > 0 {
+
+	// Preferred path: publish as native LogEntry records to Kafka so the logs
+	// land in the same Quickwit index the log explorer reads. Falls back to the
+	// OTLP forward (→ ClickHouse otel_logs) when no log sink is wired.
+	if handled, err := p.publishLogs(r.Context(), tenantID, ddLogsToEntries(logs, tenantID, tier)); handled {
+		if err != nil {
+			writeLogSinkError(w, err)
+			return
+		}
+	} else if req := ddLogsToOTLP(logs); len(req.GetResourceLogs()) > 0 {
 		if err := p.fwd.ForwardLogs(r.Context(), tenantID, tier, req); err != nil {
 			httpForwardError(w, err)
 			return

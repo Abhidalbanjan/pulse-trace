@@ -80,6 +80,14 @@ spec:
                 configMapKeyRef:
                   name: pulsetrace-config
                   key: OTEL_EXPORTER_OTLP_ENDPOINT
+            # Lets the gateway publish Datadog/Splunk migration logs to Kafka so
+            # they're indexed into Quickwit's pulsetrace-logs index (the log
+            # explorer's source). Falls back to OTLP→ClickHouse if unreachable.
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: KAFKA_BROKERS
             # Forward target for the in-process OTLP receiver — must be the
             # collector, not the localhost:4317 default (which self-loops).
             - name: OTEL_COLLECTOR_GRPC_ADDR

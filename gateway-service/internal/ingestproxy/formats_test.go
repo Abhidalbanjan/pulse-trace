@@ -3,15 +3,19 @@ package ingestproxy
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
 
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
+
+	"github.com/pulsetrace/shared/models"
 )
 
 // ── Datadog v0.5 traces ─────────────────────────────────────────────────────
@@ -230,5 +234,133 @@ func TestDatadogTraces_GzipBody(t *testing.T) {
 	}
 	if f.traces == nil || len(f.traces.GetResourceSpans()) != 2 {
 		t.Fatal("gzip-encoded DD traces were not decompressed/forwarded")
+	}
+}
+
+// ── Native log path (Kafka → Quickwit → log explorer) ────────────────────────
+
+// fakeLogPublisher captures the LogEntry batch that would go to Kafka.
+type fakeLogPublisher struct {
+	topic   string
+	entries []*models.LogEntry
+	err     error
+}
+
+func (f *fakeLogPublisher) PublishBatch(_ context.Context, topic string, entries []*models.LogEntry) error {
+	f.topic, f.entries = topic, entries
+	return f.err
+}
+
+// When a log sink is wired, DD logs must be published as native LogEntry records
+// (so Quickwit indexes them into the pulsetrace-logs index the explorer reads),
+// tenant-stamped and metered — not forwarded as OTLP to ClickHouse.
+func TestDatadogLogs_PublishesNativeEntries(t *testing.T) {
+	f := &fakeForwarder{}
+	pub := &fakeLogPublisher{}
+	var metered int64
+	allowed := false
+	p := newProxy(f, true)
+	p.SetLogSink(pub,
+		func(_ context.Context, _, signal string, count int64) {
+			if signal == "logs" {
+				metered += count
+			}
+		},
+		func(_ context.Context, _, _ string) bool { allowed = true; return true },
+	)
+
+	body := `[{"message":"boom","ddsource":"nginx","service":"web","hostname":"h1","ddtags":"env:prod,team:core","status":"error","timestamp":1700000000000}]`
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/logs", strings.NewReader(body))
+	req.Header.Set("DD-API-KEY", "k-acme")
+	rr := httptest.NewRecorder()
+	p.DatadogLogs(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if f.logs != nil {
+		t.Fatal("logs should go to Kafka (native path), not the OTLP forward, when a sink is wired")
+	}
+	if pub.topic != "logs" || len(pub.entries) != 1 {
+		t.Fatalf("expected 1 entry on topic 'logs', got %d on %q", len(pub.entries), pub.topic)
+	}
+	e := pub.entries[0]
+	if e.TenantID != "acme" || e.TenantTier != "premium" {
+		t.Errorf("entry not tenant-stamped: %q/%q", e.TenantID, e.TenantTier)
+	}
+	if e.ServiceName != "web" || e.Level != models.LogLevelError || e.Message != "boom" {
+		t.Errorf("entry fields wrong: svc=%q level=%q msg=%q", e.ServiceName, e.Level, e.Message)
+	}
+	if e.ID == "" {
+		t.Error("entry ID should be generated")
+	}
+	if !e.Timestamp.Equal(time.Unix(0, 1700000000000*1e6).UTC()) {
+		t.Errorf("entry timestamp (ms→time) wrong: %v", e.Timestamp)
+	}
+	meta := map[string]string{}
+	_ = json.Unmarshal([]byte(e.Metadata), &meta)
+	if meta["team"] != "core" || meta["datadog.source"] != "nginx" || meta["host.name"] != "h1" {
+		t.Errorf("metadata not carried from ddtags/fields: %v", meta)
+	}
+	if !allowed || metered != 1 {
+		t.Errorf("native log path must meter/quota-check: allowed=%v metered=%d", allowed, metered)
+	}
+}
+
+// A quota rejection on the native log path surfaces as HTTP 429 and nothing is
+// published.
+func TestDatadogLogs_QuotaExceeded(t *testing.T) {
+	f := &fakeForwarder{}
+	pub := &fakeLogPublisher{}
+	p := newProxy(f, true)
+	p.SetLogSink(pub, nil, func(_ context.Context, _, _ string) bool { return false })
+
+	body := `{"message":"boom","service":"web","status":"info"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/logs", strings.NewReader(body))
+	req.Header.Set("DD-API-KEY", "k-acme")
+	rr := httptest.NewRecorder()
+	p.DatadogLogs(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d", rr.Code)
+	}
+	if len(pub.entries) != 0 {
+		t.Error("nothing should be published when over quota")
+	}
+}
+
+// Splunk HEC log events also take the native path when a sink is wired; metric
+// events still go to the metrics forward.
+func TestSplunkHEC_PublishesNativeLogEntries(t *testing.T) {
+	f := &fakeForwarder{}
+	pub := &fakeLogPublisher{}
+	p := newProxy(f, true)
+	p.SetLogSink(pub, func(context.Context, string, string, int64) {}, func(context.Context, string, string) bool { return true })
+
+	body := `{"time":1700000000,"event":"metric","fields":{"metric_name":"cpu.usage","_value":73.2,"region":"us"}}
+{"event":"a normal log line","source":"app","fields":{"level":"warn"}}`
+	req := httptest.NewRequest(http.MethodPost, "/services/collector", strings.NewReader(body))
+	req.Header.Set("Authorization", "Splunk k-acme")
+	rr := httptest.NewRecorder()
+	p.SplunkHEC(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if f.metrics == nil {
+		t.Fatal("metric event should still be forwarded as a metric")
+	}
+	if f.logs != nil {
+		t.Fatal("log event should go to Kafka, not the OTLP forward")
+	}
+	if len(pub.entries) != 1 {
+		t.Fatalf("expected 1 published log entry, got %d", len(pub.entries))
+	}
+	e := pub.entries[0]
+	if e.ServiceName != "app" || e.Level != models.LogLevelWarning || e.Message != "a normal log line" {
+		t.Errorf("splunk log entry wrong: svc=%q level=%q msg=%q", e.ServiceName, e.Level, e.Message)
+	}
+	if e.TenantID != "acme" {
+		t.Errorf("splunk log entry not tenant-stamped: %q", e.TenantID)
 	}
 }

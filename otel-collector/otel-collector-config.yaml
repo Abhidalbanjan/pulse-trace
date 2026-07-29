@@ -159,11 +159,13 @@ service:
       processors: [batch]
       exporters: [prometheus, clickhouse/metrics]
 
-    # Logs pipeline: OTLP logs (native, plus the Datadog/Splunk migration logs the
-    # gateway translates and tenant-stamps) are persisted to ClickHouse otel_logs.
-    # Without this pipeline the collector silently drops OTLP logs — the product's
-    # primary log path is Vector→log-service→Quickwit, but migration logs arrive as
-    # OTLP and need a sink of their own.
+    # Logs pipeline: persists OTLP logs to ClickHouse otel_logs. Without it the
+    # collector silently drops OTLP logs. The product's primary log path is
+    # Vector→log-service→Quickwit (the log explorer's source); Datadog/Splunk
+    # migration logs now join that path too — the gateway publishes them to Kafka
+    # as native LogEntry records so they show up in the explorer. This pipeline is
+    # therefore the sink for genuine OTLP-native logs, and the gateway's fallback
+    # for migration logs when Kafka is unreachable at startup.
     logs:
       receivers: [otlp]
       processors: [resource, batch]

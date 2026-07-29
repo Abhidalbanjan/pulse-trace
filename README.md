@@ -573,9 +573,15 @@ Splunk endpoints: `POST /services/collector`, `/services/collector/event`,
 `/services/collector/raw`. HEC **metric** events (fields carrying a
 `metric_name`) are routed to the metrics pillar; everything else is a log.
 
-All of the above land in ClickHouse (`otel_traces` / `otel_metrics_*` /
-`otel_logs`) with the resolved `tenant.id` resource attribute — verified
-end-to-end — so migrated telemetry is tenant-isolated exactly like native OTLP.
+Traces and metrics land in ClickHouse (`otel_traces` / `otel_metrics_*`) with the
+resolved `tenant.id` resource attribute. **Migration logs** join the product's
+native log path — the gateway publishes them to Kafka as `LogEntry` records, so
+Quickwit indexes them into the `pulsetrace-logs` index and they appear in the
+**log explorer UI** alongside native logs, scoped by `tenant_id` (metered and
+quota-checked like native ingestion). If the broker is unreachable at startup the
+gateway falls back to forwarding logs to ClickHouse `otel_logs` via OTLP. Either
+way, migrated telemetry is tenant-isolated exactly like native OTLP — verified
+end-to-end.
 
 Mint keys with `POST /api/v1/admin/ingestion-keys`. When `REQUIRE_INGESTION_KEY`
 is unset (dev), un-keyed migration traffic is accepted as the `default` tenant;

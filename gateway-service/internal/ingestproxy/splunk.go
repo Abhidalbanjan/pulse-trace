@@ -72,13 +72,29 @@ func (p *Proxy) SplunkHEC(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(logEvents) > 0 {
-		lreq := hecEventsToOTLP(logEvents)
-		if err := p.fwd.ForwardLogs(r.Context(), tenantID, tier, lreq); err != nil {
-			httpForwardError(w, err)
+		if !p.forwardHECLogs(w, r, tenantID, tier, logEvents) {
 			return
 		}
 	}
 	writeHECResponse(w, http.StatusOK)
+}
+
+// forwardHECLogs sends Splunk HEC log events to the native Kafka path (so they
+// reach the log explorer) when a log sink is wired, else the OTLP forward. It
+// writes the error response itself and returns false on failure.
+func (p *Proxy) forwardHECLogs(w http.ResponseWriter, r *http.Request, tenantID, tier string, logEvents []hecEvent) bool {
+	if handled, err := p.publishLogs(r.Context(), tenantID, hecLogsToEntries(logEvents, tenantID, tier)); handled {
+		if err != nil {
+			writeLogSinkError(w, err)
+			return false
+		}
+		return true
+	}
+	if err := p.fwd.ForwardLogs(r.Context(), tenantID, tier, hecEventsToOTLP(logEvents)); err != nil {
+		httpForwardError(w, err)
+		return false
+	}
+	return true
 }
 
 // partitionHEC splits events into (logs, metrics). A metric event is identified
@@ -199,9 +215,7 @@ func (p *Proxy) SplunkHECRaw(w http.ResponseWriter, r *http.Request) {
 		Index:      q.Get("index"),
 		Event:      json.RawMessage(strconv.Quote(string(body))), // treat raw body as a string event
 	}
-	req := hecEventsToOTLP([]hecEvent{e})
-	if err := p.fwd.ForwardLogs(r.Context(), tenantID, tier, req); err != nil {
-		httpForwardError(w, err)
+	if !p.forwardHECLogs(w, r, tenantID, tier, []hecEvent{e}) {
 		return
 	}
 	writeHECResponse(w, http.StatusOK)

@@ -59,4 +59,30 @@ customer's in-cluster Vault (enterprise on-prem).
 | `REQUIRE_INGESTION_KEY` | Set `"true"` for any multi-tenant deployment. When true, telemetry ingestion must present a valid per-tenant ingestion key (`Authorization: Bearer <key>`), so tenant identity can't be spoofed via a header. Enforced identically on the HTTP paths **and** the in-process OTLP/gRPC receiver (:4317). Mint keys with `POST /api/v1/admin/ingestion-keys`. |
 | `OTLP_TLS_CERT_FILE` / `OTLP_TLS_KEY_FILE` | Serve the OTLP/gRPC receiver (:4317) over TLS so the ingestion key isn't sent in cleartext. Mount the cert/key from a Secret and point these at the files. Omit both only when a TLS-terminating LB/ingress already fronts :4317. Setting just one fails startup. |
 | `OTLP_TLS_CLIENT_CA_FILE` | Optional. Requires mTLS on :4317 — clients must present a cert signed by this CA, a transport-level auth factor on top of the ingestion key. |
+
+### Keep the OTel Collector internal
+
+The gateway is the only authenticated, tenant-attributing ingestion front door —
+including for the Datadog/Splunk "Trojan Horse" migration paths, which it
+terminates and authenticates itself (see the README's "Zero-code migration"
+section). The **OTel Collector must never be exposed** (no Service of type
+LoadBalancer/NodePort, no Ingress on its OTLP/Datadog/Splunk ports): its native
+receivers do no per-tenant auth or tenant stamping, so a reachable collector is
+an un-tenanted ingestion bypass. Restrict it with a NetworkPolicy that only
+admits the gateway and internal self-instrumentation, e.g.:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: otel-collector-ingress
+  namespace: pulsetrace
+spec:
+  podSelector:
+    matchLabels: { app: otel-collector }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: {}   # only pods in this namespace (gateway + services)
+```
 | `PLAYBOOK_HMAC_SECRET` | Must be identical on correlation-service and topology-service. |

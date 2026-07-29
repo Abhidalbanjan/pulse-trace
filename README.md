@@ -528,6 +528,50 @@ View traces at **http://localhost:16686** — select any service and click "Find
 
 ---
 
+## Zero-code migration (Datadog / Splunk)
+
+Point your **existing** Datadog agent or Splunk forwarder at PulseTrace by
+changing only the ingestion URL — no re-instrumentation. The gateway accepts the
+native wire formats, **authenticates them with a PulseTrace ingestion key**
+(carried in each protocol's own auth header), translates to OTLP, and stamps the
+tenant — so migrated telemetry lands with the same isolation as native OTLP.
+
+> This is an authenticating, tenant-attributing front door in the gateway
+> ([`internal/ingestproxy`](gateway-service/internal/ingestproxy/)). The
+> collector's own Datadog/Splunk receivers — which do neither — are **not**
+> exposed; agents point at the gateway, never the collector.
+
+**Datadog** — send traces to the gateway and set your PulseTrace ingestion key as
+the API key:
+
+```yaml
+# Datadog Agent (datadog.yaml) or a DD tracing library
+apm_config:
+  apm_dd_url: "http://<gateway-host>:8080"   # was https://trace.agent.datadoghq.com
+api_key: "pt_ingest_<your-pulsetrace-ingestion-key>"
+```
+
+Endpoints: `POST /v0.3/traces`, `POST /v0.4/traces` (JSON and msgpack).
+
+**Splunk** — send HEC events to the gateway with your ingestion key as the HEC
+token:
+
+```bash
+curl http://<gateway-host>:8080/services/collector/event \
+  -H "Authorization: Splunk pt_ingest_<your-pulsetrace-ingestion-key>" \
+  -d '{"event":"hello from splunk","sourcetype":"app","fields":{"env":"prod"}}'
+```
+
+Endpoints: `POST /services/collector`, `/services/collector/event`,
+`/services/collector/raw`.
+
+Mint keys with `POST /api/v1/admin/ingestion-keys`. When `REQUIRE_INGESTION_KEY`
+is unset (dev), un-keyed migration traffic is accepted as the `default` tenant;
+set it to `"true"` for any multi-tenant deployment so a key is mandatory. A
+RUM-scoped key is rejected here — these paths only accept server-ingest keys.
+
+---
+
 ## Running Locally (without Docker)
 
 ```bash

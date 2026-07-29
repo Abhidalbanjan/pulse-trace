@@ -16,6 +16,7 @@ import (
 	"github.com/pulsetrace/gateway-service/internal/auth"
 	"github.com/pulsetrace/gateway-service/internal/billing"
 	"github.com/pulsetrace/gateway-service/internal/handler"
+	"github.com/pulsetrace/gateway-service/internal/ingestproxy"
 	"github.com/pulsetrace/gateway-service/internal/otlp"
 	"github.com/pulsetrace/gateway-service/internal/pii"
 	"github.com/pulsetrace/gateway-service/internal/proxy"
@@ -337,6 +338,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("gateway-service: failed to create OTLP receiver: %v", err)
 	}
+
+	// "Trojan Horse" zero-code migration: accept Datadog agent traces and Splunk
+	// HEC events in their native wire formats, authenticated with a PulseTrace
+	// ingestion key (DD-API-KEY / Splunk token) and tenant-stamped, forwarded
+	// through the same OTLP path as native telemetry. Registered on the mux
+	// before the server starts serving (below), so it's race-free even though the
+	// mux is already wrapped by the middleware chain.
+	migrationProxy := ingestproxy.New(otlpReceiver, ingestionKeys, auth.RequireIngestionKey())
+	migrationProxy.RegisterRoutes(mux)
 	// Optional TLS/mTLS for the OTLP/gRPC listener, so the per-tenant ingestion
 	// key isn't carried in cleartext. Disabled by default (plaintext) for local
 	// dev and for deployments that terminate TLS at an upstream LB/ingress.

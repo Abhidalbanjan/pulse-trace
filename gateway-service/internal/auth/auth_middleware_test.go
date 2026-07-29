@@ -90,6 +90,38 @@ func TestServerIngestRequiresKeyWhenEnforced(t *testing.T) {
 	}
 }
 
+// TestMigrationIngestBypassesJWT asserts the Datadog/Splunk migration paths are
+// not JWT-gated by this middleware (they authenticate via their own protocol
+// header in the ingestproxy handler) — but that the middleware still strips any
+// client-supplied identity headers before passing through, so nothing tenant-
+// identifying is trusted from the caller.
+func TestMigrationIngestBypassesJWT(t *testing.T) {
+	for _, path := range []string{"/v0.4/traces", "/v0.3/traces", "/services/collector", "/services/collector/event"} {
+		var seen http.Header
+		mw := AuthMiddleware(NewIngestionKeyStore(nil))(captureHandler(&seen))
+
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		// Forge identity headers — they must be stripped, not honored.
+		req.Header.Set("X-Tenant-ID", "victim-tenant")
+		req.Header.Set("X-User-Role", "admin")
+		rr := httptest.NewRecorder()
+		mw.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Errorf("%s: expected pass-through (200) with no JWT, got %d", path, rr.Code)
+		}
+		if seen == nil {
+			t.Fatalf("%s: handler should have been reached", path)
+		}
+		if got := seen.Get("X-Tenant-ID"); got != "" {
+			t.Errorf("%s: forged X-Tenant-ID leaked through: %q", path, got)
+		}
+		if got := seen.Get("X-User-Role"); got != "" {
+			t.Errorf("%s: forged X-User-Role leaked through: %q", path, got)
+		}
+	}
+}
+
 // TestIngestionKeyCrossTenantIsolation is a DB-backed check that a key only ever
 // resolves to its OWN tenant, that a revoked key stops resolving, and that an
 // unknown key resolves to nothing. Skips when DATABASE_URL is unset.

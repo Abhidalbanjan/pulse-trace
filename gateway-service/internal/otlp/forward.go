@@ -1,0 +1,43 @@
+package otlp
+
+import (
+	"context"
+
+	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+)
+
+// ForwardTraces and ForwardLogs let another already-authenticated ingestion
+// path (the Datadog/Splunk migration proxy) reuse this receiver's tenant
+// stamping, quota, metering, and upstream connection. The caller has resolved
+// the tenant from its own protocol-native credential (DD-API-KEY / Splunk
+// token) rather than gRPC metadata, so these take the tenant explicitly instead
+// of pulling it from the context the way the gRPC Export handlers do.
+//
+// The stamping is identical to the gRPC path — any client-supplied tenant.id is
+// dropped and the resolved tenant is stamped onto every Resource — so telemetry
+// arriving via a competitor's agent gets the exact same isolation as native OTLP.
+
+func (r *Receiver) ForwardTraces(ctx context.Context, tenantID, tier string, req *coltracepb.ExportTraceServiceRequest) error {
+	if err := r.stamper.checkQuota(ctx, tenantID, "traces"); err != nil {
+		return err
+	}
+	for _, rs := range req.GetResourceSpans() {
+		rs.Resource = stampResource(rs.GetResource(), tenantID, tier)
+	}
+	r.stamper.meter(ctx, tenantID, "traces", countTraceSpans(req))
+	_, err := r.traceClient.Export(ctx, req)
+	return err
+}
+
+func (r *Receiver) ForwardLogs(ctx context.Context, tenantID, tier string, req *collogspb.ExportLogsServiceRequest) error {
+	if err := r.stamper.checkQuota(ctx, tenantID, "logs"); err != nil {
+		return err
+	}
+	for _, rl := range req.GetResourceLogs() {
+		rl.Resource = stampResource(rl.GetResource(), tenantID, tier)
+	}
+	r.stamper.meter(ctx, tenantID, "logs", countLogRecords(req))
+	_, err := r.logsClient.Export(ctx, req)
+	return err
+}

@@ -181,8 +181,11 @@ services:
       - ./otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml
     ports:
       - "8889:8889"
-      - "8126:8126" # Datadog receiver
-      - "8088:8088" # Splunk HEC receiver
+      # Datadog/Splunk ingestion is NOT exposed on the collector anymore — it had
+      # no auth or tenant attribution. Point migrating agents at the gateway
+      # (:8080) instead: it authenticates the DD-API-KEY / Splunk token and
+      # tenant-stamps before forwarding. The collector's own receiver ports stay
+      # internal to the compose network.
     depends_on:
       jaeger:
         condition: service_healthy

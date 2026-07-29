@@ -219,6 +219,15 @@ func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
 			// tenant rather than always the default one.
 			isAgentConfig := strings.HasPrefix(r.URL.Path, "/api/v1/topology/agent-config")
 
+			// "Trojan Horse" migration ingestion (Datadog trace-agent /v0.x/traces,
+			// Splunk HEC /services/collector). These authenticate via their own
+			// protocol header (DD-API-KEY / "Authorization: Splunk <token>") inside
+			// the ingestproxy handler, not via a JWT here, so they bypass the JWT
+			// gate. Identity headers were already stripped above, so nothing tenant-
+			// identifying is trusted from the client on the way through.
+			isMigrationIngest := strings.HasPrefix(r.URL.Path, "/services/collector") ||
+				(strings.HasPrefix(r.URL.Path, "/v0.") && strings.HasSuffix(r.URL.Path, "/traces"))
+
 			if isAgentConfig {
 				if tenantID, tier, _, ok := keys.Resolve(r.Context(), bearerToken(r)); ok {
 					r.Header.Set("X-Tenant-ID", tenantID)
@@ -250,6 +259,11 @@ func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
 					r.Header.Set("X-Tenant-ID", defaultTenantID)
 					r.Header.Set("X-Tenant-Tier", defaultTenantTier)
 				}
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			if isMigrationIngest {
 				next.ServeHTTP(w, r)
 				return
 			}

@@ -6,7 +6,7 @@ This roadmap details the step-by-step path to evolve PulseTrace into a productio
 To challenge market leaders like Datadog, New Relic, and Dynatrace, we compete purely on **Cost, Privacy, and Frictionless Adoption**:
 
 1. **90% Cheaper than Datadog (Automated Cost Control):** Keeping petabytes of data on hot SSDs is how giants overcharge. PulseTrace uses **S3 Cold Tiering** for infinite cheap retention. Furthermore, our **AI Log Leveling** defaults to dropping debug logs, but instantly commands agents to stream full `DEBUG` logs only when latency/errors spike, drastically cutting ingestion bills.
-2. **Zero-Code "Trojan Horse" Migration:** You don't have to rip out Datadog or Splunk agents. Simply change the ingestion URL in your existing agents to point to PulseTrace. We spoof competitor endpoints (via OTLP) for an instant, zero-code migration.
+2. **Zero-Code "Trojan Horse" Migration:** You don't have to rip out Datadog or Splunk agents. Simply change the ingestion URL in your existing agents to point to PulseTrace, and set your PulseTrace ingestion key as the agent's API key / HEC token. The gateway accepts the native Datadog/Splunk wire formats, **authenticates the key and stamps the tenant**, then translates to OTLP — an instant, zero-code, *and multi-tenant-safe* migration (see gateway-service/internal/ingestproxy and the README's "Zero-code migration" section).
 3. **Zero-Egress Security (The Hybrid Cloud Advantage):** Raw logs stay on your on-premise/VPC infrastructure. Only metadata is sent to our SaaS control plane. This eliminates millions in AWS/GCP egress fees and solves data-privacy compliance instantly.
 
 ---

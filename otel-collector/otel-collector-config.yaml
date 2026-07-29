@@ -5,14 +5,16 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
-  
-  # Trojan Horse: Accept Datadog Agent payloads directly
-  datadog:
-    endpoint: 0.0.0.0:8126
-    
-  # Trojan Horse: Accept Splunk HEC payloads directly
-  splunk_hec:
-    endpoint: 0.0.0.0:8088
+
+  # NOTE: the "Trojan Horse" Datadog/Splunk ingestion is NOT terminated here
+  # anymore. The collector's native datadog/splunk_hec receivers do no per-tenant
+  # authentication and no tenant attribution, so exposing them let anyone write
+  # un-tenanted telemetry straight into the shared stores. That capability now
+  # lives in the gateway (gateway-service/internal/ingestproxy): it authenticates
+  # the DD-API-KEY / Splunk token against a PulseTrace ingestion key, stamps the
+  # resolved tenant, and forwards as OTLP to the `otlp` receiver above — so
+  # migrated telemetry gets the same isolation as native OTLP. The collector must
+  # only be reachable from the gateway + internal services (never published).
 
   # Scrape Prometheus-format /metrics endpoints and convert them to OTLP so
   # they land in the native metrics pillar (ClickHouse) alongside anything
@@ -150,11 +152,10 @@ exporters:
 service:
   pipelines:
     traces:
-      # splunk_hec only supports logs/metrics telemetry types, not traces - wiring
-      # it into the traces pipeline crashes collector startup ("telemetry type is
-      # not supported"). There's no logs pipeline in this collector to attach it to
-      # (logs ingest via Vector/log-service instead), so drop it here.
-      receivers: [otlp, datadog]
+      # Datadog/Splunk migration traces arrive here as OTLP too — the gateway's
+      # ingestproxy authenticates, tenant-stamps, and forwards them to the `otlp`
+      # receiver, so there's a single tenant-attributed entry point.
+      receivers: [otlp]
       processors: [resource, tail_sampling, batch]
       exporters: [otlp/jaeger, clickhouse, otlphttp/topology, otlp/quickwit]
 

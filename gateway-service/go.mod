@@ -8,6 +8,7 @@ require (
 	github.com/grafana/pyroscope-go v1.4.1
 	github.com/lib/pq v1.12.3
 	github.com/pulsetrace/shared v0.0.0-00010101000000-000000000000
+	github.com/vmihailenco/msgpack/v5 v5.4.1
 	go.opentelemetry.io/otel v1.41.0
 	go.opentelemetry.io/proto/otlp v1.3.1
 	golang.org/x/crypto v0.52.0
@@ -43,6 +44,7 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.25 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20201227073835-cf1acfcdf475 // indirect
 	github.com/redis/go-redis/v9 v9.21.0 // indirect
+	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.27.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.27.0 // indirect

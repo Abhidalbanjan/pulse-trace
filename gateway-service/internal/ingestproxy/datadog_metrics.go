@@ -227,9 +227,9 @@ func ddTagAttrs(tags []string, host string) []*commonpb.KeyValue {
 	return attrs
 }
 
+// secondsToNanos converts a DD metric point timestamp to nanos. DD series send
+// epoch-seconds, but the unit is detected from magnitude to tolerate clients
+// that send millis — see normalizeEpochNanos.
 func secondsToNanos(sec float64) uint64 {
-	if sec <= 0 {
-		return 0
-	}
-	return uint64(sec * 1e9)
+	return normalizeEpochNanos(sec)
 }

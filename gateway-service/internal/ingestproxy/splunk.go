@@ -273,17 +273,19 @@ func hecEventsToOTLP(events []hecEvent) *collogspb.ExportLogsServiceRequest {
 	}
 }
 
-// hecTimeNanos converts HEC epoch-seconds (int or fractional) to nanos, or 0
-// (meaning "unset", the collector/consumer falls back to observed time).
+// hecTimeNanos converts a HEC timestamp to nanos, or 0 (meaning "unset", the
+// collector/consumer falls back to observed time). HEC nominally sends epoch-
+// seconds (int or fractional), but the unit is detected from magnitude to
+// tolerate forwarders that send millis — see normalizeEpochNanos.
 func hecTimeNanos(n json.Number) uint64 {
 	if n == "" {
 		return 0
 	}
 	secs, err := n.Float64()
-	if err != nil || secs <= 0 {
+	if err != nil {
 		return 0
 	}
-	return uint64(secs * 1e9)
+	return normalizeEpochNanos(secs)
 }
 
 // hecBody renders the event payload as a string: a JSON string is unquoted, any

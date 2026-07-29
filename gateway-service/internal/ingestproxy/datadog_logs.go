@@ -119,14 +119,16 @@ func ddLogAttrs(l ddLog) []*commonpb.KeyValue {
 	return attrs
 }
 
-// ddLogTimeNanos converts DD's epoch-millis timestamp to nanos (0 = unset).
+// ddLogTimeNanos converts DD's log timestamp to nanos (0 = unset). DD logs
+// nominally send epoch-millis, but the unit is detected from magnitude to
+// tolerate misconfigured agents/forwarders — see normalizeEpochNanos.
 func ddLogTimeNanos(n json.Number) uint64 {
 	if n == "" {
 		return 0
 	}
-	ms, err := n.Int64()
-	if err != nil || ms <= 0 {
+	ms, err := n.Float64()
+	if err != nil {
 		return 0
 	}
-	return uint64(ms) * 1e6
+	return normalizeEpochNanos(ms)
 }

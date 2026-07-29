@@ -583,6 +583,12 @@ gateway falls back to forwarding logs to ClickHouse `otel_logs` via OTLP. Either
 way, migrated telemetry is tenant-isolated exactly like native OTLP — verified
 end-to-end.
 
+Timestamps are normalized by magnitude, not by trusting each protocol's nominal
+unit — so a misconfigured agent that sends epoch-seconds where millis are expected
+(or vice versa) still lands its telemetry at the right time instead of in 1970 or
+the far future. Absent timestamps default to receive time; genuinely old
+timestamps (backfill) are preserved.
+
 Mint keys with `POST /api/v1/admin/ingestion-keys`. When `REQUIRE_INGESTION_KEY`
 is unset (dev), un-keyed migration traffic is accepted as the `default` tenant;
 set it to `"true"` for any multi-tenant deployment so a key is mandatory. A

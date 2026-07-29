@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"log"
 	"net"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -34,7 +35,7 @@ type Receiver struct {
 // record meters ingested volume (nil disables metering); allow enforces per-plan
 // quota on the gRPC path (nil allows all).
 func NewReceiver(resolver TenantResolver, requireKey bool, upstreamAddr string, record RecordFunc, allow AllowFunc) (*Receiver, error) {
-	conn, err := grpc.NewClient(upstreamAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(normalizeGRPCTarget(upstreamAddr), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}
@@ -45,6 +46,19 @@ func NewReceiver(resolver TenantResolver, requireKey bool, upstreamAddr string, 
 		metricsClient: colmetricspb.NewMetricsServiceClient(conn),
 		logsClient:    collogspb.NewLogsServiceClient(conn),
 	}, nil
+}
+
+// normalizeGRPCTarget makes a bare "host:port" safe for grpc.NewClient. Without
+// a scheme, grpc parses "otel-collector:4317" as URI scheme "otel-collector"
+// with opaque "4317", so its dns resolver resolves the wrong string and returns
+// "produced zero addresses". Prefixing "dns:///" forces the dns resolver on the
+// real host:port. Targets that already carry a scheme (dns:///, passthrough:///,
+// unix://, an IP:port with a recognizable form) are left untouched.
+func normalizeGRPCTarget(addr string) string {
+	if addr == "" || strings.Contains(addr, "://") {
+		return addr
+	}
+	return "dns:///" + addr
 }
 
 // Start binds listenAddr and serves the OTLP trace/metrics/logs services in a

@@ -15,10 +15,17 @@
 package ingestproxy
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
+	"io"
 	"net/http"
+	"strings"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 
 	"github.com/pulsetrace/gateway-service/internal/auth"
@@ -30,6 +37,7 @@ import (
 type Forwarder interface {
 	ForwardTraces(ctx context.Context, tenantID, tier string, req *coltracepb.ExportTraceServiceRequest) error
 	ForwardLogs(ctx context.Context, tenantID, tier string, req *collogspb.ExportLogsServiceRequest) error
+	ForwardMetrics(ctx context.Context, tenantID, tier string, req *colmetricspb.ExportMetricsServiceRequest) error
 }
 
 // TenantResolver maps an ingestion-key plaintext to its tenant/tier/scope
@@ -57,12 +65,49 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 	// unregistered makes the agent negotiate down to v0.4.
 	mux.HandleFunc("POST /v0.3/traces", p.DatadogTraces)
 	mux.HandleFunc("POST /v0.4/traces", p.DatadogTraces)
+	mux.HandleFunc("POST /v0.5/traces", p.DatadogTraces) // string-table msgpack
 
-	// Splunk HTTP Event Collector.
+	// Datadog metrics and logs intake.
+	mux.HandleFunc("POST /api/v1/series", p.DatadogSeries) // v1 series (JSON)
+	mux.HandleFunc("POST /api/v2/series", p.DatadogSeries) // v2 series (JSON)
+	mux.HandleFunc("POST /api/v2/logs", p.DatadogLogs)
+
+	// Splunk HTTP Event Collector (routes both log and metric events).
 	mux.HandleFunc("POST /services/collector", p.SplunkHEC)
 	mux.HandleFunc("POST /services/collector/event", p.SplunkHEC)
 	mux.HandleFunc("POST /services/collector/event/1.0", p.SplunkHEC)
 	mux.HandleFunc("POST /services/collector/raw", p.SplunkHECRaw)
+}
+
+// readBody reads and decompresses a request body, honoring the Content-Encoding
+// the Datadog agent uses (gzip for traces, deflate/zlib for metrics). An
+// unrecognized/empty encoding is read as-is. Capped to guard against
+// decompression bombs.
+func readBody(r *http.Request, maxBytes int64) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBytes))
+	if err != nil {
+		return nil, err
+	}
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))) {
+	case "gzip":
+		gz, err := gzip.NewReader(bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		defer gz.Close()
+		return io.ReadAll(io.LimitReader(gz, maxBytes))
+	case "deflate", "zlib":
+		// DD sends zlib-wrapped deflate; fall back to raw flate if there's no
+		// zlib header.
+		if zr, err := zlib.NewReader(bytes.NewReader(raw)); err == nil {
+			defer zr.Close()
+			return io.ReadAll(io.LimitReader(zr, maxBytes))
+		}
+		fr := flate.NewReader(bytes.NewReader(raw))
+		defer fr.Close()
+		return io.ReadAll(io.LimitReader(fr, maxBytes))
+	}
+	return raw, nil
 }
 
 // resolveTenant applies the exact policy the OTLP/HTTP ingestion paths use:

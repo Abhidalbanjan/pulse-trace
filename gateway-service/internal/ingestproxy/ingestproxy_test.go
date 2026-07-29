@@ -12,6 +12,7 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
@@ -22,6 +23,7 @@ type fakeForwarder struct {
 	tenantID, tier string
 	traces         *coltracepb.ExportTraceServiceRequest
 	logs           *collogspb.ExportLogsServiceRequest
+	metrics        *colmetricspb.ExportMetricsServiceRequest
 	err            error
 }
 
@@ -31,6 +33,10 @@ func (f *fakeForwarder) ForwardTraces(_ context.Context, tenantID, tier string, 
 }
 func (f *fakeForwarder) ForwardLogs(_ context.Context, tenantID, tier string, req *collogspb.ExportLogsServiceRequest) error {
 	f.tenantID, f.tier, f.logs = tenantID, tier, req
+	return f.err
+}
+func (f *fakeForwarder) ForwardMetrics(_ context.Context, tenantID, tier string, req *colmetricspb.ExportMetricsServiceRequest) error {
+	f.tenantID, f.tier, f.metrics = tenantID, tier, req
 	return f.err
 }
 

@@ -452,6 +452,10 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       SERVICE_VERSION: ${SERVICE_VERSION:-dev}
       OTEL_COLLECTOR_HTTP_URL: http://otel-collector:4318
+      # Where the gateway's in-process OTLP receiver forwards to. MUST be the
+      # collector, not the default localhost:4317 — otherwise the gateway
+      # forwards to its own :4317 receiver in an infinite loop.
+      OTEL_COLLECTOR_GRPC_ADDR: otel-collector:4317
       REDIS_ADDR: redis:6379
       PORT: "8080"
       CLICKHOUSE_URL: http://clickhouse:8123

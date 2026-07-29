@@ -226,7 +226,10 @@ func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
 			// gate. Identity headers were already stripped above, so nothing tenant-
 			// identifying is trusted from the client on the way through.
 			isMigrationIngest := strings.HasPrefix(r.URL.Path, "/services/collector") ||
-				(strings.HasPrefix(r.URL.Path, "/v0.") && strings.HasSuffix(r.URL.Path, "/traces"))
+				(strings.HasPrefix(r.URL.Path, "/v0.") && strings.HasSuffix(r.URL.Path, "/traces")) ||
+				// Datadog metrics/logs intake (exact paths, so this can't widen
+				// access to PulseTrace's own /api/v1|v2 routes).
+				r.URL.Path == "/api/v1/series" || r.URL.Path == "/api/v2/series" || r.URL.Path == "/api/v2/logs"
 
 			if isAgentConfig {
 				if tenantID, tier, _, ok := keys.Resolve(r.Context(), bearerToken(r)); ok {

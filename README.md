@@ -551,10 +551,17 @@ apm_config:
 api_key: "pt_ingest_<your-pulsetrace-ingestion-key>"
 ```
 
-Endpoints: `POST /v0.3/traces`, `POST /v0.4/traces` (JSON and msgpack).
+Datadog endpoints (all authenticated by `DD-API-KEY`, gzip/deflate bodies
+handled), each translated to OTLP and tenant-stamped:
 
-**Splunk** — send HEC events to the gateway with your ingestion key as the HEC
-token:
+| Signal | Endpoint | Notes |
+| --- | --- | --- |
+| Traces | `POST /v0.3\|v0.4\|v0.5/traces` | JSON and msgpack, incl. v0.5 string-table |
+| Metrics | `POST /api/v1/series`, `POST /api/v2/series` | gauge→Gauge, count→monotonic Sum |
+| Logs | `POST /api/v2/logs` | `ddtags` → attributes |
+
+**Splunk** — send HEC events/metrics to the gateway with your ingestion key as
+the HEC token:
 
 ```bash
 curl http://<gateway-host>:8080/services/collector/event \
@@ -562,8 +569,13 @@ curl http://<gateway-host>:8080/services/collector/event \
   -d '{"event":"hello from splunk","sourcetype":"app","fields":{"env":"prod"}}'
 ```
 
-Endpoints: `POST /services/collector`, `/services/collector/event`,
-`/services/collector/raw`.
+Splunk endpoints: `POST /services/collector`, `/services/collector/event`,
+`/services/collector/raw`. HEC **metric** events (fields carrying a
+`metric_name`) are routed to the metrics pillar; everything else is a log.
+
+All of the above land in ClickHouse (`otel_traces` / `otel_metrics_*` /
+`otel_logs`) with the resolved `tenant.id` resource attribute — verified
+end-to-end — so migrated telemetry is tenant-isolated exactly like native OTLP.
 
 Mint keys with `POST /api/v1/admin/ingestion-keys`. When `REQUIRE_INGESTION_KEY`
 is unset (dev), un-keyed migration traffic is accepted as the `default` tenant;

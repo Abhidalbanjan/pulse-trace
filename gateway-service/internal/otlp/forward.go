@@ -4,6 +4,7 @@ import (
 	"context"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 )
 
@@ -39,5 +40,17 @@ func (r *Receiver) ForwardLogs(ctx context.Context, tenantID, tier string, req *
 	}
 	r.stamper.meter(ctx, tenantID, "logs", countLogRecords(req))
 	_, err := r.logsClient.Export(ctx, req)
+	return err
+}
+
+func (r *Receiver) ForwardMetrics(ctx context.Context, tenantID, tier string, req *colmetricspb.ExportMetricsServiceRequest) error {
+	if err := r.stamper.checkQuota(ctx, tenantID, "metrics"); err != nil {
+		return err
+	}
+	for _, rm := range req.GetResourceMetrics() {
+		rm.Resource = stampResource(rm.GetResource(), tenantID, tier)
+	}
+	r.stamper.meter(ctx, tenantID, "metrics", countMetricPoints(req))
+	_, err := r.metricsClient.Export(ctx, req)
 	return err
 }

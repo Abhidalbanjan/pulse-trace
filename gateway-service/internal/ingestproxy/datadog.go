@@ -45,13 +45,18 @@ func (p *Proxy) DatadogTraces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20)) // 16 MiB cap
+	body, err := readBody(r, 16<<20) // 16 MiB cap
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
 
-	traces, err := decodeDatadogTraces(r.Header.Get("Content-Type"), body)
+	var traces [][]ddSpan
+	if strings.HasSuffix(r.URL.Path, "/v0.5/traces") {
+		traces, err = decodeDatadogTracesV05(body)
+	} else {
+		traces, err = decodeDatadogTraces(r.Header.Get("Content-Type"), body)
+	}
 	if err != nil {
 		http.Error(w, "invalid Datadog trace payload: "+err.Error(), http.StatusBadRequest)
 		return
@@ -83,8 +88,8 @@ func datadogKey(r *http.Request) string {
 	return ""
 }
 
-// decodeDatadogTraces decodes the payload as msgpack (the agent default, or
-// Content-Type application/msgpack) or JSON.
+// decodeDatadogTraces decodes the v0.3/v0.4 payload as msgpack (the agent
+// default, or Content-Type application/msgpack) or JSON.
 func decodeDatadogTraces(contentType string, body []byte) ([][]ddSpan, error) {
 	var traces [][]ddSpan
 	if strings.Contains(contentType, "msgpack") {
@@ -92,6 +97,70 @@ func decodeDatadogTraces(contentType string, body []byte) ([][]ddSpan, error) {
 	}
 	// Some libraries send JSON; a leading '[' is the JSON array of traces.
 	return traces, json.Unmarshal(body, &traces)
+}
+
+// v0.5 packs traces as a 2-tuple [stringTable, traces] where every string
+// (service/name/resource/type and each meta key/value) is an index into the
+// table, and each span is a fixed 12-element array. This is what recent Datadog
+// agents send by default, so decoding it is what makes "point your DD agent at
+// us" work without the agent negotiating down to v0.4.
+type ddV05Payload struct {
+	_msgpack struct{} `msgpack:",as_array"`
+	Strings  []string
+	Traces   [][]ddSpanV05
+}
+
+type ddSpanV05 struct {
+	_msgpack struct{} `msgpack:",as_array"`
+	Service  uint32
+	Name     uint32
+	Resource uint32
+	TraceID  uint64
+	SpanID   uint64
+	ParentID uint64
+	Start    int64
+	Duration int64
+	Error    int32
+	Meta     map[uint32]uint32
+	Metrics  map[uint32]float64
+	Type     uint32
+}
+
+// decodeDatadogTracesV05 resolves the string-table indices back into the
+// v0.3/v0.4 ddSpan shape so the rest of the pipeline (ddTracesToOTLP) is shared.
+func decodeDatadogTracesV05(body []byte) ([][]ddSpan, error) {
+	var p ddV05Payload
+	if err := msgpack.Unmarshal(body, &p); err != nil {
+		return nil, err
+	}
+	get := func(i uint32) string {
+		if int(i) < len(p.Strings) {
+			return p.Strings[i]
+		}
+		return ""
+	}
+	out := make([][]ddSpan, 0, len(p.Traces))
+	for _, trace := range p.Traces {
+		spans := make([]ddSpan, 0, len(trace))
+		for _, s := range trace {
+			meta := make(map[string]string, len(s.Meta))
+			for k, v := range s.Meta {
+				meta[get(k)] = get(v)
+			}
+			metrics := make(map[string]float64, len(s.Metrics))
+			for k, v := range s.Metrics {
+				metrics[get(k)] = v
+			}
+			spans = append(spans, ddSpan{
+				Service: get(s.Service), Name: get(s.Name), Resource: get(s.Resource),
+				TraceID: s.TraceID, SpanID: s.SpanID, ParentID: s.ParentID,
+				Start: s.Start, Duration: s.Duration, Error: s.Error, Type: get(s.Type),
+				Meta: meta, Metrics: metrics,
+			})
+		}
+		out = append(out, spans)
+	}
+	return out, nil
 }
 
 // ddTracesToOTLP converts Datadog traces into an OTLP trace export, grouping

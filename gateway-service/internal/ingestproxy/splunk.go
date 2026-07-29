@@ -35,7 +35,7 @@ func (p *Proxy) SplunkHEC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20)) // 8 MiB cap
+	body, err := readBody(r, 8<<20) // 8 MiB cap, decompresses gzip
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
@@ -59,12 +59,124 @@ func (p *Proxy) SplunkHEC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req := hecEventsToOTLP(events)
-	if err := p.fwd.ForwardLogs(r.Context(), tenantID, tier, req); err != nil {
-		httpForwardError(w, err)
-		return
+	// HEC carries both logs and metrics on the same endpoint; a metric event is
+	// one whose fields declare a metric_name. Route each kind to its own OTLP
+	// signal so Splunk metrics land in the metrics pillar, not as log lines.
+	logEvents, metricEvents := partitionHEC(events)
+
+	if len(metricEvents) > 0 {
+		mreq := normMetricsToOTLP(hecEventsToMetrics(metricEvents))
+		if err := p.fwd.ForwardMetrics(r.Context(), tenantID, tier, mreq); err != nil {
+			httpForwardError(w, err)
+			return
+		}
+	}
+	if len(logEvents) > 0 {
+		lreq := hecEventsToOTLP(logEvents)
+		if err := p.fwd.ForwardLogs(r.Context(), tenantID, tier, lreq); err != nil {
+			httpForwardError(w, err)
+			return
+		}
 	}
 	writeHECResponse(w, http.StatusOK)
+}
+
+// partitionHEC splits events into (logs, metrics). A metric event is identified
+// by a metric_name field (single-metric format) or any metric_name:<name> field
+// (multi-metric format) — Splunk's HEC metrics conventions.
+func partitionHEC(events []hecEvent) (logs, metrics []hecEvent) {
+	for _, e := range events {
+		if hecIsMetric(e) {
+			metrics = append(metrics, e)
+		} else {
+			logs = append(logs, e)
+		}
+	}
+	return logs, metrics
+}
+
+func hecIsMetric(e hecEvent) bool {
+	if _, ok := e.Fields["metric_name"]; ok {
+		return true
+	}
+	for k := range e.Fields {
+		if strings.HasPrefix(k, "metric_name:") {
+			return true
+		}
+	}
+	return false
+}
+
+// hecEventsToMetrics converts HEC metric events into the version-agnostic
+// normMetric form (reusing the Datadog metrics OTLP translator). Both the
+// single-metric (metric_name + _value) and multi-metric (metric_name:<n>=v)
+// layouts are supported; every other field becomes a dimension attribute.
+func hecEventsToMetrics(events []hecEvent) []normMetric {
+	var out []normMetric
+	for _, e := range events {
+		ts := hecTimeNanos(e.Time)
+		dims := hecMetricDimensions(e)
+
+		// Single-metric: {"metric_name":"cpu.usage","_value":42}
+		if name, ok := e.Fields["metric_name"].(string); ok && name != "" {
+			out = append(out, normMetric{
+				name:   name,
+				kind:   "gauge",
+				attrs:  dims,
+				points: []normPoint{{tsNanos: ts, value: toFloat(e.Fields["_value"])}},
+			})
+		}
+		// Multi-metric: {"metric_name:cpu.usage":42,"metric_name:mem":128}
+		for k, v := range e.Fields {
+			if name, found := strings.CutPrefix(k, "metric_name:"); found && name != "" {
+				out = append(out, normMetric{
+					name:   name,
+					kind:   "gauge",
+					attrs:  dims,
+					points: []normPoint{{tsNanos: ts, value: toFloat(v)}},
+				})
+			}
+		}
+	}
+	return out
+}
+
+// hecMetricDimensions collects everything that isn't a metric name/value into
+// OTLP attributes, plus the standard HEC metadata.
+func hecMetricDimensions(e hecEvent) []*commonpb.KeyValue {
+	var attrs []*commonpb.KeyValue
+	add := func(k, v string) {
+		if v != "" {
+			attrs = append(attrs, strAttr(k, v))
+		}
+	}
+	add("splunk.host", e.Host)
+	add("splunk.source", e.Source)
+	add("splunk.index", e.Index)
+	for k, v := range e.Fields {
+		if k == "metric_name" || k == "_value" || strings.HasPrefix(k, "metric_name:") {
+			continue
+		}
+		attrs = append(attrs, strAttr(k, fmt.Sprintf("%v", v)))
+	}
+	return attrs
+}
+
+// toFloat coerces a decoded JSON value (float64, json.Number, or numeric string)
+// to float64; anything else yields 0.
+func toFloat(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case json.Number:
+		f, _ := n.Float64()
+		return f
+	case string:
+		f, _ := strconv.ParseFloat(n, 64)
+		return f
+	default:
+		return 0
+	}
 }
 
 // SplunkHECRaw handles /services/collector/raw, where the whole body is a single
@@ -74,7 +186,7 @@ func (p *Proxy) SplunkHECRaw(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	body, err := readBody(r, 8<<20)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return

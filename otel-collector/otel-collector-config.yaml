@@ -133,17 +133,12 @@ exporters:
     username: pulsetrace
     password: pulsetrace_secret
     ttl_days: 30
-    metrics_tables:
-      gauge:
-        name: otel_metrics_gauge
-      sum:
-        name: otel_metrics_sum
-      summary:
-        name: otel_metrics_summary
-      histogram:
-        name: otel_metrics_histogram
-      exponential_histogram:
-        name: otel_metrics_exp_histogram
+    # NOTE: the per-type `metrics_tables` map is not a valid key on the clickhouse
+    # exporter in collector v0.101.0 (it was added in a later release), and it was
+    # crash-looping the collector on every boot ("has invalid keys: metrics_tables")
+    # — which took down the whole telemetry backend. Removed: this exporter already
+    # auto-creates the default otel_metrics_gauge / otel_metrics_sum / … tables
+    # (the exact names gateway-service's MetricsHandler queries) without it.
 
   # Debug logging — remove or set verbosity: basic in production.
   debug:
@@ -163,3 +158,13 @@ service:
       receivers: [otlp, prometheus]
       processors: [batch]
       exporters: [prometheus, clickhouse/metrics]
+
+    # Logs pipeline: OTLP logs (native, plus the Datadog/Splunk migration logs the
+    # gateway translates and tenant-stamps) are persisted to ClickHouse otel_logs.
+    # Without this pipeline the collector silently drops OTLP logs — the product's
+    # primary log path is Vector→log-service→Quickwit, but migration logs arrive as
+    # OTLP and need a sink of their own.
+    logs:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters: [clickhouse]

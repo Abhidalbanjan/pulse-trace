@@ -25,6 +25,9 @@ config:
   POSTGRES_DB: "pulsetrace"
   POSTGRES_USER: "pulsetrace"
   OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+  # Forward target for the gateway's in-process OTLP receiver. MUST be the
+  # collector — the code default (localhost:4317) would self-loop.
+  OTEL_COLLECTOR_GRPC_ADDR: "otel-collector:4317"
   LOG_SERVICE_URL: "http://log-service:8081"
   ALERT_SERVICE_URL: "http://alert-service:8082"
   CORRELATION_SERVICE_URL: "http://correlation-service:8083"

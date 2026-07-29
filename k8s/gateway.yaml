@@ -80,6 +80,13 @@ spec:
                 configMapKeyRef:
                   name: pulsetrace-config
                   key: OTEL_EXPORTER_OTLP_ENDPOINT
+            # Forward target for the in-process OTLP receiver — must be the
+            # collector, not the localhost:4317 default (which self-loops).
+            - name: OTEL_COLLECTOR_GRPC_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsetrace-config
+                  key: OTEL_COLLECTOR_GRPC_ADDR
           livenessProbe:
             httpGet:
               path: /healthz

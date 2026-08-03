@@ -87,7 +87,7 @@ func (h *MetricsHandler) ListMetricNames(w http.ResponseWriter, r *http.Request)
 		FORMAT JSON
 	`
 
-	resp, err := h.ch.query(query, map[string]string{"tenant": tenantFromRequest(r)})
+	resp, err := h.ch.queryScoped(tenantFromRequest(r), query, nil)
 	if !h.writeErrOrEmpty(w, resp, err, "MetricsHandler.ListMetricNames") {
 		return
 	}
@@ -160,7 +160,7 @@ func (h *MetricsHandler) QueryMetric(w http.ResponseWriter, r *http.Request) {
 		FORMAT JSON
 	`, bucketExpr, selectService, table, whereService, sqlInterval, groupService)
 
-	resp, err := h.ch.query(query, params)
+	resp, err := h.ch.queryScoped(tenantFromRequest(r), query, params)
 	if !h.writeErrOrEmpty(w, resp, err, "MetricsHandler.QueryMetric") {
 		return
 	}

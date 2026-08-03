@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -52,9 +53,79 @@ func resolveInterval(raw string) (key, sqlInterval, bucketExpr string) {
 	return raw, intervalToSQL[raw], intervalToBucket[raw]
 }
 
+// tenantScopedCHTables are the ClickHouse tables that hold per-tenant telemetry.
+// A read that touches any of these MUST carry a tenant predicate; queryScoped
+// enforces that so "forgot the tenant filter" becomes an immediate error instead
+// of a silent cross-tenant data leak (ROAD_TO_100 · F0.3, rubric R5).
+var tenantScopedCHTables = []string{"otel_traces", "otel_logs", "otel_metrics", "rum_events", "synthetic_results"}
+
+// tenantPredicateTokens are the accepted ways a query narrows to one tenant: the
+// resource-attribute clause the collector-owned tables use, an explicit TenantID
+// column (rum_events / synthetic_results), or the tenant bind param itself.
+var tenantPredicateTokens = []string{"tenant.id", "TenantID", "{tenant:String}"}
+
+// queryScoped runs a ClickHouse read that is guaranteed to be tenant-isolated. It
+//  1. refuses an empty tenant (fail closed rather than read everything),
+//  2. injects the "tenant" bind param from a single trusted source so the value
+//     can't be forgotten or spoofed per call site, and
+//  3. fails closed if the SQL reads a tenant-scoped table without a tenant
+//     predicate.
+//
+// This turns the previously-ad-hoc convention ("remember to add tenantClause")
+// into an enforced invariant at the one choke point every CH read passes through.
+func (c *clickHouseClient) queryScoped(tenantID, sql string, params map[string]string) (*http.Response, error) {
+	if strings.TrimSpace(tenantID) == "" {
+		return nil, fmt.Errorf("clickhouse: refusing tenant-scoped query with empty tenant")
+	}
+	if err := assertTenantScoped(sql); err != nil {
+		return nil, err
+	}
+	if params == nil {
+		params = map[string]string{}
+	}
+	params["tenant"] = tenantID
+	return c.query(sql, params)
+}
+
+// assertTenantScoped returns an error when sql reads a tenant-scoped table but
+// contains no tenant predicate. It's a deliberately conservative textual check —
+// the query layer is raw SQL, not an AST — and errs toward blocking: a query on
+// a tenant table with no recognizable tenant filter is treated as a leak.
+func assertTenantScoped(sql string) error {
+	if !referencesTenantScopedTable(sql) {
+		return nil // system/introspection or non-tenant table: nothing to enforce
+	}
+	for _, tok := range tenantPredicateTokens {
+		if strings.Contains(sql, tok) {
+			return nil
+		}
+	}
+	return fmt.Errorf("clickhouse: query reads a tenant-scoped table without a tenant predicate: %q", firstLine(sql))
+}
+
+func referencesTenantScopedTable(sql string) bool {
+	for _, t := range tenantScopedCHTables {
+		if strings.Contains(sql, t) {
+			return true
+		}
+	}
+	return false
+}
+
+func firstLine(sql string) string {
+	s := strings.TrimSpace(sql)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
+}
+
 // query posts a parameterized query to ClickHouse's HTTP interface.
 // params are passed as ClickHouse HTTP query-string bind parameters (param_<name>=<value>),
 // referenced in the SQL as {<name>:<Type>}, so caller-supplied values are never string-concatenated into SQL.
+//
+// Prefer queryScoped for any read of tenant data; call query directly only for
+// genuinely tenant-independent work (DDL, system tables).
 func (c *clickHouseClient) query(sql string, params map[string]string) (*http.Response, error) {
 	reqURL := c.URL
 	if len(params) > 0 {

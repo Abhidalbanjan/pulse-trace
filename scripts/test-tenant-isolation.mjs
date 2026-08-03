@@ -25,10 +25,13 @@ function die(msg) {
   process.exit(1);
 }
 
-async function api(path, { method = 'GET', token, key, body } = {}) {
+async function api(path, { method = 'GET', token, key, body, extraHeaders } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = 'Bearer ' + token;
   if (key) headers['Authorization'] = 'Bearer ' + key;
+  // extraHeaders lets a test forge client headers (e.g. X-Tenant-ID) to prove the
+  // server ignores them and resolves tenant identity itself.
+  if (extraHeaders) Object.assign(headers, extraHeaders);
   const res = await fetch(GATEWAY + path, {
     method,
     headers,
@@ -81,12 +84,13 @@ async function ingestError(key, marker) {
 }
 
 // pollErrors reads /api/v1/rum/errors as the tenant's user until `want` appears
-// (or times out), then returns the concatenated error messages seen.
-async function pollErrors(token, want, timeoutMs = 20000) {
+// (or times out), then returns the concatenated error messages seen. extraHeaders
+// forges client headers to prove they don't affect server-side tenant resolution.
+async function pollErrors(token, want, timeoutMs = 20000, extraHeaders) {
   const deadline = Date.now() + timeoutMs;
   let seen = '';
   while (Date.now() < deadline) {
-    const res = await api('/api/v1/rum/errors', { token });
+    const res = await api('/api/v1/rum/errors', { token, extraHeaders });
     if (res.ok) {
       const body = await res.json();
       const rows = Array.isArray(body.data) ? body.data : [];
@@ -96,6 +100,16 @@ async function pollErrors(token, want, timeoutMs = 20000) {
     await new Promise((r) => setTimeout(r, 1000));
   }
   return seen;
+}
+
+// readOnce reads /api/v1/rum/errors a single time (no polling) with optional
+// forged headers, returning the concatenated markers seen.
+async function readErrorsOnce(token, extraHeaders) {
+  const res = await api('/api/v1/rum/errors', { token, extraHeaders });
+  if (!res.ok) return { ok: false, seen: '' };
+  const body = await res.json();
+  const rows = Array.isArray(body.data) ? body.data : [];
+  return { ok: true, seen: rows.map((r) => r.error_msg || '').join('\n') };
 }
 
 async function main() {
@@ -138,7 +152,21 @@ async function main() {
   if (!rumRes.ok) die(`a rum-scoped key must be accepted for RUM ingest, got ${rumRes.status}`);
   console.log('    ✓ rum-scoped key rejected for server ingest, accepted for RUM');
 
-  console.log('✓ PASS: cross-tenant isolation + scope enforcement hold');
+  // Header-spoof: tenant A's user forges X-Tenant-ID: <tenant B> on a read. The
+  // gateway resolves tenant identity from the verified JWT, never the client
+  // header, so A must STILL see only A's data — the forged header must be inert.
+  // This is the direct test of the F0.3 rule that a caller can't choose its tenant.
+  const spoofed = await readErrorsOnce(tokenA, { 'X-Tenant-ID': TENANT_B });
+  if (!spoofed.ok) die('spoof-header read for tenant A returned non-OK');
+  if (spoofed.seen.includes(MARKER_B)) {
+    die(`LEAK: forged X-Tenant-ID header let tenant A read tenant B's data (${MARKER_B})`);
+  }
+  if (!spoofed.seen.includes(MARKER_A)) {
+    die('forged header changed tenant A\'s own view (A no longer sees its data) — header is not being ignored');
+  }
+  console.log('    ✓ forged X-Tenant-ID header is ignored (tenant resolved server-side)');
+
+  console.log('✓ PASS: cross-tenant isolation + scope enforcement + header-spoof resistance hold');
 }
 
 main().catch((err) => die(err.stack || String(err)));

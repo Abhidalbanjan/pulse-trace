@@ -45,7 +45,7 @@ func (h *AnalyticsHandler) GetTraceAnalytics(w http.ResponseWriter, r *http.Requ
 		FORMAT JSON
 	`, bucketExpr, where)
 
-	resp, err := h.ch.query(query, params)
+	resp, err := h.ch.queryScoped(tenantFromRequest(r), query, params)
 	if err != nil {
 		log.Printf("[AnalyticsHandler] Failed to execute query: %v", err)
 		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)
@@ -115,7 +115,7 @@ func (h *AnalyticsHandler) GetTraceFacets(w http.ResponseWriter, r *http.Request
 
 	tenantParams := map[string]string{"tenant": tenantFromRequest(r)}
 
-	serviceResp, err := h.ch.query(`
+	serviceResp, err := h.ch.queryScoped(tenantFromRequest(r), `
 		SELECT DISTINCT ServiceName as name
 		FROM pulsetrace.otel_traces
 		WHERE `+tenantClause+` AND ParentSpanId = '' AND Timestamp >= now() - INTERVAL 7 DAY
@@ -130,7 +130,7 @@ func (h *AnalyticsHandler) GetTraceFacets(w http.ResponseWriter, r *http.Request
 	}
 	defer serviceResp.Body.Close()
 
-	routeResp, err := h.ch.query(`
+	routeResp, err := h.ch.queryScoped(tenantFromRequest(r), `
 		SELECT DISTINCT SpanAttributes['http.route'] as name
 		FROM pulsetrace.otel_traces
 		WHERE `+tenantClause+` AND Timestamp >= now() - INTERVAL 7 DAY AND SpanAttributes['http.route'] != ''

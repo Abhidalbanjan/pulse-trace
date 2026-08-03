@@ -87,7 +87,7 @@ func (h *ErrorTrackingHandler) ListErrorGroups(w http.ResponseWriter, r *http.Re
 		FORMAT JSON
 	`
 
-	resp, err := h.ch.query(query, map[string]string{"tenant": tenantFromRequest(r)})
+	resp, err := h.ch.queryScoped(tenantFromRequest(r), query, nil)
 	if err != nil {
 		log.Printf("[ErrorTrackingHandler] ClickHouse query failed: %v", err)
 		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)

@@ -67,7 +67,7 @@ func (h *ServiceHandler) ListServices(w http.ResponseWriter, r *http.Request) {
 		FORMAT JSON
 	`, sqlInterval)
 
-	resp, err := h.ch.query(query, map[string]string{"tenant": tenantFromRequest(r)})
+	resp, err := h.ch.queryScoped(tenantFromRequest(r), query, nil)
 	if !h.writeErrOrEmpty(w, resp, err, "ServiceHandler.ListServices") {
 		return
 	}
@@ -152,7 +152,7 @@ func (h *ServiceHandler) GetServiceDetail(w http.ResponseWriter, r *http.Request
 		FORMAT JSON
 	`, sqlInterval)
 
-	summaryResp, err := h.ch.query(summaryQuery, params)
+	summaryResp, err := h.ch.queryScoped(tenantFromRequest(r), summaryQuery, params)
 	if err != nil {
 		log.Printf("[ServiceHandler.GetServiceDetail] summary query failed: %v", err)
 		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)
@@ -160,7 +160,7 @@ func (h *ServiceHandler) GetServiceDetail(w http.ResponseWriter, r *http.Request
 	}
 	defer summaryResp.Body.Close()
 
-	timeseriesResp, err := h.ch.query(timeseriesQuery, params)
+	timeseriesResp, err := h.ch.queryScoped(tenantFromRequest(r), timeseriesQuery, params)
 	if err != nil {
 		log.Printf("[ServiceHandler.GetServiceDetail] timeseries query failed: %v", err)
 		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)
@@ -168,7 +168,7 @@ func (h *ServiceHandler) GetServiceDetail(w http.ResponseWriter, r *http.Request
 	}
 	defer timeseriesResp.Body.Close()
 
-	resourcesResp, err := h.ch.query(resourcesQuery, params)
+	resourcesResp, err := h.ch.queryScoped(tenantFromRequest(r), resourcesQuery, params)
 	if err != nil {
 		log.Printf("[ServiceHandler.GetServiceDetail] resources query failed: %v", err)
 		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)
@@ -176,7 +176,7 @@ func (h *ServiceHandler) GetServiceDetail(w http.ResponseWriter, r *http.Request
 	}
 	defer resourcesResp.Body.Close()
 
-	versionsResp, err := h.ch.query(versionsQuery, params)
+	versionsResp, err := h.ch.queryScoped(tenantFromRequest(r), versionsQuery, params)
 	if err != nil {
 		log.Printf("[ServiceHandler.GetServiceDetail] versions query failed: %v", err)
 		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)

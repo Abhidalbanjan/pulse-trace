@@ -53,10 +53,12 @@ These raise many features at once and are prerequisites for the parity gates.
 - ✅ Scale stage in CI: per-PR fast gate (`ci.yml` → `load-test`, native path) + a **scheduled** deep run (`.github/workflows/scale-baseline.yml`, weekly + on-demand) that uploads the baseline as an artifact.
 - **Unblocks R4 for every pillar** — most pillar scores are currently capped by "scale unproven."
 
-### F0.3 — Structural tenant isolation  · effort L
-- Introduce a `TenantScopedDB`/query-builder in `shared/` that **requires** a tenant filter; migrate ClickHouse/Neo4j/Postgres read paths onto it so a missing `WHERE tenant_id` is a compile/lint failure, not a leak.
-- ClickHouse: add `tenant_id` to partition/order keys for isolation + cheap per-tenant deletion.
-- Extend the existing cross-tenant e2e to fuzz every read endpoint.
+### F0.3 — Structural tenant isolation  · effort L · ✅ delivered (ClickHouse read path); forward path documented
+- ✅ Enforced invariant on the ClickHouse read path (the raw-SQL choke point): `clickHouseClient.queryScoped` **fails closed** on an empty tenant or a tenant-scoped table read with no tenant predicate, and injects the tenant bind param from one trusted source. All 11 CH read sites migrated onto it.
+- ✅ Static ratchet (`TestNoRawTenantTableReads`) fails the build if any handler bypasses the guard with a raw `.query()` on a tenant table — "forgot the filter" is now a build failure, not a leak. Proven to catch a planted violation. Unit tests cover the guard.
+- ✅ Audit ([TENANT_ISOLATION.md](TENANT_ISOLATION.md)): documented how every store (Postgres/ClickHouse/Quickwit/Neo4j) is scoped, and confirmed **no acute leak** — the live read paths already filter by tenant, and server-side tenant resolution ignores forged `X-Tenant-ID` (now covered by the extended cross-tenant e2e's header-spoof test).
+- ✅ ClickHouse partitioning: app-owned tables (`rum_events`, `synthetic_results`) are already `PARTITION BY TenantID`. The collector-owned `otel_*` tables can't have their keys changed from our migrations (documented **honest limitation** + forward path: a tenant-keyed materialized view, deferred, tracked with F19 deletion).
+- ↪ Remaining (deferred): the `shared/` `TenantScopedDB` wrapper for the Postgres read paths across correlation/topology services, and the tenant-keyed MV. Postgres/Neo4j reads already filter; the wrapper is a defense-in-depth generalization of the same ratchet.
 - **Raises R5 across all pillars; hard prerequisite for enterprise procurement.**
 
 ### F0.4 — Frontend platform: typed client, design system, a11y, real-time  · effort L

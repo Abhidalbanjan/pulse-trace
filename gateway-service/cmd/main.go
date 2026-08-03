@@ -211,6 +211,7 @@ func main() {
 		mux.HandleFunc("GET /api/v1/admin/ingestion-keys", ingestionKeys.ListIngestionKeys)
 		mux.HandleFunc("POST /api/v1/admin/ingestion-keys", ingestionKeys.CreateIngestionKey)
 		mux.HandleFunc("DELETE /api/v1/admin/ingestion-keys/{id}", ingestionKeys.RevokeIngestionKey)
+		mux.HandleFunc("POST /api/v1/admin/ingestion-keys/{id}/rotate", ingestionKeys.RotateIngestionKey)
 
 		// Dynamic RBAC: role CRUD (permissions e.g. "read"/"write"/"admin"/"*")
 		mux.HandleFunc("GET /api/v1/admin/roles", rbacEngine.ListRoles)

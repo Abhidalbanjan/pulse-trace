@@ -589,6 +589,15 @@ unit — so a misconfigured agent that sends epoch-seconds where millis are expe
 the far future. Absent timestamps default to receive time; genuinely old
 timestamps (backfill) are preserved.
 
+Manage keys under `/api/v1/admin/ingestion-keys`: `POST` mints, `GET` lists
+(metadata only, never the secret), `DELETE /{id}` revokes immediately, and
+`POST /{id}/rotate` rotates. Rotation mints a replacement inheriting the key's
+tenant/tier/scope and revokes the old one after a grace window
+(`{"grace_period":"24h"}`, default 24h, `"0"` = immediate) — so a public RUM token
+embedded in already-served browser pages keeps working until clients pick up the
+new one, instead of breaking the instant the key changes. The old key links to its
+successor (`replaced_by`) for lineage.
+
 Mint keys with `POST /api/v1/admin/ingestion-keys`. When `REQUIRE_INGESTION_KEY`
 is unset (dev), un-keyed migration traffic is accepted as the `default` tenant;
 set it to `"true"` for any multi-tenant deployment so a key is mandatory. A

@@ -8,7 +8,9 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 )
 
@@ -128,5 +130,53 @@ func TestBearerFromMetadata(t *testing.T) {
 				t.Errorf("bearerFromMetadata = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// When a log sink is wired, emitLogs must route to it (Kafka → Quickwit) and not
+// touch the upstream collector client — stamping and metering still happen.
+func TestEmitLogs_RoutesToSinkWhenSet(t *testing.T) {
+	var metered int64
+	var sunkTenant, sunkTier string
+	var sunkReq *collogspb.ExportLogsServiceRequest
+	s := &tenantStamper{
+		record: func(_ context.Context, _, signal string, n int64) {
+			if signal == "logs" {
+				metered += n
+			}
+		},
+		logSink: func(_ context.Context, tenantID, tier string, req *collogspb.ExportLogsServiceRequest) error {
+			sunkTenant, sunkTier, sunkReq = tenantID, tier, req
+			return nil
+		},
+		// logsUp deliberately nil: if emitLogs tried to forward to the collector
+		// it would panic, proving the sink path is taken.
+	}
+	req := &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{{
+			ScopeLogs: []*logspb.ScopeLogs{{
+				LogRecords: []*logspb.LogRecord{{}, {}},
+			}},
+		}},
+	}
+	if err := s.emitLogs(context.Background(), "acme", "premium", req); err != nil {
+		t.Fatalf("emitLogs: %v", err)
+	}
+	if sunkTenant != "acme" || sunkTier != "premium" || sunkReq == nil {
+		t.Errorf("sink not called with tenant: %q/%q req=%v", sunkTenant, sunkTier, sunkReq)
+	}
+	if metered != 2 {
+		t.Errorf("expected 2 metered log records, got %d", metered)
+	}
+	// Tenant stamped onto the resource.
+	attrs := sunkReq.GetResourceLogs()[0].GetResource().GetAttributes()
+	var sawTenant bool
+	for _, a := range attrs {
+		if a.GetKey() == TenantIDAttr && a.GetValue().GetStringValue() == "acme" {
+			sawTenant = true
+		}
+	}
+	if !sawTenant {
+		t.Error("tenant.id not stamped onto the resource before the sink")
 	}
 }

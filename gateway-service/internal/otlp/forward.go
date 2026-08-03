@@ -35,12 +35,10 @@ func (r *Receiver) ForwardLogs(ctx context.Context, tenantID, tier string, req *
 	if err := r.stamper.checkQuota(ctx, tenantID, "logs"); err != nil {
 		return err
 	}
-	for _, rl := range req.GetResourceLogs() {
-		rl.Resource = stampResource(rl.GetResource(), tenantID, tier)
-	}
-	r.stamper.meter(ctx, tenantID, "logs", countLogRecords(req))
-	_, err := r.logsClient.Export(ctx, req)
-	return err
+	// emitLogs stamps, meters, and routes to the log sink (Kafka → Quickwit) when
+	// one is wired, else forwards to the collector — the same path as the gRPC
+	// logsServer, so migration-log fallback and native OTLP logs behave identically.
+	return r.stamper.emitLogs(ctx, tenantID, tier, req)
 }
 
 func (r *Receiver) ForwardMetrics(ctx context.Context, tenantID, tier string, req *colmetricspb.ExportMetricsServiceRequest) error {

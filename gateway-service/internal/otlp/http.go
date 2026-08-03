@@ -47,6 +47,7 @@ type HTTPHandler struct {
 	upstreamBase string // e.g. http://otel-collector:4318
 	client       *http.Client
 	record       RecordFunc
+	logSink      LogSinkFunc // when set, OTLP/HTTP logs go here (Kafka → Quickwit) not the collector
 }
 
 func NewHTTPHandler(upstreamBase string, record RecordFunc) *HTTPHandler {
@@ -56,6 +57,11 @@ func NewHTTPHandler(upstreamBase string, record RecordFunc) *HTTPHandler {
 		record:       record,
 	}
 }
+
+// SetLogSink routes OTLP/HTTP log exports to fn (Kafka → Quickwit → log explorer)
+// instead of the collector, matching the gRPC receiver. nil keeps forwarding to
+// the collector.
+func (h *HTTPHandler) SetLogSink(fn LogSinkFunc) { h.logSink = fn }
 
 func (s Signal) meteringName() string {
 	switch s {
@@ -87,6 +93,14 @@ func (h *HTTPHandler) Handler(signal Signal) http.HandlerFunc {
 		}
 
 		isJSON := strings.Contains(r.Header.Get("Content-Type"), "json")
+
+		// OTLP/HTTP logs go to the log sink (Kafka → Quickwit → log explorer) when
+		// one is wired, mirroring the gRPC path, instead of the collector.
+		if signal == SignalLogs && h.logSink != nil {
+			h.logsToSink(w, r, tenantID, tier, raw, isJSON)
+			return
+		}
+
 		stamped, count, err := stampPayload(signal, raw, isJSON, tenantID, tier)
 		if err != nil {
 			// A malformed OTLP body is the client's error, not ours; don't forward.
@@ -103,6 +117,41 @@ func (h *HTTPHandler) Handler(signal Signal) http.HandlerFunc {
 		}
 		h.forward(w, r, signal, stamped, contentType)
 	}
+}
+
+// logsToSink decodes an OTLP/HTTP log export, stamps the tenant, meters it, and
+// hands it to the log sink (Kafka → Quickwit) instead of forwarding to the
+// collector. Responds with the minimal OTLP success envelope.
+func (h *HTTPHandler) logsToSink(w http.ResponseWriter, r *http.Request, tenantID, tier string, raw []byte, isJSON bool) {
+	req := &collogspb.ExportLogsServiceRequest{}
+	if err := decode(raw, isJSON, req); err != nil {
+		http.Error(w, "invalid OTLP payload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	for _, rl := range req.GetResourceLogs() {
+		rl.Resource = stampResource(rl.GetResource(), tenantID, tier)
+	}
+	if h.record != nil {
+		if n := countLogRecords(req); n > 0 {
+			h.record(r.Context(), tenantID, SignalLogs.meteringName(), n)
+		}
+	}
+	if err := h.logSink(r.Context(), tenantID, tier, req); err != nil {
+		log.Printf("otlp/http: log sink publish failed: %v", err)
+		http.Error(w, "telemetry backend unavailable", http.StatusBadGateway)
+		return
+	}
+	// Minimal valid OTLP ExportLogsServiceResponse (an empty message).
+	resp := &collogspb.ExportLogsServiceResponse{}
+	out, contentType := []byte("{}"), "application/json"
+	if !isJSON {
+		if b, err := proto.Marshal(resp); err == nil {
+			out, contentType = b, "application/x-protobuf"
+		}
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
 }
 
 // forward posts the re-encoded payload to the collector and copies its response

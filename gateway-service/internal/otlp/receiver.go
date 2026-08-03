@@ -39,14 +39,21 @@ func NewReceiver(resolver TenantResolver, requireKey bool, upstreamAddr string, 
 	if err != nil {
 		return nil, err
 	}
+	logsClient := collogspb.NewLogsServiceClient(conn)
 	return &Receiver{
-		stamper:       &tenantStamper{resolver: resolver, requireKey: requireKey, record: record, allow: allow},
+		stamper:       &tenantStamper{resolver: resolver, requireKey: requireKey, record: record, allow: allow, logsUp: logsClient},
 		upstream:      conn,
 		traceClient:   coltracepb.NewTraceServiceClient(conn),
 		metricsClient: colmetricspb.NewMetricsServiceClient(conn),
-		logsClient:    collogspb.NewLogsServiceClient(conn),
+		logsClient:    logsClient,
 	}, nil
 }
+
+// SetLogSink routes log exports (gRPC, and the migration ForwardLogs fallback) to
+// fn instead of the upstream collector — the gateway wires this to publish logs to
+// Kafka so OTLP-native logs land in the log explorer's Quickwit index. Must be
+// called before Start. nil (the default) keeps forwarding logs to the collector.
+func (r *Receiver) SetLogSink(fn LogSinkFunc) { r.stamper.logSink = fn }
 
 // normalizeGRPCTarget makes a bare "host:port" safe for grpc.NewClient. Without
 // a scheme, grpc parses "otel-collector:4317" as URI scheme "otel-collector"
@@ -85,7 +92,7 @@ func (r *Receiver) Start(listenAddr string, tlsConfig *tls.Config) error {
 	r.grpcServer = grpc.NewServer(opts...)
 	coltracepb.RegisterTraceServiceServer(r.grpcServer, &traceServer{stamper: r.stamper, up: r.traceClient})
 	colmetricspb.RegisterMetricsServiceServer(r.grpcServer, &metricsServer{stamper: r.stamper, up: r.metricsClient})
-	collogspb.RegisterLogsServiceServer(r.grpcServer, &logsServer{stamper: r.stamper, up: r.logsClient})
+	collogspb.RegisterLogsServiceServer(r.grpcServer, &logsServer{stamper: r.stamper})
 
 	go func() {
 		log.Printf("otlp: in-process OTLP/gRPC receiver listening on %s → forwarding tenant-stamped telemetry to collector", listenAddr)

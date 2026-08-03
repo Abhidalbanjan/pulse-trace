@@ -17,6 +17,7 @@ import (
 	"github.com/pulsetrace/gateway-service/internal/billing"
 	"github.com/pulsetrace/gateway-service/internal/handler"
 	"github.com/pulsetrace/gateway-service/internal/ingestproxy"
+	"github.com/pulsetrace/gateway-service/internal/logbridge"
 	"github.com/pulsetrace/gateway-service/internal/otlp"
 	"github.com/pulsetrace/gateway-service/internal/pii"
 	"github.com/pulsetrace/gateway-service/internal/proxy"
@@ -354,11 +355,18 @@ func main() {
 	// isn't reachable at startup, we log and leave the proxy on its OTLP fallback
 	// rather than blocking gateway boot on the optional migration feature.
 	if logProducer, err := kafka.NewProducer(); err != nil {
-		log.Printf("WARNING: migration log publishing to Quickwit disabled (kafka unavailable): %v", err)
+		log.Printf("WARNING: log publishing to Quickwit disabled (kafka unavailable); migration + OTLP logs fall back to ClickHouse otel_logs: %v", err)
 	} else {
 		defer logProducer.Close()
 		migrationProxy.SetLogSink(logProducer, usageMeter.Record, quotaEnforcer.Allow)
-		log.Printf("migration logs → Kafka topic 'logs' → Quickwit (log explorer)")
+		// Route OTLP-native logs (gRPC + HTTP) to the same Kafka → Quickwit path so
+		// they surface in the log explorer alongside migration and app logs, instead
+		// of only reaching the unqueried ClickHouse otel_logs table. Metering/quota
+		// are applied by the OTLP receiver before the bridge publishes.
+		logBridge := logbridge.New(logProducer)
+		otlpReceiver.SetLogSink(logBridge.Publish)
+		otlpHTTP.SetLogSink(logBridge.Publish)
+		log.Printf("logs (migration + OTLP-native) → Kafka topic 'logs' → Quickwit (log explorer)")
 	}
 	migrationProxy.RegisterRoutes(mux)
 	// Optional TLS/mTLS for the OTLP/gRPC listener, so the per-tenant ingestion

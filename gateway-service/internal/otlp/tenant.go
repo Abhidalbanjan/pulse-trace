@@ -61,6 +61,12 @@ type RecordFunc func(ctx context.Context, tenantID, signal string, count int64)
 // quota. Injected so this package doesn't import the quota package. nil = allow all.
 type AllowFunc func(ctx context.Context, tenantID, signal string) bool
 
+// LogSinkFunc receives a tenant-stamped OTLP log export and persists it somewhere
+// other than the collector — the gateway wires this to publish logs to Kafka
+// (→ Quickwit → the log explorer) so OTLP-native logs land in the same store as
+// every other log source. nil keeps the default behavior (forward to collector).
+type LogSinkFunc func(ctx context.Context, tenantID, tier string, req *collogspb.ExportLogsServiceRequest) error
+
 // tenantStamper holds the shared auth+stamp logic used by all three OTLP service
 // servers (trace/metrics/logs each need their own type because the OTLP proto
 // gives all three an identically-named Export method).
@@ -69,6 +75,26 @@ type tenantStamper struct {
 	requireKey bool
 	record     RecordFunc
 	allow      AllowFunc
+
+	// logSink, when set, receives stamped log exports instead of the collector;
+	// logsUp is the upstream collector client used when no sink is wired.
+	logSink LogSinkFunc
+	logsUp  collogspb.LogsServiceClient
+}
+
+// emitLogs stamps the tenant onto every resource, meters the records, then routes
+// the export to the log sink (Kafka → Quickwit) if one is wired, else forwards it
+// to the upstream collector. Auth and quota are the caller's responsibility.
+func (s *tenantStamper) emitLogs(ctx context.Context, tenantID, tier string, req *collogspb.ExportLogsServiceRequest) error {
+	for _, rl := range req.GetResourceLogs() {
+		rl.Resource = stampResource(rl.GetResource(), tenantID, tier)
+	}
+	s.meter(ctx, tenantID, "logs", countLogRecords(req))
+	if s.logSink != nil {
+		return s.logSink(ctx, tenantID, tier, req)
+	}
+	_, err := s.logsUp.Export(forwardContext(ctx), req)
+	return err
 }
 
 // meter records count events for the tenant if metering is wired.
@@ -214,7 +240,6 @@ func (m *metricsServer) Export(ctx context.Context, req *colmetricspb.ExportMetr
 type logsServer struct {
 	collogspb.UnimplementedLogsServiceServer
 	stamper *tenantStamper
-	up      collogspb.LogsServiceClient
 }
 
 func (l *logsServer) Export(ctx context.Context, req *collogspb.ExportLogsServiceRequest) (*collogspb.ExportLogsServiceResponse, error) {
@@ -225,11 +250,10 @@ func (l *logsServer) Export(ctx context.Context, req *collogspb.ExportLogsServic
 	if err := l.stamper.checkQuota(ctx, tenantID, "logs"); err != nil {
 		return nil, err
 	}
-	for _, rl := range req.GetResourceLogs() {
-		rl.Resource = stampResource(rl.GetResource(), tenantID, tier)
+	if err := l.stamper.emitLogs(ctx, tenantID, tier, req); err != nil {
+		return nil, err
 	}
-	l.stamper.meter(ctx, tenantID, "logs", countLogRecords(req))
-	return l.up.Export(forwardContext(ctx), req)
+	return &collogspb.ExportLogsServiceResponse{}, nil
 }
 
 // ── Volume counting for metering ──────────────────────────────────────────────

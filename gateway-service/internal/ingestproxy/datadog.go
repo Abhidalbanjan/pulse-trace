@@ -1,8 +1,10 @@
 package ingestproxy
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -91,72 +93,87 @@ func datadogKey(r *http.Request) string {
 // decodeDatadogTraces decodes the v0.3/v0.4 payload as msgpack (the agent
 // default, or Content-Type application/msgpack) or JSON.
 func decodeDatadogTraces(contentType string, body []byte) ([][]ddSpan, error) {
-	var traces [][]ddSpan
 	if strings.Contains(contentType, "msgpack") {
-		return traces, msgpack.Unmarshal(body, &traces)
+		// Bounded streaming decode — a raw msgpack.Unmarshal into [][]ddSpan is a
+		// decode-bomb DoS (see datadog_msgpack.go).
+		return decodeDatadogTracesMsgpack(body)
 	}
-	// Some libraries send JSON; a leading '[' is the JSON array of traces.
+	// Some libraries send JSON; a leading '[' is the JSON array of traces. JSON has
+	// no length-prefix amplification (each element needs real bytes), so the
+	// standard decoder is safe here.
+	var traces [][]ddSpan
 	return traces, json.Unmarshal(body, &traces)
 }
 
 // v0.5 packs traces as a 2-tuple [stringTable, traces] where every string
 // (service/name/resource/type and each meta key/value) is an index into the
-// table, and each span is a fixed 12-element array. This is what recent Datadog
-// agents send by default, so decoding it is what makes "point your DD agent at
-// us" work without the agent negotiating down to v0.4.
-type ddV05Payload struct {
-	_msgpack struct{} `msgpack:",as_array"`
-	Strings  []string
-	Traces   [][]ddSpanV05
-}
-
-type ddSpanV05 struct {
-	_msgpack struct{} `msgpack:",as_array"`
-	Service  uint32
-	Name     uint32
-	Resource uint32
-	TraceID  uint64
-	SpanID   uint64
-	ParentID uint64
-	Start    int64
-	Duration int64
-	Error    int32
-	Meta     map[uint32]uint32
-	Metrics  map[uint32]float64
-	Type     uint32
-}
+// table, and each span is a positional array. This is what recent Datadog agents
+// send by default, so decoding it is what makes "point your DD agent at us" work
+// without the agent negotiating down to v0.4.
+//
+// Spans are decoded positionally rather than into a fixed-arity as_array struct:
+// the msgpack decoder rejects an array whose length doesn't match the struct's
+// field count, and Datadog has extended the span array over time (e.g. a 13th
+// meta_struct element in newer agents). A strict struct would 400 the *entire*
+// batch the moment one span carries an extra trailing field. Reading the first
+// v05SpanArity fields and ignoring the rest tolerates that drift.
+// v05SpanArity is the number of leading fields defined by the v0.5 span layout:
+// service, name, resource, trace_id, span_id, parent_id, start, duration, error,
+// meta, metrics, type. Anything beyond these is a newer optional field we skip.
+const v05SpanArity = 12
 
 // decodeDatadogTracesV05 resolves the string-table indices back into the
 // v0.3/v0.4 ddSpan shape so the rest of the pipeline (ddTracesToOTLP) is shared.
+// It decodes the whole payload as a bounded stream (see datadog_msgpack.go): the
+// top-level is a [stringTable, traces] 2-tuple, every span field is a string-table
+// index, and every array/map length is bounded by the body size to prevent a
+// decode-bomb OOM.
 func decodeDatadogTracesV05(body []byte) ([][]ddSpan, error) {
-	var p ddV05Payload
-	if err := msgpack.Unmarshal(body, &p); err != nil {
+	d := msgpack.NewDecoder(bytes.NewReader(body))
+	limit := len(body)
+
+	top, err := d.DecodeArrayLen()
+	if err != nil {
+		return nil, fmt.Errorf("v0.5 payload header: %w", err)
+	}
+	if top != 2 {
+		return nil, fmt.Errorf("v0.5 payload must be [strings, traces], got array of %d", top)
+	}
+
+	strCount, err := boundedArrayLen(d, limit)
+	if err != nil {
 		return nil, err
 	}
-	get := func(i uint32) string {
-		if int(i) < len(p.Strings) {
-			return p.Strings[i]
+	strTable := make([]string, strCount)
+	for i := range strTable {
+		if strTable[i], err = d.DecodeString(); err != nil {
+			return nil, fmt.Errorf("v0.5 string table entry %d: %w", i, err)
 		}
-		return ""
 	}
-	out := make([][]ddSpan, 0, len(p.Traces))
-	for _, trace := range p.Traces {
-		spans := make([]ddSpan, 0, len(trace))
-		for _, s := range trace {
-			meta := make(map[string]string, len(s.Meta))
-			for k, v := range s.Meta {
-				meta[get(k)] = get(v)
+	get := func(i uint32) string {
+		if int(i) < len(strTable) {
+			return strTable[i]
+		}
+		return "" // out-of-range index → empty string, per the DD convention that index 0 is ""
+	}
+
+	traceCount, err := boundedArrayLen(d, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([][]ddSpan, 0, traceCount)
+	for t := 0; t < traceCount; t++ {
+		spanCount, err := boundedArrayLen(d, limit)
+		if err != nil {
+			return nil, err
+		}
+		spans := make([]ddSpan, 0, spanCount)
+		for s := 0; s < spanCount; s++ {
+			span, err := decodeV05SpanStream(d, limit, get)
+			if err != nil {
+				return nil, err
 			}
-			metrics := make(map[string]float64, len(s.Metrics))
-			for k, v := range s.Metrics {
-				metrics[get(k)] = v
-			}
-			spans = append(spans, ddSpan{
-				Service: get(s.Service), Name: get(s.Name), Resource: get(s.Resource),
-				TraceID: s.TraceID, SpanID: s.SpanID, ParentID: s.ParentID,
-				Start: s.Start, Duration: s.Duration, Error: s.Error, Type: get(s.Type),
-				Meta: meta, Metrics: metrics,
-			})
+			spans = append(spans, span)
 		}
 		out = append(out, spans)
 	}

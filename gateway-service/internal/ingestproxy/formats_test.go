@@ -28,18 +28,10 @@ func TestDatadogTraces_V05StringTable(t *testing.T) {
 	for i, s := range strTable {
 		idx[s] = uint32(i)
 	}
-	span := ddSpanV05{
-		Service: idx["api"], Name: idx["http.request"], Resource: idx["GET /users"],
-		TraceID: 7, SpanID: 8, ParentID: 0, Start: 1_700_000_000_000_000_000, Duration: 3_000_000,
-		Error: 1, Type: idx["web"],
-		Meta:    map[uint32]uint32{idx["http.method"]: idx["GET"]},
-		Metrics: map[uint32]float64{},
-	}
-	payload := ddV05Payload{Strings: strTable, Traces: [][]ddSpanV05{{span}}}
-	packed, err := msgpack.Marshal(&payload)
-	if err != nil {
-		t.Fatalf("marshal v0.5: %v", err)
-	}
+	span := v05Span(idx["api"], idx["http.request"], idx["GET /users"],
+		7, 8, 0, 1_700_000_000_000_000_000, 3_000_000, 1,
+		map[uint32]uint32{idx["http.method"]: idx["GET"]}, map[uint32]float64{}, idx["web"])
+	packed := packV05(strTable, [][]msgpack.RawMessage{{span}})
 
 	f := &fakeForwarder{}
 	p := newProxy(f, true)
@@ -72,6 +64,98 @@ func TestDatadogTraces_V05StringTable(t *testing.T) {
 	}
 	if !sawMethod {
 		t.Error("v0.5 meta indices not resolved to http.method=GET")
+	}
+}
+
+// v05Span encodes a v0.5 span as the positional msgpack array agents send. extra
+// appends trailing fields (e.g. the meta_struct newer agents add) so tests can
+// exercise arity drift.
+func v05Span(service, name, resource uint32, traceID, spanID, parentID uint64,
+	start, duration int64, errCode int32, meta map[uint32]uint32, metrics map[uint32]float64,
+	typ uint32, extra ...any) msgpack.RawMessage {
+	arr := []any{service, name, resource, traceID, spanID, parentID, start, duration, errCode, meta, metrics, typ}
+	arr = append(arr, extra...)
+	b, err := msgpack.Marshal(arr)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// packV05 marshals a v0.5 payload: the [stringTable, traces] 2-tuple where each
+// span is already a raw positional array (from v05Span).
+func packV05(strTable []string, traces [][]msgpack.RawMessage) []byte {
+	b, err := msgpack.Marshal([]any{strTable, traces})
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// A span carrying extra trailing fields (a newer agent's 13th meta_struct
+// element, here modeled as an extra map) must still decode — the core 12 fields
+// are read positionally and the rest ignored — instead of 400-ing the batch.
+func TestDatadogTraces_V05ExtraTrailingField(t *testing.T) {
+	strTable := []string{"", "api", "op", "res"}
+	idx := map[string]uint32{}
+	for i, s := range strTable {
+		idx[s] = uint32(i)
+	}
+	span := v05Span(idx["api"], idx["op"], idx["res"], 1, 2, 0, 100, 5, 0,
+		map[uint32]uint32{}, map[uint32]float64{}, 0,
+		map[string]any{"unexpected": "meta_struct"}) // 13th element
+	packed := packV05(strTable, [][]msgpack.RawMessage{{span}})
+
+	f := &fakeForwarder{}
+	p := newProxy(f, true)
+	req := httptest.NewRequest(http.MethodPost, "/v0.5/traces", bytes.NewReader(packed))
+	req.Header.Set("DD-API-KEY", "k-acme")
+	rr := httptest.NewRecorder()
+	p.DatadogTraces(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("extra-field v0.5 span should decode, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if f.traces == nil || len(f.traces.GetResourceSpans()) != 1 {
+		t.Fatal("span with trailing field was not forwarded")
+	}
+	if got := f.traces.GetResourceSpans()[0].GetScopeSpans()[0].GetSpans()[0].GetName(); got != "res" {
+		t.Errorf("core fields mis-decoded past the extra element: name=%q", got)
+	}
+}
+
+// A truncated span (fewer than the 12 core fields) is rejected with a clear
+// error rather than silently producing a half-span or panicking.
+func TestDatadogTraces_V05ShortSpanRejected(t *testing.T) {
+	short, _ := msgpack.Marshal([]any{uint32(0), uint32(1), uint32(2)}) // only 3 fields
+	packed := packV05([]string{"", "a", "b"}, [][]msgpack.RawMessage{{short}})
+
+	f := &fakeForwarder{}
+	p := newProxy(f, true)
+	req := httptest.NewRequest(http.MethodPost, "/v0.5/traces", bytes.NewReader(packed))
+	req.Header.Set("DD-API-KEY", "k-acme")
+	rr := httptest.NewRecorder()
+	p.DatadogTraces(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("short v0.5 span should be a 400, got %d", rr.Code)
+	}
+}
+
+// An out-of-range string index resolves to "" instead of panicking.
+func TestDatadogTraces_V05OutOfRangeIndex(t *testing.T) {
+	span := v05Span(99, 99, 99, 1, 2, 0, 100, 5, 0, map[uint32]uint32{}, map[uint32]float64{}, 99)
+	packed := packV05([]string{"", "only"}, [][]msgpack.RawMessage{{span}})
+
+	f := &fakeForwarder{}
+	p := newProxy(f, true)
+	req := httptest.NewRequest(http.MethodPost, "/v0.5/traces", bytes.NewReader(packed))
+	req.Header.Set("DD-API-KEY", "k-acme")
+	rr := httptest.NewRecorder()
+	p.DatadogTraces(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("out-of-range index should not fail, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -363,4 +447,28 @@ func TestSplunkHEC_PublishesNativeLogEntries(t *testing.T) {
 	if e.TenantID != "acme" {
 		t.Errorf("splunk log entry not tenant-stamped: %q", e.TenantID)
 	}
+}
+
+// FuzzDecodeDatadogTracesV05 feeds arbitrary bytes (seeded with valid payloads)
+// to the v0.5 decoder to prove it never panics on malformed string-table input —
+// only ever returns a value or an error.
+func FuzzDecodeDatadogTracesV05(f *testing.F) {
+	seedTable := []string{"", "api", "op", "res"}
+	idx := map[string]uint32{"": 0, "api": 1, "op": 2, "res": 3}
+	span := v05Span(idx["api"], idx["op"], idx["res"], 1, 2, 0, 100, 5, 0,
+		map[uint32]uint32{2: 3}, map[uint32]float64{}, 0)
+	valid := packV05(seedTable, [][]msgpack.RawMessage{{span}})
+	f.Add(valid)
+	f.Add([]byte{})
+	f.Add([]byte{0x90})       // empty msgpack array
+	f.Add([]byte{0x92, 0x90}) // [ [] , ... ] truncated
+
+	f.Fuzz(func(t *testing.T, body []byte) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("decodeDatadogTracesV05 panicked on %x: %v", body, r)
+			}
+		}()
+		_, _ = decodeDatadogTracesV05(body)
+	})
 }

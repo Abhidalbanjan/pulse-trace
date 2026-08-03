@@ -47,10 +47,10 @@ These raise many features at once and are prerequisites for the parity gates.
 - **CI gate:** a script diffs (a) endpoints in the spec vs endpoints referenced in `frontend/src` and (b) UI calls vs real routes. Any endpoint without a UI surface (and not `x-ui: none`) **fails the build**. This is the mechanism that keeps R2 true forever.
 - **DoD:** the parity matrix (§4) is generated, not hand-maintained; build red on any new orphan.
 
-### F0.2 — Load & scale validation harness  · effort L
-- Extend `loadtest/` (k6) into a **sustained** ingestion test: OTLP + DD/Splunk + logs at a target rate (define SLO, e.g. 50k spans/s, 100k log lines/s per shard).
-- Capture Kafka lag, ClickHouse insert latency/merge pressure, gateway CPU/mem, and publish a `PERF_BASELINE.md` with p50/p95/p99 + the ceiling.
-- Add a scale stage to CI (scheduled, not per-PR) that alerts on regression.
+### F0.2 — Load & scale validation harness  · effort L · ✅ delivered
+- ✅ Sustained, multi-protocol k6 ingestion test in [`scripts/load/`](scripts/load/) (`ingest-load.js`): native logs + OTLP logs + Datadog + Splunk at a configurable aggregate arrival rate, with **per-protocol** p95/p99 thresholds that fail the build on regression.
+- ✅ Downstream back-pressure sampling (`collect-infra-metrics.sh`): Kafka consumer-group lag, ClickHouse active parts/merges, gateway + log-service CPU/mem; merged into [`PERF_BASELINE.md`](PERF_BASELINE.md) (p50/p95/p99 + a documented method for finding the throughput ceiling). The results block is machine-written by `run-baseline.sh`, never by hand.
+- ✅ Scale stage in CI: per-PR fast gate (`ci.yml` → `load-test`, native path) + a **scheduled** deep run (`.github/workflows/scale-baseline.yml`, weekly + on-demand) that uploads the baseline as an artifact.
 - **Unblocks R4 for every pillar** — most pillar scores are currently capped by "scale unproven."
 
 ### F0.3 — Structural tenant isolation  · effort L

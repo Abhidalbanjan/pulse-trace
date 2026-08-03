@@ -212,11 +212,15 @@ jobs:
           echo "gateway did not become healthy in time"; exit 1
 
       - name: Run k6 ingestion load test
-        # Reuse the k6 Docker image (docker is already present for compose) with
-        # host networking so it reaches the compose-published gateway on :8080.
+        # Fast per-PR regression gate: the native log path only (PROTOCOLS=logs),
+        # under the limiter. The deeper multi-protocol baseline runs on a schedule
+        # (.github/workflows/scale-baseline.yml). Reuse the k6 Docker image (docker
+        # is already present for compose) with host networking so it reaches the
+        # compose-published gateway on :8080. SUMMARY_OUT points at /tmp because the
+        # script mount is read-only.
         run: |
           docker run --rm --network host \
-            -e RATE=80 -e DURATION=30s \
+            -e RATE=80 -e DURATION=30s -e PROTOCOLS=logs -e SUMMARY_OUT=/tmp/summary.json \
             -v "$PWD/scripts/load:/scripts:ro" \
             grafana/k6 run /scripts/ingest-load.js
 

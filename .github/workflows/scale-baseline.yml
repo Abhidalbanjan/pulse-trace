@@ -1,0 +1,79 @@
+name: scale-baseline
+
+# The sustained, multi-protocol ingestion baseline (ROAD_TO_100 · F0.2). Kept in
+# its own workflow — not the per-PR CI — so it runs on a schedule (and on demand)
+# without dragging the whole build/test matrix onto a cron. The per-PR fast gate
+# lives in ci.yml's `load-test` job; this is the deeper run that also samples
+# downstream back-pressure and publishes PERF_BASELINE.md.
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC — weekly regression sweep
+  workflow_dispatch:
+    inputs:
+      rate:
+        description: "Aggregate arrival rate (req/s across all protocols)"
+        default: "120"
+      duration:
+        description: "Sustained hold time (k6 duration, e.g. 2m)"
+        default: "2m"
+      protocols:
+        description: "Comma list of protocols to drive"
+        default: "logs,otlp_logs,dd_logs,splunk"
+
+jobs:
+  scale-baseline:
+    name: sustained multi-protocol ingestion baseline
+    runs-on: ubuntu-latest
+    env:
+      JWT_SECRET: ci-scale-fixed-secret-not-for-production
+      RATE: ${{ github.event.inputs.rate || '120' }}
+      DURATION: ${{ github.event.inputs.duration || '2m' }}
+      PROTOCOLS: ${{ github.event.inputs.protocols || 'logs,otlp_logs,dd_logs,splunk' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Start backend stack (docker compose)
+        run: docker compose up -d --build
+
+      - name: Run sustained ingestion baseline (k6 + infra sampler → PERF_BASELINE.md)
+        run: scripts/load/run-baseline.sh
+
+      - name: Show updated baseline
+        if: always()
+        run: sed -n '/BASELINE:BEGIN/,/BASELINE:END/p' PERF_BASELINE.md || true
+
+      - name: Upload baseline artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingestion-baseline
+          path: |
+            scripts/load/summary.json
+            scripts/load/infra-metrics.json
+            PERF_BASELINE.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Dump backend logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 400
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

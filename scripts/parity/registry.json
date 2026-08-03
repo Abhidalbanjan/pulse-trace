@@ -1,0 +1,69 @@
+{
+  "_doc": "Backend↔frontend parity registry (F0.1). The checker fails on NEW backend routes that have no UI and aren't listed here, on stale entries (fixed but still listed), and on frontend calls that hit no backend route. Paths are normalized: params → ':p', no trailing slash, no query. Keys are 'METHOD /path' or a bare '/path' prefix for uiNone/proxy entries (prefix match).",
+
+  "uiNone": {
+    "_doc": "Backend routes that legitimately never get a UI control: agent/SDK ingestion, webhooks, health, and internal service-to-service or control-plane endpoints. Prefix match (a listed path covers itself and anything under it).",
+    "GET /healthz": "liveness probe",
+    "POST /api/v1/logs": "log ingestion (agents/SDKs, not a UI action)",
+    "POST /api/v1/rum/ingest": "RUM browser SDK ingestion",
+    "POST /v1/logs": "OTLP/HTTP logs ingestion",
+    "POST /v1/metrics": "OTLP/HTTP metrics ingestion",
+    "POST /v1/traces": "OTLP/HTTP traces ingestion",
+    "POST /api/v1/series": "Datadog v1 metrics migration ingestion",
+    "POST /api/v2/series": "Datadog v2 metrics migration ingestion",
+    "POST /api/v2/logs": "Datadog logs migration ingestion",
+    "POST /services/collector": "Splunk HEC migration ingestion",
+    "POST /v0.3/traces": "Datadog trace-agent migration ingestion",
+    "POST /v0.4/traces": "Datadog trace-agent migration ingestion",
+    "POST /v0.5/traces": "Datadog trace-agent migration ingestion",
+    "POST /api/v1/agent/playbook/execute": "internal: topology agent executes a signed playbook",
+    "POST /api/v1/control-plane/incidents": "internal: control-plane incident ingest",
+    "POST /api/v1/topology/state": "agent pushes service state",
+    "POST /api/v1/topology/catalog": "agent registers services into the catalog",
+    "POST /api/v1/topology/causal-path": "internal RCA graph query",
+    "GET /api/v1/topology/agent-config": "agent pulls its config",
+    "POST /api/v1/webhooks/github": "inbound GitHub webhook",
+    "POST /api/v1/webhooks/stripe": "inbound Stripe billing webhook",
+    "POST /api/v1/auth/register": "legacy alias of /auth/signup (UI uses signup)",
+    "POST /api/v1/slo/evaluate-pr": "CI/PR shift-left gate caller, not a screen"
+  },
+
+  "proxyUpstreams": {
+    "_doc": "Gateway prefixes reverse-proxied to non-Go upstreams (Pyroscope/Quickwit/Jaeger/etc). Frontend calls under these prefixes are 'covered' even with no Go HandleFunc. Prefix match.",
+    "/api/v1/profiler": "Pyroscope",
+    "/api/v1/search": "Quickwit search",
+    "/api/traces": "Jaeger",
+    "/api/services": "Jaeger",
+    "/api/v1/actions": "action-service (remediation execute)"
+  },
+
+  "knownOrphans": {
+    "_doc": "Backend routes that SHOULD have a UI but don't yet — the Wave 2 backlog, frozen as known debt. The checker ALLOWS these but the list may only shrink: ship the UI, delete the entry. Adding a NEW orphan not listed here fails the build. Each maps to its ROAD_TO_100 feature.",
+    "POST /api/v1/incidents/:p/playbook/approve": "F1 self-healing UI",
+    "POST /api/v1/incidents/:p/playbook/reject": "F1 self-healing UI",
+    "POST /api/v1/incidents/:p/playbook/dry-run": "F1 self-healing UI",
+    "GET /api/v1/remediation/policy": "F1 self-healing UI (gates the approve button)",
+    "GET /api/v1/incidents/:p": "F1 incident detail depth",
+    "GET /api/v1/incidents/:p/timeline": "F1 incident timeline",
+    "GET /api/v1/slo/definitions": "F2 SLO screen",
+    "POST /api/v1/slo/definitions": "F2 SLO screen",
+    "DELETE /api/v1/slo/definitions/:p": "F2 SLO screen",
+    "GET /api/v1/slo/budget-alerts": "F2 SLO screen",
+    "GET /api/v1/slo/dashboard": "F2 SLO screen",
+    "GET /api/v1/alerts": "F2/alerting: alerts list screen",
+    "GET /api/v1/alerts/:p": "F2/alerting: alert detail",
+    "DELETE /api/v1/admin/ingestion-keys/:p": "F4 ingestion-key mgmt UI (revoke — only create is wired today)",
+    "POST /api/v1/admin/ingestion-keys/:p/rotate": "F4 ingestion-key mgmt UI (rotate button)",
+    "POST /api/v1/admin/tenant/close": "F17 tenant admin UI",
+    "POST /api/v1/admin/tenant/plan": "F17 billing/plan admin UI",
+    "POST /api/v1/admin/tenant/purge-data": "F19 data-deletion UI",
+    "DELETE /api/v1/topology/tenant": "F19 data-deletion UI (topology purge)",
+    "GET /api/v1/topology/dependencies/downstream": "F13 topology depth (downstream view)",
+    "GET /api/v1/logs/:p": "F6 single-log permalink view",
+    "PUT /api/v1/admin/users/role": "F18 user role edit (verify wired in users panel)"
+  },
+
+  "frontendExternal": {
+    "_doc": "Frontend /api paths that intentionally don't map to a gateway route (Next.js internal API routes, etc). Empty today."
+  }
+}

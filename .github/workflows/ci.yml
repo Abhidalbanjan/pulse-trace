@@ -100,6 +100,21 @@ jobs:
       - name: Build
         run: npm run build
 
+  parity:
+    name: backend↔frontend parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Static analysis only (no deps, no stack): fails if a backend route has no
+      # UI and isn't registered as no-UI-by-design or a known orphan, if a fixed
+      # orphan is still listed, or if the frontend calls a non-existent route.
+      # See scripts/parity/ and ROAD_TO_100.md · F0.1.
+      - name: Enforce backend↔frontend parity
+        run: node scripts/parity/check-parity.mjs
+
   e2e:
     name: e2e (playwright)
     runs-on: ubuntu-latest

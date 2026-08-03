@@ -8,6 +8,7 @@ import (
 	"github.com/pulsetrace/correlation-service/internal/engine"
 	"github.com/pulsetrace/correlation-service/internal/repository"
 	"github.com/pulsetrace/shared/models"
+	"github.com/pulsetrace/shared/remediation"
 )
 
 // PlaybookHandler is the human half of human-in-the-loop remediation: the
@@ -20,10 +21,16 @@ import (
 type PlaybookHandler struct {
 	repo   *repository.IncidentRepository
 	router *engine.AutomationRouter
+	// authz gates approval by the action's risk tier: the gateway RBAC lets a
+	// role reach these endpoints at all, but high-risk actions (scale, rollback,
+	// delete…) additionally require an elevated role. The action type is only
+	// known here (on the playbook), which is why this check can't live at the
+	// gateway.
+	authz *remediation.ApproverAuthorizer
 }
 
-func NewPlaybookHandler(repo *repository.IncidentRepository, router *engine.AutomationRouter) *PlaybookHandler {
-	return &PlaybookHandler{repo: repo, router: router}
+func NewPlaybookHandler(repo *repository.IncidentRepository, router *engine.AutomationRouter, authz *remediation.ApproverAuthorizer) *PlaybookHandler {
+	return &PlaybookHandler{repo: repo, router: router, authz: authz}
 }
 
 func (h *PlaybookHandler) RegisterRoutes(mux *http.ServeMux) {
@@ -68,6 +75,16 @@ func (h *PlaybookHandler) Approve(w http.ResponseWriter, r *http.Request) {
 	approver := userOf(r)
 	if approver == "" {
 		http.Error(w, "cannot attribute approval: no authenticated user", http.StatusUnauthorized)
+		return
+	}
+
+	// Per-action authorization: classify the playbook's blast radius and require
+	// an elevated role for high-risk actions. The gateway already confirmed this
+	// caller may reach the endpoint; this is the finer, action-aware gate on top.
+	pb := inc.Causal.Playbook
+	tier := remediation.ClassifyRisk(pb.Name, pb.Description)
+	if ok, reason := h.authz.CanApprove(roleOf(r), tier); !ok {
+		http.Error(w, "not authorized to approve this remediation: "+reason, http.StatusForbidden)
 		return
 	}
 
@@ -183,6 +200,12 @@ func tenantOf(r *http.Request) string {
 // request.
 func userOf(r *http.Request) string {
 	return r.Header.Get("X-User-Subject")
+}
+
+// roleOf returns the gateway-verified role for the request (set by the gateway
+// auth middleware from the JWT; the gateway strips any client-supplied copy).
+func roleOf(r *http.Request) string {
+	return r.Header.Get("X-User-Role")
 }
 
 // primaryService picks the service a playbook should act on. Incidents can

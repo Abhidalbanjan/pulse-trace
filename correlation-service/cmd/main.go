@@ -138,7 +138,14 @@ func main() {
 	repo := repository.NewIncidentRepository(pool)
 	correlator := engine.NewCorrelator(repo, publisher, analyzer, topoClient, forwarder, autoRouter)
 	incidentHandler := handler.NewIncidentHandler(repo)
-	playbookHandler := handler.NewPlaybookHandler(repo, autoRouter)
+	// Per-action approval authz: only roles in REMEDIATION_ELEVATED_ROLES (plus
+	// admin) may approve high-risk actions (scale/rollback/delete…); low-risk
+	// restarts stay approvable by anyone the gateway RBAC already let through.
+	approverAuthz := remediation.NewApproverAuthorizer(
+		remediation.ParseRoles(os.Getenv("REMEDIATION_ELEVATED_ROLES")))
+	log.Printf("correlation-service: high-risk remediation approvals require an elevated role (admin + %v)",
+		remediation.ParseRoles(os.Getenv("REMEDIATION_ELEVATED_ROLES")))
+	playbookHandler := handler.NewPlaybookHandler(repo, autoRouter, approverAuthz)
 
 	// ── SLO subsystem ────────────────────────────────────────────────────────
 	// ── Quickwit (SLI queries) ────────────────────────────────────────────────

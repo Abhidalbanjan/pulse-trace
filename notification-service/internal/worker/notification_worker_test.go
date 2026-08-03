@@ -185,6 +185,80 @@ func TestHandle_OpsgenieConfigured_PostsAuthorizedAlert(t *testing.T) {
 	}
 }
 
+func resolvedEvent() models.NotificationEvent {
+	e := sampleEvent()
+	e.Action = models.NotificationActionResolved
+	e.Body = "Auto-resolved after 10m0s with no new alerts"
+	return e
+}
+
+// A resolved event must send PagerDuty a "resolve" action keyed on the same
+// dedup_key, with no payload — that's what closes the alert it opened.
+func TestHandle_PagerDutyResolve_SendsResolveAction(t *testing.T) {
+	var body string
+	var headers http.Header
+	srv := captureServer(t, http.StatusAccepted, &body, &headers)
+	defer srv.Close()
+
+	w := &NotificationWorker{pagerdutyRoutingKey: "rk-123", pagerdutyURL: srv.URL, httpClient: http.DefaultClient}
+	if err := w.Handle(context.Background(), mustJSON(t, resolvedEvent())); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+
+	var got pagerdutyEvent
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("PagerDuty payload invalid: %v (%s)", err, body)
+	}
+	if got.EventAction != "resolve" {
+		t.Errorf("event_action = %q, want resolve", got.EventAction)
+	}
+	if got.DedupKey != "inc-42" {
+		t.Errorf("dedup_key = %q, want inc-42 (must match the trigger to close it)", got.DedupKey)
+	}
+	if got.Payload != nil {
+		t.Errorf("resolve must omit the payload, got %+v", got.Payload)
+	}
+}
+
+// A resolved event must close the Opsgenie alias via the /{alias}/close endpoint.
+func TestHandle_OpsgenieResolve_ClosesAlias(t *testing.T) {
+	var gotPath, gotQuery, auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery, auth = r.URL.Path, r.URL.RawQuery, r.Header.Get("Authorization")
+		rw.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	w := &NotificationWorker{opsgenieAPIKey: "gk-abc", opsgenieAPIURL: srv.URL, httpClient: http.DefaultClient}
+	if err := w.Handle(context.Background(), mustJSON(t, resolvedEvent())); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+
+	if gotPath != "/inc-42/close" {
+		t.Errorf("close path = %q, want /inc-42/close", gotPath)
+	}
+	if gotQuery != "identifierType=alias" {
+		t.Errorf("query = %q, want identifierType=alias", gotQuery)
+	}
+	if auth != "GenieKey gk-abc" {
+		t.Errorf("Authorization = %q", auth)
+	}
+}
+
+// Opsgenie returning 404 on close (alert never created / already gone) must not
+// fail the dispatch — otherwise a resolve could wedge on a missing alert.
+func TestHandle_OpsgenieResolve_404IsNotAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	w := &NotificationWorker{opsgenieAPIKey: "gk-abc", opsgenieAPIURL: srv.URL, httpClient: http.DefaultClient}
+	if err := w.Handle(context.Background(), mustJSON(t, resolvedEvent())); err != nil {
+		t.Fatalf("404 on close should be tolerated, got: %v", err)
+	}
+}
+
 func TestHandle_WebhookConfigured_SignsBody(t *testing.T) {
 	var body string
 	var headers http.Header

@@ -84,6 +84,50 @@ func (r *IncidentRepository) Upsert(ctx context.Context, incident *models.Incide
 	return result, nil
 }
 
+// ResolveStale marks OPEN incidents that have had no new alert for at least
+// quietFor as RESOLVED (the correlation upsert bumps updated_at on every alert,
+// so a quiet incident means the underlying service has stopped erroring —
+// i.e. recovered). It returns the incidents it resolved, with their service
+// names populated, so the caller can emit an auto-resolve notification (which is
+// what closes the corresponding PagerDuty/Opsgenie alert). The whole thing is a
+// single UPDATE … RETURNING, so concurrent sweepers can't double-resolve a row.
+func (r *IncidentRepository) ResolveStale(ctx context.Context, quietFor time.Duration) ([]*models.Incident, error) {
+	const q = `
+		UPDATE incidents
+		   SET status = 'RESOLVED', resolved_at = NOW(), updated_at = NOW()
+		 WHERE status = 'OPEN'
+		   AND updated_at < NOW() - make_interval(secs => $1)
+		RETURNING tenant_id, id, title, root_cause, status, severity, alert_count,
+		          started_at, resolved_at, created_at, updated_at
+	`
+	rows, err := r.db.Query(ctx, q, quietFor.Seconds())
+	if err != nil {
+		return nil, fmt.Errorf("resolve stale incidents: %w", err)
+	}
+	defer rows.Close()
+
+	var resolved []*models.Incident
+	for rows.Next() {
+		inc := &models.Incident{}
+		if err := rows.Scan(
+			&inc.TenantID, &inc.ID, &inc.Title, &inc.RootCause, &inc.Status,
+			&inc.Severity, &inc.AlertCount, &inc.StartedAt, &inc.ResolvedAt,
+			&inc.CreatedAt, &inc.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan resolved incident: %w", err)
+		}
+		resolved = append(resolved, inc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Populate service names outside the iteration (serviceNames runs its own query).
+	for _, inc := range resolved {
+		inc.ServiceNames, _ = r.serviceNames(ctx, inc.ID)
+	}
+	return resolved, nil
+}
+
 // QueryResult holds a page of incidents plus total count.
 type QueryResult struct {
 	Incidents []*models.Incident

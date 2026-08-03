@@ -292,12 +292,13 @@ func (c *Correlator) correlate(ctx context.Context, alert *models.Alert) (*model
 	return c.repo.Upsert(ctx, incident, alert)
 }
 
-// notify publishes a NotificationEvent to RabbitMQ.
+// notify publishes an incident-triggered NotificationEvent to RabbitMQ.
 func (c *Correlator) notify(ctx context.Context, incident *models.Incident, alert *models.Alert) error {
 	event := models.NotificationEvent{
 		ID:         uuid.New().String(),
 		IncidentID: incident.ID,
 		Channel:    models.NotificationChannelLog,
+		Action:     models.NotificationActionTriggered,
 		Title:      incident.Title,
 		Body:       fmt.Sprintf("[%s] %s — %s (alert_count=%d)", alert.Level, alert.ServiceName, alert.Message, incident.AlertCount),
 		Severity:   incident.Severity,
@@ -310,6 +311,78 @@ func (c *Correlator) notify(ctx context.Context, incident *models.Incident, aler
 		return fmt.Errorf("marshal notification: %w", err)
 	}
 
+	return c.publisher.Publish(ctx, "incident.notification", payload)
+}
+
+// Auto-resolve defaults: sweep once a minute, treat an incident with no new alert
+// for 10 minutes as recovered. Overridable via correlation-service main wiring.
+const (
+	DefaultAutoResolveInterval = time.Minute
+	DefaultAutoResolveQuiet    = 10 * time.Minute
+)
+
+// StartAutoResolveSweeper runs a background loop that resolves quiet incidents and
+// publishes a resolved NotificationEvent for each — which is what auto-closes the
+// PagerDuty/Opsgenie alert opened when the incident fired. It returns immediately;
+// the loop stops when ctx is cancelled.
+func (c *Correlator) StartAutoResolveSweeper(ctx context.Context, interval, quietFor time.Duration) {
+	if interval <= 0 {
+		interval = DefaultAutoResolveInterval
+	}
+	if quietFor <= 0 {
+		quietFor = DefaultAutoResolveQuiet
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		log.Printf("correlator: auto-resolve sweeper running (interval=%s, quiet_for=%s)", interval, quietFor)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.sweepResolved(ctx, quietFor)
+			}
+		}
+	}()
+}
+
+// sweepResolved resolves quiet incidents and emits a resolve notification each.
+func (c *Correlator) sweepResolved(ctx context.Context, quietFor time.Duration) {
+	resolved, err := c.repo.ResolveStale(ctx, quietFor)
+	if err != nil {
+		log.Printf("correlator: auto-resolve sweep failed: %v", err)
+		return
+	}
+	for _, inc := range resolved {
+		log.Printf("correlator: auto-resolved incident %s (%q) after %s with no new alerts", inc.ID, inc.Title, quietFor)
+		if c.publisher == nil {
+			continue
+		}
+		if err := c.notifyResolved(ctx, inc, quietFor); err != nil {
+			log.Printf("correlator: failed to publish resolve notification for %s: %v", inc.ID, err)
+		}
+	}
+}
+
+// notifyResolved publishes an incident-resolved NotificationEvent (same
+// incident ID, so PagerDuty/Opsgenie close the matching alert).
+func (c *Correlator) notifyResolved(ctx context.Context, incident *models.Incident, quietFor time.Duration) error {
+	event := models.NotificationEvent{
+		ID:         uuid.New().String(),
+		IncidentID: incident.ID,
+		Channel:    models.NotificationChannelLog,
+		Action:     models.NotificationActionResolved,
+		Title:      incident.Title,
+		Body:       fmt.Sprintf("Auto-resolved after %s with no new alerts", quietFor),
+		Severity:   incident.Severity,
+		Services:   incident.ServiceNames,
+		CreatedAt:  time.Now().UTC(),
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal resolve notification: %w", err)
+	}
 	return c.publisher.Publish(ctx, "incident.notification", payload)
 }
 

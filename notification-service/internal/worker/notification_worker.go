@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	urlpkg "net/url"
 	"net/smtp"
 	"os"
 	"strings"
@@ -208,8 +209,12 @@ type slackPayload struct {
 // sendSlack posts a real notification to a Slack incoming webhook.
 // Activated by setting SLACK_WEBHOOK_URL.
 func (w *NotificationWorker) sendSlack(ctx context.Context, event *models.NotificationEvent) error {
-	text := fmt.Sprintf(":rotating_light: *[%s] %s*\n%s\nServices: %s\nIncident: %s",
-		strings.ToUpper(string(event.Severity)), event.Title, event.Body,
+	icon, label := ":rotating_light:", strings.ToUpper(string(event.Severity))
+	if event.IsResolved() {
+		icon, label = ":white_check_mark:", "RESOLVED"
+	}
+	text := fmt.Sprintf("%s *[%s] %s*\n%s\nServices: %s\nIncident: %s",
+		icon, label, event.Title, event.Body,
 		strings.Join(event.Services, ", "), event.IncidentID)
 
 	body, err := json.Marshal(slackPayload{Text: text})
@@ -244,7 +249,11 @@ func (w *NotificationWorker) sendEmail(_ context.Context, event *models.Notifica
 		return fmt.Errorf("SMTP_HOST is set but SMTP_TO has no recipients configured")
 	}
 
-	subject := fmt.Sprintf("[PulseTrace][%s] %s", strings.ToUpper(string(event.Severity)), event.Title)
+	tag := strings.ToUpper(string(event.Severity))
+	if event.IsResolved() {
+		tag = "RESOLVED"
+	}
+	subject := fmt.Sprintf("[PulseTrace][%s] %s", tag, event.Title)
 	msg := fmt.Sprintf(
 		"From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n"+
 			"%s\n\nServices: %s\nIncident: %s\nTime: %s\n",
@@ -274,10 +283,13 @@ const pagerdutyEventsURL = "https://events.pagerduty.com/v2/enqueue"
 // PagerDuty alert (and auto-resolve semantics stay possible later) rather than
 // paging on-call once per notification.
 type pagerdutyEvent struct {
-	RoutingKey  string           `json:"routing_key"`
-	EventAction string           `json:"event_action"`
-	DedupKey    string           `json:"dedup_key,omitempty"`
-	Payload     pagerdutyPayload `json:"payload"`
+	RoutingKey  string            `json:"routing_key"`
+	EventAction string            `json:"event_action"`
+	DedupKey    string            `json:"dedup_key,omitempty"`
+	// Pointer + omitempty so a "resolve" event omits the payload entirely
+	// (PagerDuty requires a non-empty summary on trigger, but rejects/ignores the
+	// payload on resolve — only routing_key/event_action/dedup_key matter there).
+	Payload *pagerdutyPayload `json:"payload,omitempty"`
 }
 
 type pagerdutyPayload struct {
@@ -299,7 +311,7 @@ func (w *NotificationWorker) sendPagerDuty(ctx context.Context, event *models.No
 		RoutingKey:  w.pagerdutyRoutingKey,
 		EventAction: "trigger",
 		DedupKey:    event.IncidentID,
-		Payload: pagerdutyPayload{
+		Payload: &pagerdutyPayload{
 			// PagerDuty caps the summary at 1024 chars; the title alone is well
 			// within that and is what shows in the alert list.
 			Summary:  fmt.Sprintf("[%s] %s", strings.ToUpper(string(event.Severity)), event.Title),
@@ -311,6 +323,14 @@ func (w *NotificationWorker) sendPagerDuty(ctx context.Context, event *models.No
 				"body":        event.Body,
 			},
 		},
+	}
+
+	// A resolved event closes the alert PagerDuty opened under this dedup_key. A
+	// "resolve" action needs only routing_key + event_action + dedup_key; the
+	// payload is omitted (PagerDuty requires a non-empty summary on trigger only).
+	if event.IsResolved() {
+		payload.EventAction = "resolve"
+		payload.Payload = nil
 	}
 
 	body, err := json.Marshal(payload)
@@ -339,8 +359,15 @@ func (w *NotificationWorker) sendPagerDuty(ctx context.Context, event *models.No
 		return fmt.Errorf("pagerduty returned status %d", resp.StatusCode)
 	}
 
-	log.Printf("notification_worker: delivered to PagerDuty (incident=%s)", event.IncidentID)
+	log.Printf("notification_worker: %s PagerDuty (incident=%s)", pdVerb(event), event.IncidentID)
 	return nil
+}
+
+func pdVerb(event *models.NotificationEvent) string {
+	if event.IsResolved() {
+		return "resolved on"
+	}
+	return "delivered to"
 }
 
 // opsgenieAlert is an Opsgenie Alerts API create-alert payload. Alias is the
@@ -355,8 +382,12 @@ type opsgenieAlert struct {
 	Source      string   `json:"source,omitempty"`
 }
 
-// sendOpsgenie creates an Opsgenie alert. Activated by OPSGENIE_API_KEY.
+// sendOpsgenie creates an Opsgenie alert, or closes it when the incident is
+// resolved (keyed on the alias = incident ID). Activated by OPSGENIE_API_KEY.
 func (w *NotificationWorker) sendOpsgenie(ctx context.Context, event *models.NotificationEvent) error {
+	if event.IsResolved() {
+		return w.closeOpsgenie(ctx, event)
+	}
 	alert := opsgenieAlert{
 		// Opsgenie caps message at 130 chars; keep it to the title and let the
 		// full context ride in the description.
@@ -393,6 +424,42 @@ func (w *NotificationWorker) sendOpsgenie(ctx context.Context, event *models.Not
 	}
 
 	log.Printf("notification_worker: delivered to Opsgenie (incident=%s)", event.IncidentID)
+	return nil
+}
+
+// closeOpsgenie closes the Opsgenie alert identified by the incident-ID alias.
+// Opsgenie exposes close as POST /v2/alerts/{alias}/close?identifierType=alias.
+func (w *NotificationWorker) closeOpsgenie(ctx context.Context, event *models.NotificationEvent) error {
+	base := strings.TrimRight(w.opsgenieAPIURL, "/")
+	url := fmt.Sprintf("%s/%s/close?identifierType=alias", base, urlpkg.PathEscape(event.IncidentID))
+
+	// A minimal body documents why the alert closed; Opsgenie accepts an empty
+	// object too, but the source/note show up in the alert's activity log.
+	body, err := json.Marshal(map[string]string{"source": "pulsetrace", "note": event.Body})
+	if err != nil {
+		return fmt.Errorf("marshal opsgenie close: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build opsgenie close request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "GenieKey "+w.opsgenieAPIKey)
+
+	resp, err := w.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("post opsgenie close: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Close is async → 202 Accepted. A 404 means the alert was never created or is
+	// already gone; treat that as success so a resolve can't wedge the dispatch.
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("opsgenie close returned status %d", resp.StatusCode)
+	}
+
+	log.Printf("notification_worker: closed Opsgenie alert (incident=%s)", event.IncidentID)
 	return nil
 }
 

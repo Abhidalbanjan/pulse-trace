@@ -166,6 +166,18 @@ func main() {
 	alertRuleEvaluator := engine.NewAlertRuleEvaluator(alertRuleRepo, publisher)
 	go alertRuleEvaluator.Start(ctx)
 
+	// ── Incident auto-resolve ─────────────────────────────────────────────────
+	// An OPEN incident with no new alert for AUTO_RESOLVE_QUIET means the service
+	// recovered; resolving it publishes a resolved notification, which auto-closes
+	// the PagerDuty/Opsgenie alert. Disable by setting AUTO_RESOLVE_QUIET=0.
+	autoResolveQuiet := getDurationEnv("AUTO_RESOLVE_QUIET", engine.DefaultAutoResolveQuiet)
+	autoResolveInterval := getDurationEnv("AUTO_RESOLVE_INTERVAL", engine.DefaultAutoResolveInterval)
+	if autoResolveQuiet > 0 {
+		correlator.StartAutoResolveSweeper(ctx, autoResolveInterval, autoResolveQuiet)
+	} else {
+		log.Printf("correlator: auto-resolve disabled (AUTO_RESOLVE_QUIET=0)")
+	}
+
 	// ── Kafka consumer (alerts topic) ─────────────────────────────────────────
 	cg, err := kafka.NewConsumerGroup(groupID, []string{alertsTopic}, correlator.Handle)
 	if err != nil {
@@ -249,6 +261,21 @@ func main() {
 //
 // Returns nil when nothing is configured, so callers can pick their own
 // no-LLM behaviour rather than being handed an empty chain.
+// getDurationEnv parses a Go duration (e.g. "10m", "30s") from an env var, or
+// returns def when unset/invalid. "0" disables (returns 0).
+func getDurationEnv(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Printf("invalid %s=%q, using default %s: %v", key, v, def, err)
+		return def
+	}
+	return d
+}
+
 func llmProviderSpecs() []causal.ProviderSpec {
 	if chain := os.Getenv("LLM_PROVIDERS"); chain != "" {
 		return causal.ParseProviderChain(chain)

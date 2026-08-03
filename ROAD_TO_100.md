@@ -69,8 +69,10 @@ These raise many features at once and are prerequisites for the parity gates.
 - ✅ **Proof of pattern**: `RolesPanel` fully migrated onto client + hook + all three primitives (removed `alert()`×2, `confirm()`, inline states; net −2 lint errors).
 - ↪ Remaining (Wave 2, screen-by-screen): migrate the other screens off `fetchWithAuth`/`useState<any[]>`/`alert()` (the pre-existing frontend **lint debt of ~85 `no-explicit-any` errors** lives in these unmigrated screens — the platform is the tool to burn it down); a shared `DataTable`; SSE where polling isn't enough.
 
-### F0.5 — Causal-AI evaluation harness  · effort L
-- A labelled fixture set of incidents → expected root cause; score narrative accuracy/precision on each provider + the rule-based fallback; publish a quality number in CI.
+### F0.5 — Causal-AI evaluation harness  · effort L · ✅ delivered
+- ✅ Labelled fixture set of 11 incidents with known root causes ([`shared/causal/eval_fixtures.go`](shared/causal/eval_fixtures.go)) and a reusable scorer ([`eval.go`](shared/causal/eval.go)) that scores **any** `Analyzer` (the rule-based fallback in CI; LLM providers when a key is present) on four dimensions: root-cause **service** identified, remediation **playbook** correct, **confidence** floor, **narrative** on-topic.
+- ✅ CI gate ([`eval_test.go`](shared/causal/eval_test.go), runs in the `shared` job): fails the build if the deterministic accuracy regresses below thresholds (overall ≥ 85%, root-service ≥ 85%, playbook ≥ 95%). Current rule-based score: **90.9%** — published in [CAUSAL_EVAL.md](CAUSAL_EVAL.md).
+- ✅ Honest headroom: one fixture (root cause behind an *undeclared* dependency) is a deliberate deterministic miss the graph-walk can't solve — the gap an LLM narrative closes — so the headline number isn't a fixture-designed-to-pass.
 - **This is the gate that lets "AI RCA" be sold as such** rather than "an LLM call that runs."
 
 ---
@@ -225,7 +227,7 @@ Ordered for maximum leverage and to keep BE/UI in lockstep.
 
 | Wave | Theme | Contents | Exit criteria |
 | --- | --- | --- | --- |
-| **1** | Foundations | F0.1 parity gate, F0.4 FE platform, F0.2 load harness, F0.3 isolation, F0.5 eval harness | Parity CI green; perf baseline published; typed client live. |
+| **1** ✅ | Foundations | F0.1 parity gate, F0.4 FE platform, F0.2 load harness, F0.3 isolation, F0.5 eval harness | ✅ **All five delivered.** Parity CI green; perf harness + baseline; structural tenant isolation (+2 live leaks fixed); typed FE platform; causal-AI eval gate at 90.9%. |
 | **2** | **Close the parity orphans** | F1 remediation UI, F2 SLO screen, F3 channels panel, F4 rotate button, F5 deploy-gates decision, F14 anomaly UI, F19 deletion UI, F16 usage UI | **Every backend capability has a UI (R2 = 100%).** |
 | **3** | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. |
 | **4** | Revenue & enterprise | F17 billing, F18 SSO/MFA/policy UX, F20 audit, F21 infra/DR | Self-serve money path + enterprise procurement bar met. |

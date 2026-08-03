@@ -145,6 +145,10 @@ func (r *AlertRepository) Query(ctx context.Context, params *models.AlertQueryPa
 }
 
 // GetByID fetches a single alert by its UUID.
+// GetByID fetches a single alert by ID without a tenant filter. It exists only
+// for internal callers that have already resolved the tenant; any handler acting
+// on a request must use GetByIDForTenant, or an alert ID from one tenant becomes
+// readable by another.
 func (r *AlertRepository) GetByID(ctx context.Context, id string) (*models.Alert, error) {
 	const q = `
 		SELECT tenant_id, id, log_entry_id, service_name, level, message, trace_id, triggered_at, created_at
@@ -152,6 +156,25 @@ func (r *AlertRepository) GetByID(ctx context.Context, id string) (*models.Alert
 	`
 	a := &models.Alert{}
 	err := r.db.QueryRow(ctx, q, id).Scan(
+		&a.TenantID, &a.ID, &a.LogEntryID, &a.ServiceName, &a.Level,
+		&a.Message, &a.TraceID, &a.TriggeredAt, &a.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("alert not found: %w", err)
+	}
+	return a, nil
+}
+
+// GetByIDForTenant fetches a single alert, refusing to return one that belongs to
+// another tenant (returns not-found on a tenant mismatch, so the caller can't even
+// confirm the ID exists elsewhere).
+func (r *AlertRepository) GetByIDForTenant(ctx context.Context, tenantID, id string) (*models.Alert, error) {
+	const q = `
+		SELECT tenant_id, id, log_entry_id, service_name, level, message, trace_id, triggered_at, created_at
+		FROM alerts WHERE id = $1 AND tenant_id = $2
+	`
+	a := &models.Alert{}
+	err := r.db.QueryRow(ctx, q, id, tenantID).Scan(
 		&a.TenantID, &a.ID, &a.LogEntryID, &a.ServiceName, &a.Level,
 		&a.Message, &a.TraceID, &a.TriggeredAt, &a.CreatedAt,
 	)

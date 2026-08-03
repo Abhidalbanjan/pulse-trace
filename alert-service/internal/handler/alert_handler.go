@@ -43,6 +43,10 @@ func (h *AlertHandler) ListAlerts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
 	params := &models.AlertQueryParams{
+		// Always tenant-scope the listing. Without this the repository's tenant
+		// filter (applied only when TenantID is non-empty) is skipped and the list
+		// returns every tenant's alerts.
+		TenantID:    tenantFromRequest(r),
 		ServiceName: q.Get("service"),
 		Level:       models.LogLevel(q.Get("level")),
 		From:        q.Get("from"),
@@ -91,7 +95,8 @@ func (h *AlertHandler) GetAlert(w http.ResponseWriter, r *http.Request) {
 
 	span.SetAttributes(attribute.String("alert.id", id))
 
-	alert, err := h.repo.GetByID(ctx, id)
+	// Tenant-scope the read so an alert ID from one tenant can't be read by another.
+	alert, err := h.repo.GetByIDForTenant(ctx, tenantFromRequest(r), id)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "not found")
@@ -117,4 +122,14 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	if err := json.NewEncoder(buf).Encode(v); err == nil {
 		w.Write(buf.Bytes())
 	}
+}
+
+// tenantFromRequest resolves the caller's tenant from the gateway-verified
+// X-Tenant-ID header (never a raw client header — the gateway sets it from the
+// JWT). Defaults to "default" so single-tenant/dev stacks keep working.
+func tenantFromRequest(r *http.Request) string {
+	if t := r.Header.Get("X-Tenant-ID"); t != "" {
+		return t
+	}
+	return "default"
 }

@@ -216,13 +216,25 @@ jobs:
         # under the limiter. The deeper multi-protocol baseline runs on a schedule
         # (.github/workflows/scale-baseline.yml). Reuse the k6 Docker image (docker
         # is already present for compose) with host networking so it reaches the
-        # compose-published gateway on :8080. SUMMARY_OUT points at /tmp because the
-        # script mount is read-only.
+        # compose-published gateway on :8080. A writable /out mount captures the
+        # per-run summary so p50/p95/p99 are recorded on every PR, not only on the
+        # scheduled deep run (the script mount stays read-only).
         run: |
+          mkdir -p "$RUNNER_TEMP/load-out"
           docker run --rm --network host \
-            -e RATE=80 -e DURATION=30s -e PROTOCOLS=logs -e SUMMARY_OUT=/tmp/summary.json \
+            -e RATE=80 -e DURATION=30s -e PROTOCOLS=logs -e SUMMARY_OUT=/out/summary.json \
             -v "$PWD/scripts/load:/scripts:ro" \
+            -v "$RUNNER_TEMP/load-out:/out" \
             grafana/k6 run /scripts/ingest-load.js
+
+      - name: Upload load-test summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-summary
+          path: ${{ runner.temp }}/load-out/summary.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Dump backend logs on failure
         if: failure()

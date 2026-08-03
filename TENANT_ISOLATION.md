@@ -42,6 +42,19 @@ data — the forged header is inert.
 | **Quickwit** | `pulsetrace-logs` index | `tenant_id` field filter on every search. |
 | **Neo4j** | topology graph | tenant property on nodes/edges; queries filter by it. |
 
+## Audit findings (fixed)
+
+The F0.3 read-path audit found and fixed two **live cross-tenant read leaks** in
+services outside the gateway (both authenticated, gateway-reachable routes):
+
+| Endpoint | Leak | Fix |
+| --- | --- | --- |
+| `GET /api/v1/incidents/{id}` and `/{id}/timeline` (correlation-service) | Read incidents by ID with no tenant filter — another tenant's incident (title, root cause, causal analysis, timeline) was readable by ID. | Use `GetByIDForTenant`; return not-found on a tenant mismatch. |
+| `GET /api/v1/alerts` and `/api/v1/alerts/{id}` (alert-service) | The list never set `TenantID`, so the repository's tenant filter was skipped and it returned **every** tenant's alerts; the by-ID read was unscoped. | List always sets `TenantID`; by-ID uses a new `GetByIDForTenant`. |
+
+Topology (Neo4j) reads already pass the caller's tenant on every query; log-service
+by-ID reads already filter Quickwit by `tenant_id`. No other leaks were found.
+
 ## Enforcement: forgetting the filter is a build failure, not a leak
 
 The ClickHouse read path is raw SQL over an HTTP client, so "remember to add the
@@ -54,13 +67,21 @@ into an enforced invariant with two layers, both in
    injects the `tenant` bind param from one trusted source, and (c) **fails closed**
    if the SQL reads a tenant-scoped table without a tenant predicate. All eleven CH
    read sites were migrated onto it.
-2. **Static ratchet** — `TestNoRawTenantTableReads` scans the handler package and
-   fails the build if any raw `.query()` call reads a tenant-scoped table,
-   preventing a future handler from bypassing the runtime guard. (Proven to catch a
-   planted violation.)
+2. **Static ratchet (gateway)** — `TestNoRawTenantTableReads` scans the handler
+   package and fails the build if any raw `.query()` call reads a tenant-scoped
+   table, preventing a future handler from bypassing the runtime guard. (Proven to
+   catch a planted violation.)
 
 Unit tests (`clickhouse_tenant_test.go`) cover the guard: unscoped reads and empty
 tenants are rejected; scoped reads and non-tenant/system queries pass.
+
+For the Postgres services, the same ratchet idea guards the by-ID read pattern that
+caused the leaks above: `TestHandlersUseTenantScopedIncidentReads`
+(correlation-service) and `TestHandlersUseTenantScopedAlertReads` (alert-service)
+fail the build if any request handler calls the unscoped `GetByID` instead of
+`GetByIDForTenant`. The unscoped method stays available for internal callers that
+have already resolved the tenant (e.g. the correlation engine), which live outside
+`internal/handler`.
 
 ## Known limitation (honest scope)
 

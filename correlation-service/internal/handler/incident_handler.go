@@ -94,7 +94,11 @@ func (h *IncidentHandler) GetIncident(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("incident.id", id))
 
-	incident, err := h.repo.GetByID(ctx, id)
+	// Tenant-scope the read: an incident ID guessed or leaked from one tenant must
+	// not return another tenant's incident (title, root cause, causal analysis).
+	// GetByIDForTenant returns not-found on a tenant mismatch, so we never disclose
+	// that the ID exists under a different tenant.
+	incident, err := h.repo.GetByIDForTenant(ctx, tenantFromRequest(r), id)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "not found")
@@ -119,6 +123,16 @@ func (h *IncidentHandler) GetTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("incident.id", id))
 
+	// Ownership guard: confirm the incident belongs to the caller's tenant before
+	// exposing its timeline. Without this, the timeline (alert messages, services)
+	// of any tenant's incident would be readable by ID from any other tenant.
+	if _, err := h.repo.GetByIDForTenant(ctx, tenantFromRequest(r), id); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "not found")
+		writeJSON(w, http.StatusNotFound, models.Fail("incident not found"))
+		return
+	}
+
 	events, err := h.repo.Timeline(ctx, id)
 	if err != nil {
 		span.RecordError(err)
@@ -127,6 +141,17 @@ func (h *IncidentHandler) GetTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, models.OK(events))
+}
+
+// tenantFromRequest resolves the caller's tenant from the gateway-verified
+// X-Tenant-ID header (set from the JWT/ingestion key upstream, never a raw client
+// header). Defaults to "default" so single-tenant/dev stacks keep working; the
+// gateway always stamps a real tenant for authenticated multi-tenant requests.
+func tenantFromRequest(r *http.Request) string {
+	if t := r.Header.Get("X-Tenant-ID"); t != "" {
+		return t
+	}
+	return "default"
 }
 
 // Health is a simple liveness probe.

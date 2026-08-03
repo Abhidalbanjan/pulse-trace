@@ -61,11 +61,13 @@ These raise many features at once and are prerequisites for the parity gates.
 - ↪ Remaining (deferred): the `shared/` `TenantScopedDB` wrapper for the Postgres read paths across correlation/topology services, and the tenant-keyed MV. Postgres/Neo4j reads already filter; the wrapper is a defense-in-depth generalization of the same ratchet.
 - **Raises R5 across all pillars; hard prerequisite for enterprise procurement.**
 
-### F0.4 — Frontend platform: typed client, design system, a11y, real-time  · effort L
-- Replace `useState<any[]>` with types from F0.1's generated client.
-- Extract a small component library (table, chart, panel, form, toast, confirm-dialog) so screens stop re-implementing states inline; kills the `alert()` pattern.
-- a11y baseline (focus/keyboard/roles) + responsive check in CI (axe + Playwright).
-- Add a shared live-update primitive (SSE/poll hook) for tail/streaming.
+### F0.4 — Frontend platform: typed client, design system, a11y, real-time  · effort L · ✅ foundation delivered
+- ✅ **Typed API client** ([`src/lib/api/`](frontend/src/lib/api/)): `api.get/post/…` and envelope-aware `getData/list` return typed data and throw a typed `ApiError` (status + server message), replacing ad-hoc `fetchWithAuth(...).then(r=>r.json())` and `json.data || []`. Domain types (`Role`, envelopes) grow as screens migrate.
+- ✅ **Design-system primitives** ([`src/components/ui/`](frontend/src/components/ui/)): `StateBoundary` (one accessible loading/error/empty/retry surface), `ToastProvider`/`useToast` (non-blocking notifications — **kills `alert()`**), `ConfirmDialog` (accessible, focus-managed — **replaces `confirm()`**). Mounted app-wide via `ToastProvider` in the root layout.
+- ✅ **Shared live-update primitive** ([`useApiResource`](frontend/src/lib/hooks/useApiResource.ts)): typed `{data,error,loading,refetch}` with optional silent polling — replaces the `useState<any[]> + useEffect(fetch)` boilerplate and powers tail/streaming.
+- ✅ **a11y baseline in CI**: `@axe-core/playwright` + [`tests/e2e/a11y.spec.ts`](frontend/tests/e2e/a11y.spec.ts) scans dashboard/settings/incidents/explorer/login for **critical** WCAG 2.1 A/AA violations (bar tightens to `serious` as debt burns down).
+- ✅ **Proof of pattern**: `RolesPanel` fully migrated onto client + hook + all three primitives (removed `alert()`×2, `confirm()`, inline states; net −2 lint errors).
+- ↪ Remaining (Wave 2, screen-by-screen): migrate the other screens off `fetchWithAuth`/`useState<any[]>`/`alert()` (the pre-existing frontend **lint debt of ~85 `no-explicit-any` errors** lives in these unmigrated screens — the platform is the tool to burn it down); a shared `DataTable`; SSE where polling isn't enough.
 
 ### F0.5 — Causal-AI evaluation harness  · effort L
 - A labelled fixture set of incidents → expected root cause; score narrative accuracy/precision on each provider + the rule-based fallback; publish a quality number in CI.

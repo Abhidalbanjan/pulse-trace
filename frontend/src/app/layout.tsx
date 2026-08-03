@@ -3,6 +3,7 @@ import "./globals.css";
 import { AppShell } from "@/components/Layout/AppShell";
 import { AuthProvider } from "@/context/AuthContext";
 import { ThemeProvider } from "@/context/ThemeContext";
+import { ToastProvider } from "@/components/ui/Toast";
 
 export const metadata: Metadata = {
   title: "PulseTrace - Observability AI",
@@ -27,9 +28,11 @@ export default function RootLayout({
       <body>
         <ThemeProvider>
           <AuthProvider>
-            <AppShell>
-              {children}
-            </AppShell>
+            <ToastProvider>
+              <AppShell>
+                {children}
+              </AppShell>
+            </ToastProvider>
           </AuthProvider>
         </ThemeProvider>
       </body>

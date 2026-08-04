@@ -11,6 +11,7 @@ interface Usage { traces: number; metrics: number; logs: number; rum: number; }
 const PLAN_LABEL: Record<string, string> = {
   free: 'Free', standard: 'Standard', premium: 'Premium', enterprise: 'Enterprise',
 };
+const PLANS = ['free', 'standard', 'premium', 'enterprise'];
 
 export function BillingPanel() {
   const { tokens: t } = useTheme();
@@ -19,6 +20,7 @@ export function BillingPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [planChoice, setPlanChoice] = useState('standard');
 
   const load = async () => {
     try {
@@ -47,6 +49,23 @@ export function BillingPanel() {
       if (url) window.location.href = url;
     } catch (e) {
       setError(errMessage(e, 'Checkout failed'));
+    } finally { setBusy(false); }
+  };
+
+  // Direct admin plan override (POST /api/v1/admin/tenant/plan). Distinct from
+  // Stripe checkout: it's how plans change on deployments where self-serve
+  // billing is disabled (enterprise / on-prem / manual billing).
+  const setPlanDirect = async () => {
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const res = await fetchWithAuth('/api/v1/admin/tenant/plan', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plan: planChoice }),
+      });
+      if (!res.ok) throw new Error((await res.text()) || 'Failed to set plan');
+      setNotice(`Plan set to ${PLAN_LABEL[planChoice] || planChoice}.`);
+      await load();
+    } catch (e) {
+      setError(errMessage(e, 'Failed to set plan'));
     } finally { setBusy(false); }
   };
 
@@ -112,6 +131,21 @@ export function BillingPanel() {
         <button style={btn(true)} disabled={busy} onClick={() => checkout('standard')}>Upgrade to Standard</button>
         <button style={btn(true)} disabled={busy} onClick={() => checkout('premium')}>Upgrade to Premium</button>
         <button style={btn(false)} disabled={busy} onClick={portal}>Manage billing</button>
+      </div>
+
+      <div style={{ ...card, marginTop: 24 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: t.text1, marginBottom: 6 }}>Admin: set plan directly</div>
+        <p style={{ fontSize: 12.5, color: t.text2, lineHeight: 1.6, margin: '0 0 12px', maxWidth: 520 }}>
+          Change the tenant plan without Stripe — for enterprise / on-prem deployments where billing
+          is managed manually. Takes effect immediately.
+        </p>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <select value={planChoice} onChange={(e) => setPlanChoice(e.target.value)} aria-label="Plan"
+            style={{ padding: '9px 12px', background: t.dark ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.7)', border: '1px solid ' + t.panelBorder, borderRadius: 8, color: t.text1 }}>
+            {PLANS.map((p) => <option key={p} value={p}>{PLAN_LABEL[p]}</option>)}
+          </select>
+          <button style={btn(false)} disabled={busy} onClick={setPlanDirect}>Set plan</button>
+        </div>
       </div>
     </div>
   );

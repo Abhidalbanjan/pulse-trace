@@ -131,6 +131,23 @@ export function SettingsView() {
     }
   };
 
+  // Inline role change (PUT /api/v1/admin/users/role?id=<id>). Optimistic, with
+  // revert on failure — the server enforces that the role exists and is tenant-scoped.
+  const updateUserRole = async (id: string, role: string) => {
+    const previous = users;
+    setUsers((us) => us.map((u) => (u.id === id ? { ...u, role } : u)));
+    setError(null);
+    try {
+      const res = await fetchWithAuth(`/api/v1/admin/users/role?id=${encodeURIComponent(id)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role }),
+      });
+      if (!res.ok) throw new Error((await res.text()) || 'Failed to update role');
+    } catch (err) {
+      setUsers(previous); // revert the optimistic change
+      setError(errMessage(err, 'Failed to update role'));
+    }
+  };
+
   const primaryBtnStyle: React.CSSProperties = {
     padding: '10px 18px',
     borderRadius: '10px',
@@ -287,7 +304,19 @@ export function SettingsView() {
                           <div style={{ color: t.text2, fontSize: '12px' }}>{user.username}</div>
                         </div>
                       </td>
-                      <td style={{ padding: '14px 8px', fontSize: '13.5px' }}><span style={{ background: t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)', color: t.text1, padding: '4px 12px', borderRadius: '100px', fontSize: '12px' }}>{user.role}</span></td>
+                      <td style={{ padding: '14px 8px', fontSize: '13.5px' }}>
+                        <select
+                          value={user.role}
+                          onChange={(e) => updateUserRole(user.id, e.target.value)}
+                          disabled={user.username === 'admin'}
+                          aria-label={`Role for ${user.username}`}
+                          style={{ padding: '5px 10px', borderRadius: '100px', fontSize: '12px', background: t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)', color: t.text1, border: '1px solid ' + t.panelBorder, cursor: user.username === 'admin' ? 'not-allowed' : 'pointer' }}
+                        >
+                          {Array.from(new Set([user.role, ...availableRoles])).map((r) => (
+                            <option key={r} value={r}>{r}</option>
+                          ))}
+                        </select>
+                      </td>
                       <td style={{ padding: '14px 8px', color: t.text2, fontSize: '13.5px' }}>{user.created_at ? new Date(user.created_at).toLocaleDateString() : 'Unknown'}</td>
                       <td style={{ padding: '14px 8px', fontSize: '13.5px' }}>
                         <button onClick={() => handleRevoke(user.id, user.username)} style={ghostRedBtnStyle}>Revoke</button>

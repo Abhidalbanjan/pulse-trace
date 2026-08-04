@@ -136,6 +136,11 @@ func main() {
 		{Prefix: "/api/v1/alerts", Upstream: alertServiceURL},
 		{Prefix: "/api/v1/incidents", Upstream: correlationServiceURL},
 		{Prefix: "/api/v1/slo", Upstream: correlationServiceURL},
+		// Remediation policy (GET /api/v1/remediation/policy) lives on
+		// correlation-service's playbook handler and gates the Incidents
+		// remediation UI's approve path — it needs its own prefix (it is not
+		// under /api/v1/incidents).
+		{Prefix: "/api/v1/remediation", Upstream: correlationServiceURL},
 		// Previously missing entirely - the homepage's "AI SRE" chat page
 		// (frontend/src/app/page.tsx) has always POSTed to /api/v1/chat, but
 		// with no route for it here, every request 404'd at the gateway and

@@ -39,9 +39,7 @@
   },
 
   "knownOrphans": {
-    "_doc": "Backend routes that SHOULD have a UI but don't yet — the Wave 2 backlog, frozen as known debt. The checker ALLOWS these but the list may only shrink: ship the UI, delete the entry. Adding a NEW orphan not listed here fails the build. Each maps to its ROAD_TO_100 feature.",
-    "GET /api/v1/topology/dependencies/downstream": "F13 topology depth (downstream view)",
-    "GET /api/v1/logs/:p": "F6 single-log permalink view"
+    "_doc": "Backend routes that SHOULD have a UI but don't yet — the Wave 2 backlog, frozen as known debt. The checker ALLOWS these but the list may only shrink: ship the UI, delete the entry. Adding a NEW orphan not listed here fails the build. Each maps to its ROAD_TO_100 feature. EMPTY: every backend capability now has a UI (R2 = 100%)."
   },
 
   "frontendExternal": {

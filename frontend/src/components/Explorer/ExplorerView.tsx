@@ -16,7 +16,22 @@ interface LogEntry {
   _raw: unknown;
 }
 
-interface QuickwitHit { trace_id?: string; timestamp?: string; service_name?: string; level?: string; message?: string; tenant_id?: string; }
+interface QuickwitHit { id?: string; trace_id?: string; timestamp?: string; service_name?: string; level?: string; message?: string; tenant_id?: string; }
+
+// Map a raw Quickwit hit to a LogEntry. Prefer the document's own id (what the
+// GET /api/v1/logs/{id} permalink endpoint resolves by); fall back to trace_id.
+function toLogEntry(hit: QuickwitHit): LogEntry {
+  return {
+    id: hit.id || hit.trace_id || Math.random().toString(),
+    timestamp: hit.timestamp || new Date().toISOString(),
+    service_name: hit.service_name || 'unknown',
+    level: hit.level || 'INFO',
+    message: hit.message || JSON.stringify(hit),
+    trace_id: hit.trace_id,
+    tenant_id: hit.tenant_id || 'default',
+    _raw: hit,
+  };
+}
 
 interface Bucket {
   key: string | number;
@@ -47,6 +62,32 @@ export function ExplorerView() {
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("*");
   const [selectedLog, setSelectedLog] = useState<LogEntry | null>(null);
+  const [permalinkCopied, setPermalinkCopied] = useState(false);
+
+  // F6: single-log permalink. Copy a shareable URL to a specific log, and on
+  // load resolve ?log=<id> straight to its canonical record via GET /logs/{id}.
+  const copyPermalink = async (id: string) => {
+    const url = `${window.location.origin}/explorer?log=${encodeURIComponent(id)}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setPermalinkCopied(true);
+      window.setTimeout(() => setPermalinkCopied(false), 2000);
+    } catch {
+      // Clipboard unavailable (insecure context) — the URL is still shareable.
+    }
+  };
+
+  useEffect(() => {
+    const logId = new URLSearchParams(window.location.search).get('log');
+    if (!logId) return;
+    fetchWithAuth(`/api/v1/logs/${encodeURIComponent(logId)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        const hit = data?.data ?? data;
+        if (hit) setSelectedLog(toLogEntry(hit));
+      })
+      .catch(() => {});
+  }, []);
 
   // Query-depth controls: treat the search box as a regex on the message, and
   // scope to a relative time window. These build extra Quickwit clauses at
@@ -127,16 +168,7 @@ export function ExplorerView() {
       .then(res => res.json())
       .then(data => {
         if (data && data.hits) {
-          const formattedLogs = data.hits.map((hit: QuickwitHit) => ({
-            id: hit.trace_id || Math.random().toString(),
-            timestamp: hit.timestamp || new Date().toISOString(),
-            service_name: hit.service_name || 'unknown',
-            level: hit.level || 'INFO',
-            message: hit.message || JSON.stringify(hit),
-            trace_id: hit.trace_id,
-            tenant_id: hit.tenant_id || 'default',
-            _raw: hit
-          }));
+          const formattedLogs = data.hits.map(toLogEntry);
           setLogs(formattedLogs);
         }
 
@@ -551,12 +583,22 @@ export function ExplorerView() {
         <div style={{ ...glassPanel, width: 'clamp(260px, 26vw, 380px)', flexShrink: 0, display: 'flex', flexDirection: 'column', borderRadius: '22px', overflow: 'hidden' }}>
           <div style={{ padding: '18px 20px', borderBottom: `1px solid ${t.panelBorder}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h3 style={{ fontSize: '15px', fontWeight: 600, color: t.text1, margin: 0 }}>Log Details</h3>
-            <button
-              onClick={() => setSelectedLog(null)}
-              style={{ background: 'transparent', border: 'none', color: t.text2, cursor: 'pointer', fontSize: '18px', lineHeight: 1, padding: 0 }}
-            >
-              ✕
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <button
+                onClick={() => copyPermalink(selectedLog.id)}
+                title="Copy a shareable link to this log"
+                style={{ background: 'transparent', border: `1px solid ${t.panelBorder}`, color: permalinkCopied ? t.green : t.text2, cursor: 'pointer', fontSize: '11.5px', padding: '4px 10px', borderRadius: '8px' }}
+              >
+                {permalinkCopied ? 'Copied ✓' : 'Permalink'}
+              </button>
+              <button
+                onClick={() => setSelectedLog(null)}
+                aria-label="Close log details"
+                style={{ background: 'transparent', border: 'none', color: t.text2, cursor: 'pointer', fontSize: '18px', lineHeight: 1, padding: 0 }}
+              >
+                ✕
+              </button>
+            </div>
           </div>
           <div style={{ padding: '20px', overflowY: 'auto', flex: 1 }}>
 

@@ -135,6 +135,23 @@ export function TopologyView() {
   const [analyzing, setAnalyzing] = useState(false);
   const [rootCauseResults, setRootCauseResults] = useState<RootCauseResult[] | null>(null);
   const [rootCauseError, setRootCauseError] = useState<string | null>(null);
+  // Downstream "blast radius": what depends on a clicked service.
+  const [impact, setImpact] = useState<{ service: string; downstream: string[] } | null>(null);
+  const [impactLoading, setImpactLoading] = useState(false);
+
+  const showDownstreamImpact = useCallback(async (service: string) => {
+    setImpact({ service, downstream: [] });
+    setImpactLoading(true);
+    try {
+      const res = await fetchWithAuth(`/api/v1/topology/dependencies/downstream/${encodeURIComponent(service)}`);
+      const deps: string[] = res.ok ? (await res.json()) || [] : [];
+      setImpact({ service, downstream: Array.isArray(deps) ? deps : [] });
+    } catch {
+      setImpact({ service, downstream: [] });
+    } finally {
+      setImpactLoading(false);
+    }
+  }, []);
 
   const loadTopology = useCallback(() => {
     setLoading(true);
@@ -365,6 +382,7 @@ export function TopologyView() {
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
+            onNodeClick={(_, node) => showDownstreamImpact(node.id)}
             nodeTypes={nodeTypes}
             fitView
             style={{ background: 'transparent' }}
@@ -381,6 +399,30 @@ export function TopologyView() {
               style={{ background: t.panelBg, border: `1px solid ${t.panelBorder}` }}
             />
           </ReactFlow>
+        )}
+
+        {impact && (
+          <div style={{ position: 'absolute', top: '16px', right: '16px', width: '280px', maxHeight: 'calc(100% - 32px)', overflowY: 'auto', background: t.panelBg, border: `1px solid ${t.panelBorder}`, borderRadius: '14px', padding: '16px', boxShadow: t.shadow, zIndex: 5 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <h4 style={{ fontSize: '14px', fontWeight: 700, margin: 0, color: t.text1 }}>Downstream impact</h4>
+              <button onClick={() => setImpact(null)} aria-label="Close impact panel" style={{ background: 'none', border: 'none', color: t.text2, cursor: 'pointer', fontSize: '18px', lineHeight: 1 }}>×</button>
+            </div>
+            <div style={{ fontSize: '12.5px', color: t.text2, marginBottom: '12px', lineHeight: 1.5 }}>
+              If <span style={{ color: t.text1, fontWeight: 600 }}>{impact.service}</span> fails, these
+              services depend on it and are in the blast radius.
+            </div>
+            {impactLoading ? (
+              <div style={{ color: t.text2, fontSize: '13px' }}>Loading…</div>
+            ) : impact.downstream.length === 0 ? (
+              <div style={{ color: t.text2, fontSize: '13px' }}>No downstream dependents — nothing else depends on this service.</div>
+            ) : (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                {impact.downstream.map((d) => (
+                  <span key={d} style={{ background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', border: `1px solid ${t.panelBorder}`, padding: '4px 10px', borderRadius: '100px', fontSize: '12px', color: t.text1 }}>{d}</span>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </div>
 

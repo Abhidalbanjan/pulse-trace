@@ -92,9 +92,12 @@ highest-priority parity work.
 | Ingestion-key rotation | ✅ | ✅ Keys panel (list/create/rotate/revoke) | ✅ Done (F4). |
 | **Deploy gates (shift-left)** | ⚠️ partial | ⚠️ placeholder | **Wire to real data or remove from nav (F5).** |
 | AI-SRE remediation execute | ✅ | ✅ confirm→run→result | ✅ Done (F1) — `alert()` replaced. |
-| Anomaly detection config/thresholds | ✅ | ❌ none | Add tuning UI (F14). |
+| Anomaly detection config/thresholds | ⚠️ engine only | ❌ none | No config endpoint exists yet — needs backend first (F14, reclassified to Wave 3). Not a parity orphan. |
 | Data retention/deletion (GDPR) | ✅ | ✅ Settings → Data & Privacy | ✅ Done (F19). |
-| Usage vs quota | ✅ | ⚠️ partial | Usage dashboard + quota bars (F16). |
+| Usage vs quota | ✅ | ✅ Billing & Usage panel | `GET /api/v1/usage` already consumed (BillingPanel). Depth (quota bars/projection) is Wave 3, not a parity orphan. |
+| Alerts (raw stream) / alert detail | ✅ | ✅ Alerts screen | ✅ Done. |
+| Tenant plan override / user role edit | ✅ | ✅ Billing / Users | ✅ Done (F17/F18). |
+| Topology downstream (blast radius) / log permalink | ✅ | ✅ Topology / Explorer | ✅ Done (F13/F6). |
 
 ---
 
@@ -230,7 +233,7 @@ Ordered for maximum leverage and to keep BE/UI in lockstep.
 | Wave | Theme | Contents | Exit criteria |
 | --- | --- | --- | --- |
 | **1** ✅ | Foundations | F0.1 parity gate, F0.4 FE platform, F0.2 load harness, F0.3 isolation, F0.5 eval harness | ✅ **All five delivered.** Parity CI green; perf harness + baseline; structural tenant isolation (+2 live leaks fixed); typed FE platform; causal-AI eval gate at 90.9%. |
-| **2** | **Close the parity orphans** | F1 remediation UI, F2 SLO screen, F3 channels panel, F4 rotate button, F5 deploy-gates decision, F14 anomaly UI, F19 deletion UI, F16 usage UI | **Every backend capability has a UI (R2 = 100%).** |
+| **2** ✅ | **Close the parity orphans** | ✅ F4 keys, F1 remediation UI, F2 SLO screen, F19 deletion UI, F17 plan, F18 role edit, Alerts screen, F13 downstream, F6 log permalink | ✅ **Parity gate at 100% — 0 registry orphans; every backend route has a UI (R2 = 100%).** Note: F3 channels & F14 anomaly config have **no backend endpoints** (env/engine-only) so they are not parity orphans — reclassified to Wave 3 (need backend built first). F16 usage already consumed. F5 deploy-gates decision remains (below). |
 | **3** | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. |
 | **4** | Revenue & enterprise | F17 billing, F18 SSO/MFA/policy UX, F20 audit, F21 infra/DR | Self-serve money path + enterprise procurement bar met. |
 

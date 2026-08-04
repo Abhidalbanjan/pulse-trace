@@ -52,6 +52,24 @@ test.describe('Settings', () => {
     await expect(page.getByText('Production Cluster Key')).toHaveCount(0);
   });
 
+  test('Data & Privacy tab gates deletion behind a type-to-confirm modal', async ({ page }) => {
+    await page.goto('/settings');
+    await page.getByRole('button', { name: 'Data & Privacy' }).click();
+    await expect(page.getByRole('heading', { name: 'Data & Privacy' })).toBeVisible();
+    await expect(page.getByText('Purge telemetry data')).toBeVisible();
+    await expect(page.getByText('Close account')).toBeVisible();
+
+    // Open the purge confirm — but never actually confirm (that would wipe the
+    // shared seeded tenant). The confirm button stays disabled until an id is
+    // typed; assert the gate, then cancel.
+    await page.getByRole('button', { name: 'Purge data…' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByText(/Type your/i)).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Purge data', exact: true })).toBeDisabled();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+  });
+
   test('API Keys: full lifecycle — create reveals a one-time key, then rotate', async ({ page }) => {
     const keyName = `e2e-key-${Date.now()}`;
     await page.goto('/settings');

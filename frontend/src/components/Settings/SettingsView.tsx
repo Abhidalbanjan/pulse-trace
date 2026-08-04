@@ -10,6 +10,7 @@ import { RateLimitsPanel } from './RateLimitsPanel';
 import { AlertRulesPanel } from './AlertRulesPanel';
 import { BillingPanel } from './BillingPanel';
 import { IngestionKeysPanel } from './IngestionKeysPanel';
+import { DataPrivacyPanel } from './DataPrivacyPanel';
 import { useTheme } from '@/context/ThemeContext';
 
 interface User { id: string; username: string; role: string; created_at?: string; }
@@ -199,7 +200,7 @@ export function SettingsView() {
       <div style={{ width: '230px', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '4px' }}>
         <h2 style={{ fontSize: '24px', fontWeight: 700, margin: '0 0 20px', color: t.text1 }}>Settings</h2>
 
-        {['users', 'billing', 'roles', 'policies', 'ratelimits', 'audit', 'apikeys', 'sso', 'alerts'].map(tab => (
+        {['users', 'billing', 'roles', 'policies', 'ratelimits', 'audit', 'apikeys', 'sso', 'alerts', 'privacy'].map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -225,7 +226,8 @@ export function SettingsView() {
               : tab === 'audit' ? 'Audit Log'
               : tab === 'apikeys' ? 'API Keys'
               : tab === 'sso' ? 'SSO / SAML'
-              : 'Alert Channels'}
+              : tab === 'alerts' ? 'Alert Channels'
+              : 'Data & Privacy'}
           </button>
         ))}
       </div>
@@ -364,6 +366,8 @@ export function SettingsView() {
              </div>
            </div>
         )}
+
+        {activeTab === 'privacy' && <DataPrivacyPanel />}
 
       </div>
     </div>

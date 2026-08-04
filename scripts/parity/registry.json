@@ -21,6 +21,7 @@
     "POST /api/v1/topology/state": "agent pushes service state",
     "POST /api/v1/topology/catalog": "agent registers services into the catalog",
     "POST /api/v1/topology/causal-path": "internal RCA graph query",
+    "DELETE /api/v1/topology/tenant": "internal: gateway purger fans out tenant deletion to topology-service (driven by /admin/tenant/purge-data, not a direct UI call)",
     "GET /api/v1/topology/agent-config": "agent pulls its config",
     "POST /api/v1/webhooks/github": "inbound GitHub webhook",
     "POST /api/v1/webhooks/stripe": "inbound Stripe billing webhook",
@@ -41,10 +42,7 @@
     "_doc": "Backend routes that SHOULD have a UI but don't yet — the Wave 2 backlog, frozen as known debt. The checker ALLOWS these but the list may only shrink: ship the UI, delete the entry. Adding a NEW orphan not listed here fails the build. Each maps to its ROAD_TO_100 feature.",
     "GET /api/v1/alerts": "F2/alerting: alerts list screen",
     "GET /api/v1/alerts/:p": "F2/alerting: alert detail",
-    "POST /api/v1/admin/tenant/close": "F17 tenant admin UI",
     "POST /api/v1/admin/tenant/plan": "F17 billing/plan admin UI",
-    "POST /api/v1/admin/tenant/purge-data": "F19 data-deletion UI",
-    "DELETE /api/v1/topology/tenant": "F19 data-deletion UI (topology purge)",
     "GET /api/v1/topology/dependencies/downstream": "F13 topology depth (downstream view)",
     "GET /api/v1/logs/:p": "F6 single-log permalink view",
     "PUT /api/v1/admin/users/role": "F18 user role edit (verify wired in users panel)"

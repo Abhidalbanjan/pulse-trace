@@ -209,3 +209,13 @@ export interface CreateSLORequest {
   sli_type?: SLIType;
   window_days?: number;
 }
+
+// ── Tenant data deletion (ROAD_TO_100 · F19) ──────────────────────────────────
+// The per-store result of a purge/close, doubling as a deletion certificate:
+// each attempted store lands in steps[] (ok) or errors[].
+export interface TenantPurgeResult {
+  tenant_id: string;
+  full: boolean; // true = account also closed, not just telemetry purged
+  steps: string[];
+  errors: string[];
+}

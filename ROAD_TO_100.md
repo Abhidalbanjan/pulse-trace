@@ -93,7 +93,7 @@ highest-priority parity work.
 | **Deploy gates (shift-left)** | ⚠️ partial | ⚠️ placeholder | **Wire to real data or remove from nav (F5).** |
 | AI-SRE remediation execute | ✅ | ✅ confirm→run→result | ✅ Done (F1) — `alert()` replaced. |
 | Anomaly detection config/thresholds | ✅ | ❌ none | Add tuning UI (F14). |
-| Data retention/deletion (GDPR) | ✅ | ❌ none | Add "delete my data" admin action (F17). |
+| Data retention/deletion (GDPR) | ✅ | ✅ Settings → Data & Privacy | ✅ Done (F19). |
 | Usage vs quota | ✅ | ⚠️ partial | Usage dashboard + quota bars (F16). |
 
 ---
@@ -205,10 +205,12 @@ Today the screen fetches nothing — a placeholder in the nav.
 - **Frontend:** MFA enrolment, session/device management, a **policy-authoring UX** (guided ABAC builder, not raw expr strings), password-reset flow.
 - **DoD:** enterprise SSO/MFA + self-service policy editing.
 
-### F19 — Data retention & deletion (GDPR/SOC2) · 70→**100** BE, 0→**100** UI · effort M
-- **Backend:** completeness auditing, async-job robustness/retries, deletion certificate; tie to F0.3 CH partitioning.
-- **Frontend:** admin "Delete tenant/user data" action with confirmation + job status + certificate download.
-- **DoD:** a data-subject deletion is self-serve, verifiable, and evidenced.
+### F19 — Data retention & deletion (GDPR/SOC2) · 70→**100** BE, 0→**100** UI · effort M · ✅ delivered
+The gateway can purge a tenant across every store (ClickHouse/Quickwit/Neo4j + derived Postgres) and fully close an account, but there was no UI.
+- ✅ **Frontend** (Settings → **Data & Privacy** — [`DataPrivacyPanel`](frontend/src/components/Settings/DataPrivacyPanel.tsx)): a danger-zone with **Purge telemetry data** (keeps the account) and **Close account** (full offboarding), each gated by an accessible **type-your-tenant-id** confirm modal matching the server's `{confirm}` contract; the per-store `Result` renders as a **deletion certificate** (✓ steps / ✗ errors). Consumes and delists `POST /admin/tenant/purge-data` (F19) and `POST /admin/tenant/close` (F17); `DELETE /api/v1/topology/tenant` reclassified to `uiNone` (the gateway purger fans out to topology internally, it's not a UI call).
+- ✅ **Tests:** Playwright (`settings.spec`) — the tab renders both actions and gates the destructive button behind the type-to-confirm modal (the test cancels; it never wipes the shared seeded tenant).
+- ↪ Deferred (depth): async-job status/retries and a downloadable certificate file. The synchronous per-store result already evidences the deletion.
+- **DoD (parity):** a data-subject deletion is self-serve, confirmed, and evidenced from the UI; R1–R3/R5/R7 met.
 
 ### F20 — Audit logging · 72→**100** · effort S
 - **Backend:** hash-chained tamper-evidence, export API, immutable retention.

@@ -151,7 +151,8 @@ async function seedAdmin(token) {
   if (await authed(token, '/api/v1/admin/rate-limits', { name: 'search-burst-guard', path_prefixes: ['/api/v1/search'], limit_count: 200, window_seconds: 60, priority: 10 }) < 300) ok++;
   if (await authed(token, '/api/v1/admin/users', { username: 'sarah.oncall', password: 'sarah_secret_123', role: 'viewer' }) < 300) ok++;
   if (await authed(token, '/api/v1/admin/ingestion-keys', { name: 'production-agents', tier: 'standard', scope: 'ingest' }) < 300) ok++;
-  console.log(`  admin: ${ok}/5 (role/policy/rate-limit/user/ingestion-key) created`);
+  if (await authed(token, '/api/v1/slo/definitions', { service_name: 'payment-service', slo_target: 99.9, sli_type: 'availability', window_days: 30 }) < 300) ok++;
+  console.log(`  admin: ${ok}/6 (role/policy/rate-limit/user/ingestion-key/slo) created`);
 }
 
 async function main() {

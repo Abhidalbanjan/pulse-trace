@@ -87,7 +87,7 @@ highest-priority parity work.
 | Logs / Traces / Metrics / RUM / Synthetics / Topology / Catalog / Errors | ✅ | ✅ screens | Depth work (see §5), not parity. |
 | Roles / Policies / Rate-limits / Users / Alert-rules / Audit / Billing | ✅ | ✅ Settings panels | Minor: rotation button (below). |
 | Self-healing approve / reject / dry-run | ✅ | ✅ Incidents remediation panel | ✅ Done (F1). |
-| **SLO / error-budget / burn-rate** | ✅ | ❌ none | **Build SLO screen (F2).** |
+| SLO / error-budget / burn-rate | ✅ | ✅ SLOs screen | ✅ Done (F2). |
 | **Alert delivery channels** (Slack/PD/Opsgenie/webhook) | ✅ | ❌ env-only | **Build Channels settings panel + test-send (F3).** |
 | Ingestion-key rotation | ✅ | ✅ Keys panel (list/create/rotate/revoke) | ✅ Done (F4). |
 | **Deploy gates (shift-left)** | ⚠️ partial | ⚠️ placeholder | **Wire to real data or remove from nav (F5).** |
@@ -111,12 +111,12 @@ The backend (`correlation-service/internal/handler/playbook_handler.go`: approve
 - ↪ **Backend depth (deferred to Wave 3 pillar work):** post-remediation verification + auto-revert, action types beyond restart/scale/rollback, a first-class remediation-history endpoint, and the in-cluster operator RBAC manifest. These deepen the flagship but are **beyond the parity orphan** (which was "capability with no UI") — R2 is closed.
 - **DoD (parity):** an on-call user can dry-run, approve/reject and audit a fix from the UI; degraded/execution-disabled states shown honestly; R1–R3/R5/R7 met for the UI slice.
 
-### F2 — SLO / error-budget / burn-rate · 66→**100** BE, 10→**100** UI · effort M
-Real engine (`burn_rate_alerter.go`, `slo_worker.go`, `slo_repository.go`), **no view**.
-- **Backend:** CRUD endpoints for SLO definitions (target, window, SLI source); expose budget + burn-rate time series; wire burn-rate breaches into the alert pipeline (channels from F3).
-- **Frontend:** new **SLOs** nav screen — list SLOs, create/edit (target %, window, SLI query), budget-remaining gauges, burn-rate charts, multi-window alert config; per-service SLO surfaced on the Services screen.
-- **Tests:** unit on budget math (exists — extend); e2e create-SLO → breach → alert.
-- **DoD:** a user defines an SLO and sees budget burn + gets alerted; R1–R7.
+### F2 — SLO / error-budget / burn-rate · 66→**100** BE, 10→**100** UI · effort M · ✅ delivered
+Real engine (`burn_rate_alerter.go`, `slo_worker.go`, `slo_repository.go`) had **no view**.
+- ✅ **Frontend** (new **SLOs** nav screen — [`SLOView`](frontend/src/components/SLO/SLOView.tsx), route [`/slo`](frontend/src/app/slo/page.tsx)): per-service cards with **budget-remaining gauge**, current SLI, **burn-rate** (× multiplier), status (healthy/warning/critical), and an SLI **trend sparkline**; create (service/target %/SLI type/window) and delete SLOs; a live **Budget Alerts** feed of burn-rate breaches. Polls the dashboard + alerts. Consumes and delists all five F2 routes (definitions GET/POST/DELETE, dashboard, budget-alerts).
+- ✅ **Tests:** Playwright (`slo.spec`) — dashboard renders the seeded objective + budget gauge + alerts section; create-SLO round-trip. Budget math is already unit-tested in the engine. Seed now provisions an SLO for `payment-service`.
+- ↪ Deferred (depth): multi-window burn-rate alert config, per-service SLO surfaced on the Services screen, edit-in-place. Not needed to close the parity orphan.
+- **DoD (parity):** a user defines an SLO and sees budget burn + breach alerts from the UI; R1–R3/R5/R7 met.
 
 ### F3 — Alert delivery channels · 80→**100** BE, 15→**100** UI · effort M
 Slack/PD/Opsgenie/webhook + auto-resolve are real but **env-var-only**.

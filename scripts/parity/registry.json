@@ -39,11 +39,6 @@
 
   "knownOrphans": {
     "_doc": "Backend routes that SHOULD have a UI but don't yet — the Wave 2 backlog, frozen as known debt. The checker ALLOWS these but the list may only shrink: ship the UI, delete the entry. Adding a NEW orphan not listed here fails the build. Each maps to its ROAD_TO_100 feature.",
-    "GET /api/v1/slo/definitions": "F2 SLO screen",
-    "POST /api/v1/slo/definitions": "F2 SLO screen",
-    "DELETE /api/v1/slo/definitions/:p": "F2 SLO screen",
-    "GET /api/v1/slo/budget-alerts": "F2 SLO screen",
-    "GET /api/v1/slo/dashboard": "F2 SLO screen",
     "GET /api/v1/alerts": "F2/alerting: alerts list screen",
     "GET /api/v1/alerts/:p": "F2/alerting: alert detail",
     "POST /api/v1/admin/tenant/close": "F17 tenant admin UI",

@@ -157,3 +157,55 @@ export interface RemediationPolicy {
   confidence_threshold: number;
   execution_allowed: boolean;
 }
+
+// ── SLOs / error budgets / burn rate (ROAD_TO_100 · F2) ───────────────────────
+// Mirrors shared/models/slo.go.
+
+export type SLIType = 'availability' | 'latency' | string;
+export type SLOStatus = 'healthy' | 'warning' | 'critical' | string;
+
+export interface SLODefinition {
+  id: string;
+  service_name: string;
+  slo_target: number; // e.g. 99.9
+  sli_type: SLIType;
+  window_days: number; // e.g. 30
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SLOTrendPoint {
+  at: string;
+  sli_value: number;
+}
+
+/** Computed dashboard row: definition + current SLI + error budget + burn rate. */
+export interface SLODashboardItem {
+  definition: SLODefinition;
+  current_sli: number;
+  total_events: number;
+  error_events: number;
+  budget_total_min: number;
+  budget_used_min: number;
+  budget_remaining_pct: number; // 0–100
+  burn_rate: number; // 1.0 = on-track
+  status: SLOStatus;
+  trend: SLOTrendPoint[];
+}
+
+export interface SLOBudgetAlert {
+  id: string;
+  service_name: string;
+  burn_rate: number;
+  budget_remaining_pct: number;
+  severity: string;
+  message: string;
+  triggered_at: string;
+}
+
+export interface CreateSLORequest {
+  service_name: string;
+  slo_target: number;
+  sli_type?: SLIType;
+  window_days?: number;
+}

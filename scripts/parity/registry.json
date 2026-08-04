@@ -52,8 +52,6 @@
     "GET /api/v1/slo/dashboard": "F2 SLO screen",
     "GET /api/v1/alerts": "F2/alerting: alerts list screen",
     "GET /api/v1/alerts/:p": "F2/alerting: alert detail",
-    "DELETE /api/v1/admin/ingestion-keys/:p": "F4 ingestion-key mgmt UI (revoke — only create is wired today)",
-    "POST /api/v1/admin/ingestion-keys/:p/rotate": "F4 ingestion-key mgmt UI (rotate button)",
     "POST /api/v1/admin/tenant/close": "F17 tenant admin UI",
     "POST /api/v1/admin/tenant/plan": "F17 billing/plan admin UI",
     "POST /api/v1/admin/tenant/purge-data": "F19 data-deletion UI",

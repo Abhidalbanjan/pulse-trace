@@ -9,6 +9,7 @@ import { AuditLogPanel } from './AuditLogPanel';
 import { RateLimitsPanel } from './RateLimitsPanel';
 import { AlertRulesPanel } from './AlertRulesPanel';
 import { BillingPanel } from './BillingPanel';
+import { IngestionKeysPanel } from './IngestionKeysPanel';
 import { useTheme } from '@/context/ThemeContext';
 
 interface User { id: string; username: string; role: string; created_at?: string; }
@@ -335,25 +336,7 @@ export function SettingsView() {
            </div>
         )}
 
-        {activeTab === 'apikeys' && (
-           <div>
-             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '28px', gap: '16px', flexWrap: 'wrap' }}>
-               <div>
-                 <h3 style={{ fontSize: '19px', fontWeight: 700, margin: '0 0 8px', color: t.text1 }}>API Keys</h3>
-                 <p style={{ color: t.text2, fontSize: '13.5px', maxWidth: '520px', lineHeight: 1.6 }}>Keys for OpenTelemetry agents to send telemetry.</p>
-               </div>
-               <button style={primaryBtnStyle}>Generate New Key</button>
-             </div>
-
-             <div style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '24px', borderRadius: '12px', border: '1px solid ' + t.panelBorder, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-               <div>
-                 <div style={{ fontWeight: 600, marginBottom: '8px', color: t.text1 }}>Production Cluster Key</div>
-                 <div style={{ fontFamily: 'monospace', color: t.accent }}>pt_live_************************</div>
-               </div>
-               <button style={ghostRedBtnStyle}>Revoke</button>
-             </div>
-           </div>
-        )}
+        {activeTab === 'apikeys' && <IngestionKeysPanel />}
 
         {activeTab === 'alerts' && (
            <div>

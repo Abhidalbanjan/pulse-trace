@@ -150,7 +150,8 @@ async function seedAdmin(token) {
   if (await authed(token, '/api/v1/admin/policies', { name: 'viewer-write-block', effect: 'deny', resource: '*', condition: 'subject.role == "viewer" && action != "read"', priority: 20 }) < 300) ok++;
   if (await authed(token, '/api/v1/admin/rate-limits', { name: 'search-burst-guard', path_prefixes: ['/api/v1/search'], limit_count: 200, window_seconds: 60, priority: 10 }) < 300) ok++;
   if (await authed(token, '/api/v1/admin/users', { username: 'sarah.oncall', password: 'sarah_secret_123', role: 'viewer' }) < 300) ok++;
-  console.log(`  admin: ${ok}/4 (role/policy/rate-limit/user) created`);
+  if (await authed(token, '/api/v1/admin/ingestion-keys', { name: 'production-agents', tier: 'standard', scope: 'ingest' }) < 300) ok++;
+  console.log(`  admin: ${ok}/5 (role/policy/rate-limit/user/ingestion-key) created`);
 }
 
 async function main() {

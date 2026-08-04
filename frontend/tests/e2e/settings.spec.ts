@@ -41,4 +41,46 @@ test.describe('Settings', () => {
     await page.getByRole('button', { name: 'SSO / SAML' }).click();
     await expect(page.getByText('Google Workspace (OIDC)')).toBeVisible();
   });
+
+  test('API Keys tab lists real keys (not a placeholder)', async ({ page }) => {
+    await page.goto('/settings');
+    await page.getByRole('button', { name: 'API Keys' }).click();
+    // The real panel renders the seeded key and its non-secret prefix; the old
+    // hardcoded placeholder ("Production Cluster Key") must be gone.
+    await expect(page.locator('table tbody tr', { hasText: 'production-agents' }).first()).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('pt_ingest_', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('Production Cluster Key')).toHaveCount(0);
+  });
+
+  test('API Keys: full lifecycle — create reveals a one-time key, then rotate', async ({ page }) => {
+    const keyName = `e2e-key-${Date.now()}`;
+    await page.goto('/settings');
+    await page.getByRole('button', { name: 'API Keys' }).click();
+
+    // Create → the plaintext is revealed exactly once.
+    await page.getByRole('button', { name: '+ Generate Key' }).click();
+    await page.getByPlaceholder('e.g. production-agents').fill(keyName);
+    await page.getByRole('button', { name: 'Generate', exact: true }).click();
+
+    const reveal = page.getByRole('dialog');
+    await expect(reveal).toBeVisible({ timeout: 10000 });
+    await expect(reveal.getByText(/^pt_ingest_/)).toBeVisible();
+    await reveal.getByRole('button', { name: 'Done' }).click();
+
+    // The new key now appears in the table.
+    const row = page.locator('table tbody tr', { hasText: keyName });
+    await expect(row.first()).toBeVisible({ timeout: 10000 });
+
+    // Rotate it with an explicit grace window → a fresh key is revealed.
+    await row.first().getByRole('button', { name: 'Rotate' }).click();
+    const rotateDialog = page.getByRole('dialog');
+    await expect(rotateDialog).toBeVisible();
+    await rotateDialog.getByLabel('Grace period').selectOption('1h');
+    await rotateDialog.getByRole('button', { name: 'Rotate key' }).click();
+
+    const rotateReveal = page.getByRole('dialog');
+    await expect(rotateReveal.getByText(/rotated/i)).toBeVisible({ timeout: 10000 });
+    await expect(rotateReveal.getByText(/^pt_ingest_/)).toBeVisible();
+    await rotateReveal.getByRole('button', { name: 'Done' }).click();
+  });
 });

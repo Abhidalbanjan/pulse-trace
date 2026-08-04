@@ -34,3 +34,45 @@ export interface Role {
   permissions: string[];
   is_system: boolean;
 }
+
+// ── Ingestion keys (ROAD_TO_100 · F4) ─────────────────────────────────────────
+// Per-tenant keys agents/SDKs use to send telemetry. The server never returns a
+// key's plaintext or hash after creation — only this non-secret metadata.
+
+/** A key's scope. `ingest` is a secret server-side key; `rum` is a public,
+ *  browser-embeddable token (see gateway auth.ScopeIngest/ScopeRUM). */
+export type IngestionKeyScope = 'ingest' | 'rum';
+
+export interface IngestionKey {
+  id: string;
+  name: string;
+  /** Non-secret display prefix, e.g. `pt_ingest_ab12cd`. */
+  key_prefix: string;
+  tenant_id: string;
+  tier: string;
+  scope: IngestionKeyScope;
+  created_at: string;
+  last_used_at: string | null;
+  /** May be in the *future*: a rotation schedules the old key's revocation after
+   *  a grace window, during which it stays valid. Null = never revoked. */
+  revoked_at: string | null;
+  /** Set on a rotated-out key: the id of the successor key that replaced it. */
+  replaced_by: string | null;
+}
+
+/** The one-time create/rotate response. `key` (plaintext) is returned exactly
+ *  once and can never be retrieved again — the UI must reveal it immediately. */
+export interface MintedIngestionKey {
+  id: string;
+  name: string;
+  tenant_id: string;
+  tier: string;
+  scope: IngestionKeyScope;
+  key_prefix: string;
+  key: string;
+  warning: string;
+  // Present only on rotation:
+  rotated_from?: string;
+  grace_period?: string;
+  old_key_valid_until?: string;
+}

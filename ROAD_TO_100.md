@@ -89,7 +89,7 @@ highest-priority parity work.
 | **Self-healing approve / reject / dry-run** | ✅ | ❌ none | **Build Incidents remediation panel (F1).** |
 | **SLO / error-budget / burn-rate** | ✅ | ❌ none | **Build SLO screen (F2).** |
 | **Alert delivery channels** (Slack/PD/Opsgenie/webhook) | ✅ | ❌ env-only | **Build Channels settings panel + test-send (F3).** |
-| **Ingestion-key rotation** | ✅ | ❌ API-only | **Add rotate action to keys panel (F4).** |
+| Ingestion-key rotation | ✅ | ✅ Keys panel (list/create/rotate/revoke) | ✅ Done (F4). |
 | **Deploy gates (shift-left)** | ⚠️ partial | ⚠️ placeholder | **Wire to real data or remove from nav (F5).** |
 | AI-SRE remediation execute | ✅ | ⚠️ `alert()` | Replace with confirm→run→result (F1 shares this). |
 | Anomaly detection config/thresholds | ✅ | ❌ none | Add tuning UI (F14). |
@@ -125,12 +125,12 @@ Slack/PD/Opsgenie/webhook + auto-resolve are real but **env-var-only**.
 - **Tests:** test-send integration per channel type (stub servers already exist in `notification_worker_test.go`); e2e add-channel → trigger → delivered.
 - **DoD:** an admin configures and tests on-call delivery without touching env; secrets never rendered back; R1–R7.
 
-### F4 — Ingestion-key lifecycle · 84→**100** BE, 40→**100** UI · effort S
-Rotation shipped in the backend (grace window, `replaced_by`) but the keys panel only lists/creates/revokes.
-- **Frontend:** add **Rotate** (with grace-period picker) to the ingestion-keys row; show rotation lineage (`replaced_by`), `revoked_at` (incl. scheduled-future), and last-used; one-time new-key reveal modal matching create.
-- **Backend:** optional auto-rotation scheduler + expiry reminders.
-- **Tests:** e2e rotate → both keys valid during grace → old dies after.
-- **DoD:** full key lifecycle (mint/list/rotate/revoke) is UI-drivable; R2 closed.
+### F4 — Ingestion-key lifecycle · 84→**100** BE, 40→**100** UI · effort S · ✅ delivered
+Rotation shipped in the backend (grace window, `replaced_by`); the Settings "API Keys" tab was a hardcoded placeholder (fake `pt_live_***` key, dead buttons). Now a real panel on the F0.4 platform.
+- ✅ **Frontend** ([`IngestionKeysPanel`](frontend/src/components/Settings/IngestionKeysPanel.tsx)): lists real keys with status (Active / Retiring-at-`revoked_at` grace / Revoked), scope + tier + last-used and `replaced_by` lineage; **Generate** (name/scope/tier), **Rotate** with a grace-period picker, **Revoke** via accessible confirm; a one-time plaintext **reveal modal** (copy-to-clipboard) shared by create *and* rotate, matching the "shown once" server contract. Replaces the placeholder; typed client + `useApiResource` + `StateBoundary`/`ConfirmDialog`/`Toast`, no `any`.
+- ✅ **Tests:** Go DB-backed integration ([`ingestion_keys_test.go`](gateway-service/internal/auth/ingestion_keys_test.go)) proving the grace contract — **both keys valid during the window, predecessor dies immediately on grace-0**, plus lineage, future-dated revocation, over-max/malformed grace → 400, unknown key → 404; Playwright e2e (settings.spec) create→one-time-reveal→appears→rotate. Seed now provisions a demo key.
+- ↪ **Backend (deferred, optional):** auto-rotation scheduler + expiry reminders — not required to close parity.
+- ✅ **DoD:** full key lifecycle (mint/list/rotate/revoke) is UI-drivable; parity registry's two F4 orphans delisted; R2 closed for this row.
 
 ### F5 — Deploy gates (shift-left) · partial→**100** · effort M (or **remove**)
 Today the screen fetches nothing — a placeholder in the nav.

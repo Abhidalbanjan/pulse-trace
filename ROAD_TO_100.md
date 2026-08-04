@@ -86,12 +86,12 @@ highest-priority parity work.
 | --- | :---: | --- | --- |
 | Logs / Traces / Metrics / RUM / Synthetics / Topology / Catalog / Errors | ✅ | ✅ screens | Depth work (see §5), not parity. |
 | Roles / Policies / Rate-limits / Users / Alert-rules / Audit / Billing | ✅ | ✅ Settings panels | Minor: rotation button (below). |
-| **Self-healing approve / reject / dry-run** | ✅ | ❌ none | **Build Incidents remediation panel (F1).** |
+| Self-healing approve / reject / dry-run | ✅ | ✅ Incidents remediation panel | ✅ Done (F1). |
 | **SLO / error-budget / burn-rate** | ✅ | ❌ none | **Build SLO screen (F2).** |
 | **Alert delivery channels** (Slack/PD/Opsgenie/webhook) | ✅ | ❌ env-only | **Build Channels settings panel + test-send (F3).** |
 | Ingestion-key rotation | ✅ | ✅ Keys panel (list/create/rotate/revoke) | ✅ Done (F4). |
 | **Deploy gates (shift-left)** | ⚠️ partial | ⚠️ placeholder | **Wire to real data or remove from nav (F5).** |
-| AI-SRE remediation execute | ✅ | ⚠️ `alert()` | Replace with confirm→run→result (F1 shares this). |
+| AI-SRE remediation execute | ✅ | ✅ confirm→run→result | ✅ Done (F1) — `alert()` replaced. |
 | Anomaly detection config/thresholds | ✅ | ❌ none | Add tuning UI (F14). |
 | Data retention/deletion (GDPR) | ✅ | ❌ none | Add "delete my data" admin action (F17). |
 | Usage vs quota | ✅ | ⚠️ partial | Usage dashboard + quota bars (F16). |
@@ -103,13 +103,13 @@ highest-priority parity work.
 Format per feature: **current (BE→UI) → 100%**, backend tasks, frontend tasks,
 tests, DoD, effort. Ordered by leverage (parity gaps first).
 
-### F1 — Self-healing remediation (flagship) · 60→**100** BE, 20→**100** UI · effort L
-The backend (`correlation-service/internal/handler/playbook_handler.go`: approve/
-reject/dry-run + risk-tier authz) has no screen — this is the single biggest parity gap.
-- **Backend:** post-remediation **verification + auto-revert** (confirm health recovered, else roll back); add action types beyond restart/scale/rollback (e.g. drain, config-flag); a real in-cluster RBAC manifest for the operator; expose remediation history per incident.
-- **Frontend:** on **Incidents detail**, a Remediation panel — show the proposed playbook, **Dry-run** (renders the plan), **Approve** / **Reject** (with reason), live status (PENDING→EXECUTING→EXECUTED/FAILED), and the approver/audit trail. Disable Approve when policy mode forbids or the role isn't elevated (read `GET /remediation/policy`). Replace the AI-SRE `alert()` with this same confirm→run→result component.
-- **Tests:** e2e — propose → dry-run → approve → executed; RBAC test that a non-elevated role can't approve high-risk; verification/auto-revert integration test.
-- **DoD:** an on-call user can safely run and audit a fix from the UI; degraded/no-cluster states shown; R1–R7 met.
+### F1 — Self-healing remediation (flagship) · 60→**100** BE, 20→**100** UI · effort L · ✅ UI parity delivered
+The backend (`correlation-service/internal/handler/playbook_handler.go`: approve/reject/dry-run + risk-tier authz) had no screen — the incident detail showed hardcoded fake runbooks. Now a real, policy-aware panel.
+- ✅ **Frontend** ([`RemediationPanel`](frontend/src/components/Incidents/RemediationPanel.tsx) on a rewritten [`IncidentsView`](frontend/src/components/Incidents/IncidentsView.tsx)): shows the proposed playbook with live status (SUGGESTED/DRY_RUN/PENDING_APPROVAL/EXECUTING/EXECUTED/FAILED/REJECTED), **Dry-run** (renders the plan/output), **Approve** (confirm→run) and **Reject** (with reason), approver/audit trail, and the **policy posture** read from `GET /api/v1/remediation/policy` — Approve is hidden/disabled when execution is off, so there's never a button that silently does nothing. High-risk role gating is enforced server-side and surfaced as a clear error. IncidentsView also now renders the real causal narrative + confidence + model and the incident **timeline** — consuming and delisting all six F1 parity routes.
+- ✅ **AI-SRE execute** ([`app/page.tsx`](frontend/src/app/page.tsx)): the four blocking `alert()`s are replaced with an accessible **confirm→run→result** flow (`ConfirmDialog` + toasts + a chat result line); transport failures are reported honestly, never as fake success.
+- ✅ **Tests:** Playwright (`incidents.spec`) — detail + policy-aware remediation panel + dry-run; the risk-tier authorization is already covered by [`shared/remediation/authz_test.go`](shared/remediation/authz_test.go) (non-elevated role cannot approve high-risk).
+- ↪ **Backend depth (deferred to Wave 3 pillar work):** post-remediation verification + auto-revert, action types beyond restart/scale/rollback, a first-class remediation-history endpoint, and the in-cluster operator RBAC manifest. These deepen the flagship but are **beyond the parity orphan** (which was "capability with no UI") — R2 is closed.
+- **DoD (parity):** an on-call user can dry-run, approve/reject and audit a fix from the UI; degraded/execution-disabled states shown honestly; R1–R3/R5/R7 met for the UI slice.
 
 ### F2 — SLO / error-budget / burn-rate · 66→**100** BE, 10→**100** UI · effort M
 Real engine (`burn_rate_alerter.go`, `slo_worker.go`, `slo_repository.go`), **no view**.

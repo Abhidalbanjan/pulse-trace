@@ -76,3 +76,84 @@ export interface MintedIngestionKey {
   grace_period?: string;
   old_key_valid_until?: string;
 }
+
+// ── Incidents & self-healing remediation (ROAD_TO_100 · F1) ───────────────────
+// Mirrors shared/models: Incident.Causal.Playbook is the human-in-the-loop
+// remediation the UI drives via the playbook endpoints.
+
+/** One inferred causal edge (upstream → downstream). */
+export interface CausalLink {
+  from_service: string;
+  to_service: string;
+  evidence: string;
+  at?: string;
+}
+
+/** Playbook lifecycle — mirrors the models.Playbook* constants. */
+export type PlaybookStatus =
+  | 'SUGGESTED'
+  | 'SUPPRESSED'
+  | 'DRY_RUN'
+  | 'PENDING_APPROVAL'
+  | 'REJECTED'
+  | 'EXECUTING'
+  | 'EXECUTED'
+  | 'FAILED';
+
+/** A suggested / awaiting-approval / executed recovery action, with its audit trail. */
+export interface PlaybookAction {
+  name: string;
+  description: string;
+  status: PlaybookStatus;
+  output?: string;
+  dry_run?: boolean;
+  approved_by?: string;
+  approved_at?: string;
+  rejected_by?: string;
+  rejected_at?: string;
+}
+
+/** Structured causal-AI output attached to an incident. */
+export interface CausalAnalysis {
+  chain: CausalLink[];
+  narrative: string;
+  root_cause: string;
+  confidence: number;
+  model: string;
+  analyzed_at?: string;
+  playbook?: PlaybookAction;
+}
+
+export type IncidentSeverity = 'CRITICAL' | 'ERROR' | 'WARNING' | 'INFO' | string;
+
+export interface Incident {
+  id: string;
+  tenant_id?: string;
+  title: string;
+  root_cause: string;
+  status: string; // OPEN | RESOLVED
+  severity: IncidentSeverity;
+  services: string[];
+  alert_count: number;
+  started_at?: string;
+  resolved_at?: string;
+  created_at?: string;
+  updated_at?: string;
+  causal?: CausalAnalysis | null;
+}
+
+export interface IncidentTimelineEvent {
+  at: string;
+  event_type: string; // alert_triggered | incident_opened | incident_resolved
+  service?: string;
+  level?: string;
+  description: string;
+}
+
+/** Current remediation posture — gates whether the UI offers an execute path.
+ *  A control that silently does nothing is worse than an absent one. */
+export interface RemediationPolicy {
+  mode: string; // e.g. off | suggest | manual | auto
+  confidence_threshold: number;
+  execution_allowed: boolean;
+}

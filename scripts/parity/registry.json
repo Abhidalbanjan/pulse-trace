@@ -39,12 +39,6 @@
 
   "knownOrphans": {
     "_doc": "Backend routes that SHOULD have a UI but don't yet — the Wave 2 backlog, frozen as known debt. The checker ALLOWS these but the list may only shrink: ship the UI, delete the entry. Adding a NEW orphan not listed here fails the build. Each maps to its ROAD_TO_100 feature.",
-    "POST /api/v1/incidents/:p/playbook/approve": "F1 self-healing UI",
-    "POST /api/v1/incidents/:p/playbook/reject": "F1 self-healing UI",
-    "POST /api/v1/incidents/:p/playbook/dry-run": "F1 self-healing UI",
-    "GET /api/v1/remediation/policy": "F1 self-healing UI (gates the approve button)",
-    "GET /api/v1/incidents/:p": "F1 incident detail depth",
-    "GET /api/v1/incidents/:p/timeline": "F1 incident timeline",
     "GET /api/v1/slo/definitions": "F2 SLO screen",
     "POST /api/v1/slo/definitions": "F2 SLO screen",
     "DELETE /api/v1/slo/definitions/:p": "F2 SLO screen",

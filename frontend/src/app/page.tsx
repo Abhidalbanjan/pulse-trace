@@ -2,7 +2,9 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { fetchWithAuth } from '@/lib/api';
+import { errMessage } from '@/lib/errMessage';
 import { useTheme } from '@/context/ThemeContext';
+import { ConfirmDialog, useToast } from '@/components/ui';
 
 interface ChatMessage {
   id: string;
@@ -14,6 +16,15 @@ interface ChatMessage {
     actionLabel: string;
     onExecute: () => void;
   };
+}
+
+// A remediation action awaiting the operator's explicit confirmation before it
+// executes — the confirm→run→result flow that replaces the old blocking alert()s.
+interface PendingAction {
+  title: string;
+  type: string;
+  target: string;
+  parameters: Record<string, unknown>;
 }
 
 export default function ConversationalSRE() {
@@ -33,6 +44,51 @@ export default function ConversationalSRE() {
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const toast = useToast();
+
+  // Confirm→run→result state for executing a remediation action (F1: replaces
+  // the blocking alert() calls with an accessible confirm dialog + toasts).
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [executing, setExecuting] = useState(false);
+
+  const executeAction = async () => {
+    if (!pendingAction) return;
+    setExecuting(true);
+    try {
+      // action-service's ExecuteRequest expects {action_type, target, parameters}.
+      const res = await fetchWithAuth('/api/v1/actions/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action_type: pendingAction.type,
+          target: pendingAction.target,
+          parameters: pendingAction.parameters,
+        }),
+      });
+      if (res.ok) {
+        toast.success(`Executed ${pendingAction.type} on ${pendingAction.target}`);
+        setMessages((prev) => [...prev, {
+          id: Date.now().toString(),
+          sender: 'ai',
+          text: `✅ Executed ${pendingAction.type} on ${pendingAction.target}.`,
+        }]);
+      } else {
+        const detail = await res.text().catch(() => '');
+        const msg = `Action failed (${res.status}).${detail ? ' ' + detail : ''}`;
+        toast.error(msg);
+        setMessages((prev) => [...prev, { id: Date.now().toString(), sender: 'ai', text: `⚠️ ${msg}` }]);
+      }
+    } catch (err) {
+      // Never report fake success on a transport failure — the operator must know
+      // the action never reached the backend.
+      const msg = `Could not reach PulseTrace Operator: ${errMessage(err, 'unknown error')}`;
+      toast.error(msg);
+      setMessages((prev) => [...prev, { id: Date.now().toString(), sender: 'ai', text: `⚠️ ${msg}` }]);
+    } finally {
+      setExecuting(false);
+      setPendingAction(null);
+    }
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -75,39 +131,14 @@ export default function ConversationalSRE() {
           title: data.actionCard.title,
           description: data.actionCard.description,
           actionLabel: data.actionCard.actionLabel,
-          onExecute: async () => {
-             alert(`Executing ${data.actionCard.type} on ${data.actionCard.target}...`);
-             try {
-                // action-service's ExecuteRequest expects {action_type, target,
-                // parameters} (see action-service/internal/handler) — previously
-                // this posted the actionCard's own {title, description,
-                // actionLabel, type, target} shape as-is to a route the gateway
-                // didn't even proxy, so this call always 404'd silently before
-                // the fake-success catch block masked it. Both are fixed now.
-                const actRes = await fetchWithAuth('/api/v1/actions/execute', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    action_type: data.actionCard.type,
-                    target: data.actionCard.target,
-                    parameters: data.actionCard.parameters || {},
-                  })
-                });
-                if (actRes.ok) {
-                  alert('Action executed successfully by PulseTrace Operator.');
-                } else {
-                  // Surface the real failure reason instead of a generic message.
-                  const detail = await actRes.text().catch(() => '');
-                  alert(`Action failed (${actRes.status}).${detail ? ' ' + detail : ''}`);
-                }
-             } catch (e) {
-                // This previously reported fake success on a network/request
-                // failure — the operator would believe an action ran when it
-                // never reached the backend at all. Report the real failure instead.
-                console.error('action execution failed:', e);
-                alert(`Action failed: could not reach PulseTrace Operator (${e instanceof Error ? e.message : 'unknown error'}).`);
-             }
-          }
+          // Open an accessible confirm dialog; execution happens in executeAction
+          // after the operator confirms (confirm→run→result, no blocking alert()).
+          onExecute: () => setPendingAction({
+            title: data.actionCard.title,
+            type: data.actionCard.type,
+            target: data.actionCard.target,
+            parameters: data.actionCard.parameters || {},
+          }),
         };
       }
 
@@ -329,6 +360,25 @@ export default function ConversationalSRE() {
         </div>
 
       </div>
+
+      <ConfirmDialog
+        open={pendingAction !== null}
+        danger
+        busy={executing}
+        title="Execute this remediation action?"
+        body={
+          pendingAction ? (
+            <span>
+              Run <strong style={{ color: t.text1 }}>{pendingAction.type}</strong> on{' '}
+              <strong style={{ color: t.text1 }}>{pendingAction.target}</strong>. This makes a real
+              change via the PulseTrace Operator and cannot be undone automatically.
+            </span>
+          ) : null
+        }
+        confirmLabel="Execute"
+        onConfirm={executeAction}
+        onCancel={() => setPendingAction(null)}
+      />
     </div>
   );
 }

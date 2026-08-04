@@ -4,8 +4,8 @@ import (
 	"log"
 
 	"github.com/gin-gonic/gin"
-	"github.com/pulse-trace/action-service/internal/handler"
-	"github.com/pulse-trace/action-service/internal/k8s"
+	"github.com/pulsetrace/action-service/internal/handler"
+	"github.com/pulsetrace/action-service/internal/k8s"
 )
 
 func main() {

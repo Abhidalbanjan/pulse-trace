@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/pulse-trace/action-service/internal/k8s"
+	"github.com/pulsetrace/action-service/internal/k8s"
 )
 
 type ActionHandler struct {

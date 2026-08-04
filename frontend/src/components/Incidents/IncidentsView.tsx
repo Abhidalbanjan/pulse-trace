@@ -4,13 +4,19 @@ import React, { useState, useEffect } from 'react';
 import { fetchWithAuth } from '@/lib/api';
 import { useTheme } from '@/context/ThemeContext';
 
+interface CausalChainLink { from: string; to: string; evidence: string; }
+interface UIIncident { id: string; title: string; status: string; severity: string; started_at?: string; services_affected: string[]; root_cause: string; causal_chain: CausalChainLink[]; }
+interface RawCausalLink { from_service: string; to_service: string; confidence?: number; }
+interface RawIncident { id: string; services?: string[]; status?: string; severity?: string; started_at?: string; causal?: { chain?: RawCausalLink[] }; }
+
 export function IncidentsView() {
   const { tokens: t } = useTheme();
-  const [incidents, setIncidents] = useState<any[]>([]);
-  const [selectedIncident, setSelectedIncident] = useState<any | null>(null);
+  const [incidents, setIncidents] = useState<UIIncident[]>([]);
+  const [selectedIncident, setSelectedIncident] = useState<UIIncident | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
     setLoading(true);
     // Fetch live incidents from correlation-service via Next.js proxy and API Gateway
     fetchWithAuth('/api/v1/incidents')
@@ -23,7 +29,7 @@ export function IncidentsView() {
         const rawIncidents = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : null;
         if (rawIncidents) {
           // Map backend model to UI fields if necessary, or just use it directly
-          const mappedIncidents = rawIncidents.map((inc: any) => ({
+          const mappedIncidents = rawIncidents.map((inc: RawIncident) => ({
             id: inc.id,
             // The API's incident model names this field `services` (see
             // correlation-service/internal/models), not `service_names` - every
@@ -35,7 +41,7 @@ export function IncidentsView() {
             started_at: inc.started_at,
             services_affected: inc.services || [],
             root_cause: inc.causal?.chain ? "Causal AI has identified a potential root cause path." : "Awaiting AI analysis.",
-            causal_chain: (inc.causal?.chain || []).map((link: any) => ({
+            causal_chain: (inc.causal?.chain || []).map((link: RawCausalLink) => ({
                from: link.from_service,
                to: link.to_service,
                evidence: `Confidence: ${link.confidence || 1.0}`
@@ -112,7 +118,7 @@ export function IncidentsView() {
                       {inc.severity}
                     </span>
                     <span style={{ fontSize: '12px', color: t.text2 }}>
-                      {new Date(inc.started_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                      {new Date(inc.started_at ?? 0).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                     </span>
                   </div>
                   <h4 style={{ fontSize: '15px', fontWeight: 600, margin: '0 0 10px', lineHeight: 1.4, color: t.text1 }}>{inc.title}</h4>
@@ -145,7 +151,7 @@ export function IncidentsView() {
                   </span>
                   <span style={{ color: t.text2, fontSize: '13.5px' }}>ID: {selectedIncident.id}</span>
                   <span style={{ color: t.text2, fontSize: '13.5px' }}>
-                    Started: {new Date(selectedIncident.started_at).toLocaleString()}
+                    Started: {new Date(selectedIncident.started_at ?? 0).toLocaleString()}
                   </span>
                 </div>
                 <h2 style={{ fontSize: '26px', fontWeight: 700, margin: 0, color: t.text1 }}>{selectedIncident.title}</h2>
@@ -182,7 +188,7 @@ export function IncidentsView() {
                 <h3 style={{ fontSize: '17px', fontWeight: 700, margin: '0 0 16px', color: t.text1 }}>Causal Chain</h3>
                 {selectedIncident.causal_chain.length > 0 ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                    {selectedIncident.causal_chain.map((link: any, i: number) => (
+                    {selectedIncident.causal_chain.map((link: CausalChainLink, i: number) => (
                       <div key={i} style={{
                         background: t.dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
                         padding: '16px',

@@ -10,8 +10,8 @@ interface AuditEntry {
   action: 'create' | 'update' | 'delete';
   target_type: string;
   target_id: string;
-  before_state?: any;
-  after_state?: any;
+  before_state?: unknown;
+  after_state?: unknown;
   created_at: string;
 }
 

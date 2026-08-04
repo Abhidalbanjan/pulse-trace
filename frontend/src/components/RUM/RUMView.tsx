@@ -5,11 +5,14 @@ import { useRouter } from 'next/navigation';
 import { fetchWithAuth } from '@/lib/api';
 import { useTheme } from '@/context/ThemeContext';
 
+interface RUMMetric { MetricName?: string; Type?: string; p75_value?: number; avg_value?: number; count?: number | string; }
+interface RUMError { timestamp?: string | number; path?: string; error_msg?: string; user_agent?: string; trace_id?: string; }
+
 export function RUMView() {
   const router = useRouter();
   const { tokens: t } = useTheme();
-  const [metrics, setMetrics] = useState<any[]>([]);
-  const [errors, setErrors] = useState<any[]>([]);
+  const [metrics, setMetrics] = useState<RUMMetric[]>([]);
+  const [errors, setErrors] = useState<RUMError[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -42,11 +45,11 @@ export function RUMView() {
     const m = metrics.find(x => x.MetricName === name);
     if (!m) return 0;
     const v = m.p75_value ?? m.avg_value;
-    return name === 'CLS' ? Number(v) : Math.round(v);
+    return name === 'CLS' ? Number(v ?? 0) : Math.round(v ?? 0);
   };
 
   const getMetricCount = (type: string) => {
-    return metrics.filter(x => x.Type === type).reduce((acc, curr) => acc + parseInt(curr.count, 10), 0);
+    return metrics.filter(x => x.Type === type).reduce((acc, curr) => acc + parseInt(String(curr.count ?? 0), 10), 0);
   };
 
   const lcp = getMetricP75('LCP');
@@ -184,7 +187,7 @@ export function RUMView() {
                     {errors.map((err, i) => (
                       <tr key={i} style={{ borderTop: '1px solid ' + t.panelBorder }}>
                         <td style={{ padding: '16px 24px', fontSize: '13px', color: t.text2, whiteSpace: 'nowrap' }}>
-                          {new Date(err.timestamp).toLocaleString()}
+                          {new Date(err.timestamp ?? 0).toLocaleString()}
                         </td>
                         <td style={{ padding: '16px', fontSize: '13px', fontFamily: 'monospace' }}>
                           {err.path}
@@ -193,7 +196,7 @@ export function RUMView() {
                           {err.error_msg}
                         </td>
                         <td style={{ padding: '16px', fontSize: '12px', color: t.text2 }}>
-                          {err.user_agent?.length > 40 ? err.user_agent.substring(0, 40) + '...' : err.user_agent}
+                          {(err.user_agent ?? '').length > 40 ? (err.user_agent ?? '').substring(0, 40) + '...' : err.user_agent}
                         </td>
                         <td style={{ padding: '16px 24px' }}>
                           {err.trace_id ? (

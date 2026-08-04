@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { errMessage } from '@/lib/errMessage';
 import { fetchWithAuth } from '@/lib/api';
 import { useTheme } from '@/context/ThemeContext';
 
@@ -32,7 +33,7 @@ export function RateLimitsPanel() {
         setRules(json.data || []);
         setError(null);
       })
-      .catch(err => setError(err.message || 'Failed to load rate limit rules'))
+      .catch(err => setError(errMessage(err, 'Failed to load rate limit rules')))
       .finally(() => setLoading(false));
   }, []);
 
@@ -57,8 +58,8 @@ export function RateLimitsPanel() {
       setForm({ name: '', pathPrefixes: '', limitCount: 100, windowSeconds: 60, priority: 100 });
       setShowForm(false);
       fetchRules();
-    } catch (err: any) {
-      alert(`Error creating rule: ${err.message}`);
+    } catch (err) {
+      alert(`Error creating rule: ${errMessage(err)}`);
     }
   };
 
@@ -70,8 +71,8 @@ export function RateLimitsPanel() {
       });
       if (!res.ok) throw new Error(await res.text());
       fetchRules();
-    } catch (err: any) {
-      alert(`Error updating rule: ${err.message}`);
+    } catch (err) {
+      alert(`Error updating rule: ${errMessage(err)}`);
     }
   };
 
@@ -81,8 +82,8 @@ export function RateLimitsPanel() {
       const res = await fetchWithAuth(`/api/v1/admin/rate-limits/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error(await res.text());
       fetchRules();
-    } catch (err: any) {
-      alert(`Error deleting rule: ${err.message}`);
+    } catch (err) {
+      alert(`Error deleting rule: ${errMessage(err)}`);
     }
   };
 

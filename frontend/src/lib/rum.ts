@@ -10,10 +10,34 @@ export interface RUMConfig {
   sampleRate?: number;
 }
 
+// One captured RUM event. Fields are optional because each event type populates
+// a different subset (page_view / error / web_vitals).
+interface RUMEvent {
+  type: string;
+  session_id?: string;
+  path?: string;
+  user_agent?: string;
+  trace_id?: string;
+  span_id?: string;
+  error_msg?: string;
+  error_stack?: string;
+  metric_name?: string;
+  metric_value?: number;
+}
+
+// The one-time init guard we stash on window.
+type RUMWindow = Window & { __PULSETRACE_RUM_INIT__?: boolean };
+
+// PerformanceEntry subtype for layout-shift entries, which carry a `value`.
+interface LayoutShiftEntry extends PerformanceEntry {
+  value: number;
+}
+
 export function initRUM(config: RUMConfig = {}) {
   if (typeof window === 'undefined') return;
-  if ((window as any).__PULSETRACE_RUM_INIT__) return;
-  (window as any).__PULSETRACE_RUM_INIT__ = true;
+  const w = window as RUMWindow;
+  if (w.__PULSETRACE_RUM_INIT__) return;
+  w.__PULSETRACE_RUM_INIT__ = true;
 
   const envRate = process.env.NEXT_PUBLIC_RUM_SAMPLE_RATE;
   const rawRate = config.sampleRate ?? (envRate !== undefined ? parseFloat(envRate) : 1.0);
@@ -24,7 +48,7 @@ export function initRUM(config: RUMConfig = {}) {
   if (Math.random() >= sampleRate) return;
 
   const sessionId = Math.random().toString(36).substring(2, 15);
-  const events: any[] = [];
+  const events: RUMEvent[] = [];
   let isFlushing = false;
 
   // Public, RUM-only client token (scope 'rum'). Safe to embed in the bundle: it
@@ -57,7 +81,7 @@ export function initRUM(config: RUMConfig = {}) {
     }
   };
 
-  const enqueue = (event: any) => {
+  const enqueue = (event: Partial<RUMEvent> & { type: string }) => {
     const { traceId, spanId } = getRUMTraceContext();
     events.push({
       session_id: sessionId,
@@ -107,13 +131,13 @@ export function initRUM(config: RUMConfig = {}) {
         }
         if (entry.entryType === 'layout-shift') {
           // CLS
-          enqueue({ type: 'web_vitals', metric_name: 'CLS', metric_value: (entry as any).value });
+          enqueue({ type: 'web_vitals', metric_name: 'CLS', metric_value: (entry as LayoutShiftEntry).value });
         }
       }
     });
     observer.observe({ type: 'largest-contentful-paint', buffered: true });
     observer.observe({ type: 'layout-shift', buffered: true });
-  } catch (e) {
+  } catch {
     // Ignore if PerformanceObserver unsupported
   }
 

@@ -35,6 +35,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     if (token && storedUser) {
       try {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
         setUser(JSON.parse(storedUser));
       } catch (e) {
         console.error('Failed to parse stored user', e);

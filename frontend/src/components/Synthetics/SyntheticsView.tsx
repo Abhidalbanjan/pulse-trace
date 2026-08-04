@@ -1,12 +1,15 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
+import { errMessage } from '@/lib/errMessage';
 import { fetchWithAuth } from '@/lib/api';
 import { useTheme } from '@/context/ThemeContext';
 
+interface SyntheticResult { URL: string; uptime_percent: number; avg_latency_ms: number; }
+
 export function SyntheticsView() {
   const { tokens: t } = useTheme();
-  const [results, setResults] = useState<any[]>([]);
+  const [results, setResults] = useState<SyntheticResult[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [newUrl, setNewUrl] = useState('');
@@ -40,8 +43,8 @@ export function SyntheticsView() {
       setNewUrl('');
       // Optimistically wait a moment then refresh
       setTimeout(fetchResults, 2000);
-    } catch (err: any) {
-      alert(`Failed to create test: ${err.message}`);
+    } catch (err) {
+      alert(`Failed to create test: ${errMessage(err)}`);
     }
   };
 
@@ -53,15 +56,15 @@ export function SyntheticsView() {
       });
       if (!res.ok) throw new Error(await res.text());
       setResults((prev) => prev.filter((r) => r.URL !== url));
-    } catch (err: any) {
-      alert(`Failed to delete test: ${err.message}`);
+    } catch (err) {
+      alert(`Failed to delete test: ${errMessage(err)}`);
     }
   };
 
   const totalTests = results.length;
   const failingTests = results.filter(r => r.uptime_percent < 100).length;
   const globalUptime = totalTests > 0
-    ? (results.reduce((acc, r) => acc + parseFloat(r.uptime_percent), 0) / totalTests).toFixed(2)
+    ? (results.reduce((acc, r) => acc + r.uptime_percent, 0) / totalTests).toFixed(2)
     : 0;
 
   const primaryButtonStyle: React.CSSProperties = {
@@ -229,7 +232,7 @@ export function SyntheticsView() {
                             width: '10px',
                             height: '10px',
                             borderRadius: '50%',
-                            background: parseFloat(r.uptime_percent) === 100 ? t.green : t.red,
+                            background: r.uptime_percent === 100 ? t.green : t.red,
                           }}
                         />
                       </td>
@@ -239,8 +242,8 @@ export function SyntheticsView() {
                       <td style={{ padding: '16px', fontWeight: 600, fontSize: '13.5px', color: t.text1 }}>
                         {Math.round(r.avg_latency_ms)} ms
                       </td>
-                      <td style={{ padding: '16px', fontSize: '13.5px', color: parseFloat(r.uptime_percent) >= 99.9 ? t.green : t.red }}>
-                        {parseFloat(r.uptime_percent).toFixed(2)}%
+                      <td style={{ padding: '16px', fontSize: '13.5px', color: r.uptime_percent >= 99.9 ? t.green : t.red }}>
+                        {r.uptime_percent.toFixed(2)}%
                       </td>
                       <td style={{ padding: '16px', textAlign: 'right' }}>
                         <button

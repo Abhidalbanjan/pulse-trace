@@ -9,16 +9,40 @@ interface TraceWaterfallProps {
   traceId: string;
 }
 
+// Jaeger-shaped trace model (what /api/traces/:id returns).
+interface SpanTag {
+  key: string;
+  value: unknown;
+}
+interface Span {
+  spanID: string;
+  processID: string;
+  operationName: string;
+  startTime: number;
+  duration: number;
+  tags?: SpanTag[];
+}
+interface Trace {
+  spans: Span[];
+  processes: Record<string, { serviceName: string } | undefined>;
+}
+interface CorrelatedLog {
+  level?: string;
+  timestamp?: string | number;
+  message?: string;
+}
+
 export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
   const { tokens: t } = useTheme();
   const router = useRouter();
-  const [traceData, setTraceData] = useState<any>(null);
+  const [traceData, setTraceData] = useState<Trace | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedSpan, setSelectedSpan] = useState<any>(null);
-  const [correlatedLogs, setCorrelatedLogs] = useState<any[]>([]);
+  const [selectedSpan, setSelectedSpan] = useState<Span | null>(null);
+  const [correlatedLogs, setCorrelatedLogs] = useState<CorrelatedLog[]>([]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
     setLoading(true);
     fetchWithAuth(`/api/traces/${traceId}`)
       .then(async res => {
@@ -27,9 +51,9 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
       })
       .then(data => {
         if (data && data.data && data.data.length > 0) {
-          const trace = data.data[0];
+          const trace = data.data[0] as Trace;
           // Sort spans by start time
-          trace.spans.sort((a: any, b: any) => a.startTime - b.startTime);
+          trace.spans.sort((a: Span, b: Span) => a.startTime - b.startTime);
           setTraceData(trace);
         } else {
           setError("Trace not found");
@@ -39,7 +63,7 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
       .finally(() => setLoading(false));
   }, [traceId]);
 
-  const handleSpanClick = async (span: any) => {
+  const handleSpanClick = async (span: Span) => {
     setSelectedSpan(span);
     // Trace-to-Log Correlation: Search Quickwit for this trace_id
     try {
@@ -74,7 +98,7 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
   if (error || !traceData) return <div style={{ ...cardStyle, padding: '48px', textAlign: 'center', color: t.red }}>{error || 'Failed to load trace'}</div>;
 
   const minStartTime = traceData.spans[0]?.startTime || 0;
-  const maxEndTime = Math.max(...traceData.spans.map((s: any) => s.startTime + s.duration));
+  const maxEndTime = Math.max(...traceData.spans.map((s: Span) => s.startTime + s.duration));
   const totalDuration = maxEndTime - minStartTime;
 
   return (
@@ -85,11 +109,11 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
         <h3 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '24px', color: t.text1 }}>Trace Timeline: {traceId.substring(0, 8)}</h3>
 
         <div style={{ position: 'relative', width: '100%' }}>
-          {traceData.spans.map((span: any, index: number) => {
+          {traceData.spans.map((span: Span, index: number) => {
             const serviceName = traceData.processes[span.processID]?.serviceName || 'Unknown';
             const offsetPercentage = ((span.startTime - minStartTime) / totalDuration) * 100;
             const widthPercentage = Math.max((span.duration / totalDuration) * 100, 0.5); // Min width 0.5% for visibility
-            const hasError = span.tags?.some((t: any) => t.key === 'error' && t.value === true);
+            const hasError = span.tags?.some((t: SpanTag) => t.key === 'error' && t.value === true);
             const isSelected = selectedSpan?.spanID === span.spanID;
 
             return (
@@ -155,7 +179,7 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
               <button
                 onClick={() => {
                   const svc = traceData.processes[selectedSpan.processID]?.serviceName;
-                  router.push(`/profiler?service=${encodeURIComponent(svc)}&spanId=${encodeURIComponent(selectedSpan.spanID)}`);
+                  router.push(`/profiler?service=${encodeURIComponent(svc || '')}&spanId=${encodeURIComponent(selectedSpan.spanID)}`);
                 }}
                 style={{
                   display: 'inline-flex',
@@ -177,7 +201,7 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
               <div style={{ marginTop: '16px' }}>
                 <h5 style={{ fontSize: '12px', textTransform: 'uppercase', color: t.text2, marginBottom: '8px' }}>Tags</h5>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                  {selectedSpan.tags?.map((tag: any, i: number) => (
+                  {selectedSpan.tags?.map((tag: SpanTag, i: number) => (
                     <span key={i} style={{ fontSize: '11px', background: t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)', padding: '4px 8px', borderRadius: '4px', color: t.text1 }}>
                       <span style={{ color: t.accent }}>{tag.key}:</span> {tag.value?.toString()}
                     </span>
@@ -194,7 +218,7 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
                 <p style={{ fontSize: '13px', color: t.text2 }}>No logs found for this exact trace ID in Quickwit.</p>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {correlatedLogs.map((log: any, i: number) => (
+                  {correlatedLogs.map((log: CorrelatedLog, i: number) => (
                     <div key={i} style={{
                       background: t.dark ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.04)',
                       padding: '10px 12px',
@@ -203,7 +227,7 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
                       fontFamily: 'monospace'
                     }}>
                       <span style={{ color: log.level === 'ERROR' ? t.red : t.green, marginRight: '8px' }}>[{log.level || 'INFO'}]</span>
-                      <span style={{ color: t.text2, marginRight: '8px' }}>{new Date(log.timestamp).toLocaleTimeString()}</span>
+                      <span style={{ color: t.text2, marginRight: '8px' }}>{new Date(log.timestamp ?? 0).toLocaleTimeString()}</span>
                       <span style={{ color: t.text1 }}>{log.message}</span>
                     </div>
                   ))}

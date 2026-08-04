@@ -56,8 +56,8 @@ export default function LoginPage() {
       const userData = data.user || { id: 'temp-id', email: email, role: data.role || 'admin' };
       login(data.token, userData);
 
-    } catch (err: any) {
-      setError(err.message || 'An unexpected error occurred');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An unexpected error occurred');
     } finally {
       setLoading(false);
     }

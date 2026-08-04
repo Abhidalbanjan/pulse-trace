@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { errMessage } from '@/lib/errMessage';
 import { fetchWithAuth } from '@/lib/api';
 import { useTheme } from '@/context/ThemeContext';
 
@@ -33,7 +34,7 @@ export function PoliciesPanel() {
         setPolicies(json.data || []);
         setError(null);
       })
-      .catch(err => setError(err.message || 'Failed to load policies'))
+      .catch(err => setError(errMessage(err, 'Failed to load policies')))
       .finally(() => setLoading(false));
   }, []);
 
@@ -52,8 +53,8 @@ export function PoliciesPanel() {
       setForm({ name: '', effect: 'deny', resource: '*', condition: '', priority: 100 });
       setShowForm(false);
       fetchPolicies();
-    } catch (err: any) {
-      setFormError(err.message);
+    } catch (err) {
+      setFormError(errMessage(err));
     }
   };
 
@@ -65,8 +66,8 @@ export function PoliciesPanel() {
       });
       if (!res.ok) throw new Error(await res.text());
       fetchPolicies();
-    } catch (err: any) {
-      alert(`Error updating policy: ${err.message}`);
+    } catch (err) {
+      alert(`Error updating policy: ${errMessage(err)}`);
     }
   };
 
@@ -76,8 +77,8 @@ export function PoliciesPanel() {
       const res = await fetchWithAuth(`/api/v1/admin/policies/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error(await res.text());
       fetchPolicies();
-    } catch (err: any) {
-      alert(`Error deleting policy: ${err.message}`);
+    } catch (err) {
+      alert(`Error deleting policy: ${errMessage(err)}`);
     }
   };
 

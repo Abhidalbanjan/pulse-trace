@@ -7,9 +7,13 @@ import { TraceWaterfall } from './TraceWaterfall';
 import { TraceAnalyticsView } from './TraceAnalyticsView';
 import { useTheme } from '@/context/ThemeContext';
 
+interface SpanTag { key: string; value: unknown; }
+interface JaegerSpan { processID?: string; operationName?: string; duration?: number; startTime?: number; references?: unknown[]; tags?: SpanTag[]; }
+interface RawJaegerTrace { traceID: string; spans: JaegerSpan[]; processes: Record<string, { serviceName: string } | undefined>; }
+
 interface Trace {
   traceID: string;
-  spans: any[];
+  spans: JaegerSpan[];
   duration: number; // calculated
   startTime: number; // calculated
   rootServiceName: string;
@@ -71,11 +75,11 @@ export function TracesView() {
       })
       .then(data => {
         if (data && data.data) {
-          const parsedTraces = data.data.map((t: any) => {
+          const parsedTraces = data.data.map((t: RawJaegerTrace) => {
             // Find root span (no references or refType childOf)
-            const rootSpan = t.spans.find((s: any) => !s.references || s.references.length === 0) || t.spans[0];
-            const rootServiceName = rootSpan?.processID && t.processes[rootSpan.processID] ? t.processes[rootSpan.processID].serviceName : 'Unknown';
-            const hasError = t.spans.some((s: any) => s.tags?.some((tag: any) => tag.key === 'error' && tag.value === true));
+            const rootSpan = t.spans.find((s: JaegerSpan) => !s.references || s.references.length === 0) || t.spans[0];
+            const rootServiceName = (rootSpan?.processID ? t.processes[rootSpan.processID]?.serviceName : undefined) || 'Unknown';
+            const hasError = t.spans.some((s: JaegerSpan) => s.tags?.some((tag: SpanTag) => tag.key === 'error' && tag.value === true));
 
             return {
               traceID: t.traceID,
@@ -97,6 +101,7 @@ export function TracesView() {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
     fetchTraces();
     // Refresh every 10s
     const interval = setInterval(fetchTraces, 10000);

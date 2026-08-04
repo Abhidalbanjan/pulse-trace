@@ -1,12 +1,15 @@
 "use client";
 
 import React, { useEffect, useState } from 'react';
+import { errMessage } from '@/lib/errMessage';
 import { fetchWithAuth } from '@/lib/api';
 import { useTheme } from '@/context/ThemeContext';
 
+interface CatalogNode { id: string; state: string; team?: string; repo?: string; slack?: string; }
+
 export function ServiceCatalog() {
   const { tokens: t } = useTheme();
-  const [nodes, setNodes] = useState<any[]>([]);
+  const [nodes, setNodes] = useState<CatalogNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({ service_name: '', team: '', repo: '', slack: '' });
@@ -17,7 +20,7 @@ export function ServiceCatalog() {
       .then(res => res.json())
       .then(data => {
         if (data.nodes) {
-          const sorted = data.nodes.sort((a: any, b: any) => a.id.localeCompare(b.id));
+          const sorted = data.nodes.sort((a: CatalogNode, b: CatalogNode) => a.id.localeCompare(b.id));
           setNodes(sorted);
         }
         setLoading(false);
@@ -29,6 +32,7 @@ export function ServiceCatalog() {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
     fetchCatalog();
   }, []);
 
@@ -44,8 +48,8 @@ export function ServiceCatalog() {
       setShowModal(false);
       setFormData({ service_name: '', team: '', repo: '', slack: '' });
       fetchCatalog(); // Refresh
-    } catch (err: any) {
-      alert(`Failed to register service: ${err.message}`);
+    } catch (err) {
+      alert(`Failed to register service: ${errMessage(err)}`);
     }
   };
 

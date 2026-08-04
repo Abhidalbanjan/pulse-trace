@@ -3,8 +3,20 @@
 import React, { useState } from 'react';
 import { useTheme } from '@/context/ThemeContext';
 
+// A shift-left deploy gate decision for a PR. This screen is a placeholder until
+// the gate feed is wired (ROAD_TO_100 · F5), hence the empty initial state.
+interface DeployGate {
+  id: string;
+  title: string;
+  author: string;
+  repo: string;
+  status: string;
+  reason: string;
+  timestamp: string;
+}
+
 export function DeploymentsView() {
-  const [gates] = useState<any[]>([]);
+  const [gates] = useState<DeployGate[]>([]);
   const { tokens: t } = useTheme();
 
   return (

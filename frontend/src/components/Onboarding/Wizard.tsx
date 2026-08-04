@@ -1,6 +1,8 @@
 "use client";
 
 import React, { useState } from 'react';
+import Link from 'next/link';
+import { errMessage } from '@/lib/errMessage';
 import { CodeSnippet } from './CodeSnippet';
 import { useTheme } from '@/context/ThemeContext';
 import { fetchWithAuth } from '@/lib/api';
@@ -39,8 +41,8 @@ export function Wizard() {
       const data = await res.json();
       setApiKey(data.key);
       setStep(3);
-    } catch (e: any) {
-      setError(e.message || 'Failed to generate ingestion key');
+    } catch (e) {
+      setError(errMessage(e, 'Failed to generate ingestion key'));
     } finally {
       setGenerating(false);
     }
@@ -212,7 +214,7 @@ export function Wizard() {
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: '40px' }}>
-              <a href="/" style={{
+              <Link href="/" style={{
                 color: t.text1,
                 textDecoration: 'none',
                 background: t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
@@ -222,7 +224,7 @@ export function Wizard() {
                 fontWeight: 600
               }}>
                 Return to Dashboard
-              </a>
+              </Link>
             </div>
           </div>
         )}

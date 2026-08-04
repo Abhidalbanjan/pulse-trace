@@ -76,6 +76,7 @@ export function ServiceDetailView({ serviceName }: { serviceName: string }) {
   }, [serviceName, interval]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
     setLoading(true);
     fetchDetail();
     const t = window.setInterval(fetchDetail, 15000);

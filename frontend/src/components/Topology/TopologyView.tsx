@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { errMessage } from '@/lib/errMessage';
 import dagre from 'dagre';
 import ReactFlow, {
   Node,
@@ -18,7 +19,10 @@ import { fetchWithAuth } from '@/lib/api';
 import { useTheme } from '@/context/ThemeContext';
 
 // Custom Node matching the Enterprise UI Redesign glass-node style
-const CustomNode = ({ data }: { data: any }) => {
+interface NodeData { label: string; state: string; highlighted?: boolean; }
+interface TopoNode { id: string; state: string; }
+interface TopoEdge { source: string; target: string; request_count?: number; error_count?: number; avg_latency_ms?: number; }
+const CustomNode = ({ data }: { data: NodeData }) => {
   const { tokens: t } = useTheme();
 
   const getStateColor = (state: string) => {
@@ -138,14 +142,14 @@ export function TopologyView() {
       .then(res => res.json())
       .then(data => {
         if (data && data.nodes) {
-          const rfNodes: Node[] = data.nodes.map((n: any) => ({
+          const rfNodes: Node[] = data.nodes.map((n: TopoNode) => ({
             id: n.id,
             type: 'custom',
             data: { label: n.id, state: n.state, highlighted: false },
             position: { x: 0, y: 0 }, // real position assigned by dagre below
           }));
 
-          const rfEdges: Edge[] = data.edges ? data.edges.map((e: any, idx: number) => {
+          const rfEdges: Edge[] = data.edges ? data.edges.map((e: TopoEdge, idx: number) => {
             // Real fix: the backend's JSON fields are `source`/`target`, not
             // `from`/`to` - this mismatch previously meant every edge resolved to
             // source=undefined/target=undefined and ReactFlow silently dropped it,
@@ -182,6 +186,7 @@ export function TopologyView() {
   }, [setNodes, setEdges, t]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
     loadTopology();
   }, [loadTopology]);
 
@@ -266,8 +271,8 @@ export function TopologyView() {
 
       setRootCauseResults(results);
       setNodes(prev => prev.map(n => ({ ...n, data: { ...n.data, highlighted: highlightSet.has(n.id) } })));
-    } catch (err: any) {
-      setRootCauseError(err.message || 'Root cause analysis failed');
+    } catch (err) {
+      setRootCauseError(errMessage(err, 'Root cause analysis failed'));
     } finally {
       setAnalyzing(false);
     }

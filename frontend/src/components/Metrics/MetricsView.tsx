@@ -29,6 +29,8 @@ interface MetricName {
 // rate/error/duration from trace spans; this view is for arbitrary
 // instrumented counters and gauges (queue depth, cache hit rate, collector
 // throughput, etc).
+interface MetricRow { time_bucket: string; value: number; }
+
 export function MetricsView() {
   const { tokens: t } = useTheme();
   const [names, setNames] = useState<MetricName[]>([]);
@@ -36,7 +38,7 @@ export function MetricsView() {
   const [namesError, setNamesError] = useState<string | null>(null);
   const [selected, setSelected] = useState<MetricName | null>(null);
   const [interval, setInterval_] = useState('1h');
-  const [series, setSeries] = useState<Record<string, any[]>>({});
+  const [series, setSeries] = useState<Record<string, MetricRow[]>>({});
   const [chartLoading, setChartLoading] = useState(false);
   const [chartError, setChartError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -75,6 +77,7 @@ export function MetricsView() {
       .finally(() => setChartLoading(false));
   }, [selected, interval]);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
   useEffect(() => { fetchSeries(); }, [fetchSeries]);
 
   const primaryBtnStyle: React.CSSProperties = {
@@ -87,12 +90,12 @@ export function MetricsView() {
   // by time_bucket with one column per service, which is what recharts'
   // <Line dataKey="serviceName" /> per series expects from a single dataset.
   const chartData = React.useMemo(() => {
-    const byTime = new Map<string, any>();
+    const byTime = new Map<string, Record<string, string | number>>();
     Object.entries(series).forEach(([svc, rows]) => {
       rows.forEach(row => {
         const key = row.time_bucket;
         if (!byTime.has(key)) byTime.set(key, { time_bucket: key });
-        byTime.get(key)[svc || '(unknown)'] = row.value;
+        byTime.get(key)![svc || '(unknown)'] = row.value;
       });
     });
     return Array.from(byTime.values()).sort((a, b) => String(a.time_bucket).localeCompare(String(b.time_bucket)));

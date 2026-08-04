@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
+import { errMessage } from '@/lib/errMessage';
 import { fetchWithAuth } from '@/lib/api';
 import { RolesPanel } from './RolesPanel';
 import { PoliciesPanel } from './PoliciesPanel';
@@ -10,11 +11,13 @@ import { AlertRulesPanel } from './AlertRulesPanel';
 import { BillingPanel } from './BillingPanel';
 import { useTheme } from '@/context/ThemeContext';
 
+interface User { id: string; username: string; role: string; created_at?: string; }
+
 export function SettingsView() {
   const { tokens: t } = useTheme();
   const [activeTab, setActiveTab] = useState('users');
   const [ssoClientId, setSsoClientId] = useState<string | null>(null);
-  const [users, setUsers] = useState<any[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [inviteForm, setInviteForm] = useState({ username: '', password: '', role: 'viewer' });
@@ -29,6 +32,7 @@ export function SettingsView() {
     if (ssoToken) {
       localStorage.setItem('pulse_token', ssoToken);
       window.history.replaceState({}, document.title, window.location.pathname);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
       setToken(ssoToken);
     } else {
       setToken(localStorage.getItem('pulse_token'));
@@ -47,7 +51,7 @@ export function SettingsView() {
             setSsoClientId(data.client_id);
           }
         })
-        .catch(err => console.error("Failed to fetch SSO config:", err.message || err));
+        .catch(err => console.error("Failed to fetch SSO config:", errMessage(err) || err));
     }
   }, [activeTab]);
 
@@ -67,7 +71,7 @@ export function SettingsView() {
         setLoadingUsers(false);
       })
       .catch(err => {
-        setError(err.message || err.toString());
+        setError(errMessage(err) || err.toString());
         setLoadingUsers(false);
       });
   };
@@ -79,7 +83,7 @@ export function SettingsView() {
         return res.json();
       })
       .then(data => {
-        const names = (data.data || []).map((r: any) => r.name);
+        const names = (data.data || []).map((r: { name: string }) => r.name);
         if (names.length > 0) setAvailableRoles(names);
       })
       .catch(err => console.error('Failed to load roles for invite form:', err));
@@ -87,6 +91,7 @@ export function SettingsView() {
 
   useEffect(() => {
     if (activeTab === 'users' && token) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
       fetchUsers();
       fetchAvailableRoles();
     }
@@ -103,8 +108,8 @@ export function SettingsView() {
       setShowInviteModal(false);
       setInviteForm({ username: '', password: '', role: 'viewer' });
       fetchUsers();
-    } catch (err: any) {
-      alert(`Error inviting user: ${err.message}`);
+    } catch (err) {
+      alert(`Error inviting user: ${errMessage(err)}`);
     }
   };
 
@@ -119,8 +124,8 @@ export function SettingsView() {
       const res = await fetchWithAuth(`/api/v1/admin/users?id=${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error(await res.text());
       fetchUsers();
-    } catch (err: any) {
-      alert(`Error revoking user: ${err.message}`);
+    } catch (err) {
+      alert(`Error revoking user: ${errMessage(err)}`);
     }
   };
 

@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from 'react';
+import { errMessage } from '@/lib/errMessage';
 import { fetchWithAuth } from '@/lib/api';
 import { useTheme } from '@/context/ThemeContext';
 
@@ -31,6 +32,7 @@ export function BillingPanel() {
       setError('Failed to load billing information.');
     }
   };
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
   useEffect(() => { load(); }, []);
 
   const checkout = async (plan: string) => {
@@ -43,8 +45,8 @@ export function BillingPanel() {
       if (!res.ok) throw new Error((await res.text()) || 'Checkout failed');
       const { url } = await res.json();
       if (url) window.location.href = url;
-    } catch (e: any) {
-      setError(e.message || 'Checkout failed');
+    } catch (e) {
+      setError(errMessage(e, 'Checkout failed'));
     } finally { setBusy(false); }
   };
 
@@ -56,8 +58,8 @@ export function BillingPanel() {
       if (!res.ok) throw new Error((await res.text()) || 'Could not open billing portal');
       const { url } = await res.json();
       if (url) window.location.href = url;
-    } catch (e: any) {
-      setError(e.message || 'Could not open billing portal');
+    } catch (e) {
+      setError(errMessage(e, 'Could not open billing portal'));
     } finally { setBusy(false); }
   };
 

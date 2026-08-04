@@ -42,6 +42,7 @@ export function ContinuousProfilerView() {
     // Compare mode: current window (right) vs the immediately preceding window of the
     // same length (left) - Pyroscope's built-in diff view, day/hour-over-day/hour comparison.
     const rangeSeconds = TIME_RANGE_SECONDS[timeRange] || 3600;
+    // eslint-disable-next-line react-hooks/purity -- intentional current-time read to build the live comparison window when the profiler URL renders
     const now = Math.floor(Date.now() / 1000);
     const rightUntil = now;
     const rightFrom = now - rangeSeconds;

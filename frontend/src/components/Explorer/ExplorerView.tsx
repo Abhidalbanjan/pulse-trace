@@ -13,8 +13,10 @@ interface LogEntry {
   message: string;
   trace_id?: string;
   tenant_id: string;
-  _raw: any;
+  _raw: unknown;
 }
+
+interface QuickwitHit { trace_id?: string; timestamp?: string; service_name?: string; level?: string; message?: string; tenant_id?: string; }
 
 interface Bucket {
   key: string | number;
@@ -64,7 +66,7 @@ export function ExplorerView() {
   // Aggregation State
   const [serviceBuckets, setServiceBuckets] = useState<Bucket[]>([]);
   const [levelBuckets, setLevelBuckets] = useState<Bucket[]>([]);
-  const [volumeData, setVolumeData] = useState<any[]>([]);
+  const [volumeData, setVolumeData] = useState<{ time: string; count: number }[]>([]);
 
   // Live Tail State
   const [isLiveTail, setIsLiveTail] = useState(false);
@@ -125,7 +127,7 @@ export function ExplorerView() {
       .then(res => res.json())
       .then(data => {
         if (data && data.hits) {
-          const formattedLogs = data.hits.map((hit: any) => ({
+          const formattedLogs = data.hits.map((hit: QuickwitHit) => ({
             id: hit.trace_id || Math.random().toString(),
             timestamp: hit.timestamp || new Date().toISOString(),
             service_name: hit.service_name || 'unknown',
@@ -143,7 +145,7 @@ export function ExplorerView() {
           if (data.aggregations.level_counts) setLevelBuckets(data.aggregations.level_counts.buckets || []);
 
           if (data.aggregations.volume_over_time && data.aggregations.volume_over_time.buckets) {
-            const chartData = data.aggregations.volume_over_time.buckets.map((b: any) => ({
+            const chartData = data.aggregations.volume_over_time.buckets.map((b: { key: string | number; doc_count: number }) => ({
               time: new Date(b.key).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second:'2-digit' }),
               count: b.doc_count
             }));
@@ -156,15 +158,10 @@ export function ExplorerView() {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
     fetchLogs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query, regexMode, timeRange]);
-
-  // Load this user's saved searches once on mount.
-  useEffect(() => {
-    loadSavedSearches();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const loadSavedSearches = () => {
     fetchWithAuth('/api/v1/saved-searches?kind=logs')
@@ -172,6 +169,12 @@ export function ExplorerView() {
       .then((data) => setSavedSearches(data?.data || []))
       .catch((err) => console.error('Failed to load saved searches:', err));
   };
+
+  // Load this user's saved searches once on mount.
+  useEffect(() => {
+    loadSavedSearches();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const applySavedSearch = (s: SavedSearch) => {
     const p = s.query_params || {};

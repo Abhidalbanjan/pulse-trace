@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { errMessage } from '@/lib/errMessage';
 import { fetchWithAuth } from '@/lib/api';
 import { useTheme } from '@/context/ThemeContext';
 
@@ -48,7 +49,7 @@ export function AlertRulesPanel() {
         setRules(json.data || []);
         setError(null);
       })
-      .catch(err => setError(err.message || 'Failed to load alert rules'))
+      .catch(err => setError(errMessage(err, 'Failed to load alert rules')))
       .finally(() => setLoading(false));
   }, []);
 
@@ -74,8 +75,8 @@ export function AlertRulesPanel() {
       setForm({ name: '', description: '', serviceName: '*', condition: '', severity: 'WARNING', cooldownSeconds: 900 });
       setShowForm(false);
       fetchRules();
-    } catch (err: any) {
-      setFormError(err.message || 'Failed to create rule');
+    } catch (err) {
+      setFormError(errMessage(err, 'Failed to create rule'));
     }
   };
 
@@ -87,8 +88,8 @@ export function AlertRulesPanel() {
       });
       if (!res.ok) throw new Error(await res.text());
       fetchRules();
-    } catch (err: any) {
-      alert(`Error updating rule: ${err.message}`);
+    } catch (err) {
+      alert(`Error updating rule: ${errMessage(err)}`);
     }
   };
 
@@ -98,8 +99,8 @@ export function AlertRulesPanel() {
       const res = await fetchWithAuth(`/api/v1/admin/alert-rules/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error(await res.text());
       fetchRules();
-    } catch (err: any) {
-      alert(`Error deleting rule: ${err.message}`);
+    } catch (err) {
+      alert(`Error deleting rule: ${errMessage(err)}`);
     }
   };
 

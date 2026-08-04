@@ -25,9 +25,12 @@ interface TraceSavedSearch {
   };
 }
 
+interface TraceChartRow { time: string; p50: number; p90: number; p99: number; count: number; }
+interface RawTraceRow { time_bucket: string; p50_ms: number; p90_ms: number; p99_ms: number; total_traces: number | string; }
+
 export function TraceAnalyticsView() {
   const { tokens: t } = useTheme();
-  const [data, setData] = useState<any[]>([]);
+  const [data, setData] = useState<TraceChartRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -83,12 +86,12 @@ export function TraceAnalyticsView() {
       .then(jsonData => {
         // ClickHouse JSON format returns rows in .data
         if (jsonData && jsonData.data) {
-          const formatted = jsonData.data.map((row: any) => ({
+          const formatted = jsonData.data.map((row: RawTraceRow) => ({
             time: new Date(row.time_bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             p50: Math.round(row.p50_ms),
             p90: Math.round(row.p90_ms),
             p99: Math.round(row.p99_ms),
-            count: parseInt(row.total_traces, 10)
+            count: parseInt(String(row.total_traces), 10)
           }));
           setData(formatted);
         } else {
@@ -103,6 +106,7 @@ export function TraceAnalyticsView() {
   }, [interval, selectedServices, selectedRoutes]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
     fetchAnalytics();
   }, [fetchAnalytics]);
 
@@ -117,16 +121,16 @@ export function TraceAnalyticsView() {
   const setOperationRegexBoth = (v: string) => { setOperationRegex(v); operationRegexRef.current = v; };
 
   // ── Saved searches (kind=traces) ──────────────────────────────────────────
-  useEffect(() => {
-    loadSavedSearches();
-  }, []);
-
   const loadSavedSearches = () => {
     fetchWithAuth('/api/v1/saved-searches?kind=traces')
       .then((res) => (res.ok ? res.json() : Promise.reject(res.status)))
       .then((json) => setSavedSearches(json?.data || []))
       .catch((err) => console.error('Failed to load saved searches:', err));
   };
+
+  useEffect(() => {
+    loadSavedSearches();
+  }, []);
 
   const applySavedSearch = (s: TraceSavedSearch) => {
     const p = s.query_params || {};

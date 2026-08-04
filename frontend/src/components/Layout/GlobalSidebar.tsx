@@ -15,6 +15,7 @@ export function GlobalSidebar({ isCollapsed, onToggle }: { isCollapsed?: boolean
   const navItems = [
     { key: 'home', label: 'AI SRE', path: '/' },
     { key: 'incidents', label: 'Incidents', path: '/incidents' },
+    { key: 'alerts', label: 'Alerts', path: '/alerts' },
     { key: 'slo', label: 'SLOs', path: '/slo' },
     { key: 'deployments', label: 'Deploy Gates', path: '/deployments' },
     { key: 'onboarding', label: 'Onboarding', path: '/onboarding' },

@@ -51,6 +51,7 @@ export function getTokens(theme: Theme): ThemeTokens {
 export const NAV_ICONS: Record<string, string> = {
   home: 'auto_awesome',
   incidents: 'warning',
+  alerts: 'notifications_active',
   slo: 'target',
   deployments: 'shield',
   onboarding: 'bolt',

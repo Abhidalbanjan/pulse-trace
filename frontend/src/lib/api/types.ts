@@ -210,6 +210,19 @@ export interface CreateSLORequest {
   window_days?: number;
 }
 
+// ── Alerts (raw signals before correlation into incidents) ────────────────────
+export interface Alert {
+  id: string;
+  tenant_id?: string;
+  log_entry_id?: string;
+  service: string;
+  level: string; // CRITICAL | ERROR | WARNING | …
+  message: string;
+  trace_id?: string;
+  triggered_at: string;
+  created_at?: string;
+}
+
 // ── Tenant data deletion (ROAD_TO_100 · F19) ──────────────────────────────────
 // The per-store result of a purge/close, doubling as a deletion certificate:
 // each attempted store lands in steps[] (ok) or errors[].

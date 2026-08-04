@@ -40,8 +40,6 @@
 
   "knownOrphans": {
     "_doc": "Backend routes that SHOULD have a UI but don't yet — the Wave 2 backlog, frozen as known debt. The checker ALLOWS these but the list may only shrink: ship the UI, delete the entry. Adding a NEW orphan not listed here fails the build. Each maps to its ROAD_TO_100 feature.",
-    "GET /api/v1/alerts": "F2/alerting: alerts list screen",
-    "GET /api/v1/alerts/:p": "F2/alerting: alert detail",
     "GET /api/v1/topology/dependencies/downstream": "F13 topology depth (downstream view)",
     "GET /api/v1/logs/:p": "F6 single-log permalink view"
   },

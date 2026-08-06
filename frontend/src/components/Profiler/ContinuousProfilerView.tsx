@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { fetchWithAuth } from '@/lib/api';
 import { PROFILED_SERVICES } from '@/lib/profiledServices';
 import { useTheme } from '@/context/ThemeContext';
 
@@ -10,6 +11,15 @@ const TIME_RANGE_SECONDS: Record<string, number> = {
   'Last 1 hour': 60 * 60,
   'Last 24 hours': 24 * 60 * 60,
 };
+
+interface FuncStat { name: string; self: number; pct: number }
+interface FuncDiff {
+  name: string;
+  baseline_pct: number;
+  comparison_pct: number;
+  delta_pct: number;
+  regression: boolean;
+}
 
 export function ContinuousProfilerView() {
   const { tokens: t } = useTheme();
@@ -24,46 +34,45 @@ export function ContinuousProfilerView() {
   const [timeRange, setTimeRange] = useState('Last 1 hour');
   const [compareMode, setCompareMode] = useState(false);
 
-  // Profiling <-> trace linkage: when arriving from a trace span, filter the
-  // flame graph down to just the samples pprof-labeled with that span_id
-  // (see shared/middleware/tracing.go's pyroscope.TagWrapper).
-  const selector = spanId ? `{span_id="${spanId}"}` : '{}';
-  const query = `${service}.${profileType}${selector}`;
+  const [functions, setFunctions] = useState<FuncStat[]>([]);
+  const [diffs, setDiffs] = useState<FuncDiff[]>([]);
+  const [regressionCount, setRegressionCount] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // We proxy Pyroscope directly via an iframe pointing to our gateway proxy
-  // The gateway strips the /api/v1/profiler prefix and routes to Pyroscope's internal UI.
-  // We use a relative path. In development, next.config.ts rewrites this to the gateway.
-  // In production, the ingress controller or load balancer would route /api/v1/ to the gateway.
-  const buildProfilerUrl = () => {
-    if (!compareMode) {
-      return `/api/v1/profiler/?query=${query}`;
-    }
-
-    // Compare mode: current window (right) vs the immediately preceding window of the
-    // same length (left) - Pyroscope's built-in diff view, day/hour-over-day/hour comparison.
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
     const rangeSeconds = TIME_RANGE_SECONDS[timeRange] || 3600;
-    // eslint-disable-next-line react-hooks/purity -- intentional current-time read to build the live comparison window when the profiler URL renders
-    const now = Math.floor(Date.now() / 1000);
-    const rightUntil = now;
-    const rightFrom = now - rangeSeconds;
-    const leftUntil = rightFrom;
-    const leftFrom = rightFrom - rangeSeconds;
+    const params = new URLSearchParams({ service, profile_type: profileType, range_seconds: String(rangeSeconds) });
+    if (spanId) params.set('span_id', spanId);
+    const path = compareMode ? 'diff' : 'functions';
+    fetchWithAuth(`/api/v1/profiler/${path}?${params.toString()}`)
+      .then(async res => { if (!res.ok) throw new Error(await res.text()); return res.json(); })
+      .then(data => {
+        if (compareMode) {
+          setDiffs(data.functions || []);
+          setRegressionCount(data.regression_count || 0);
+        } else {
+          setFunctions(data.functions || []);
+        }
+      })
+      .catch(err => setError(err.message || 'Failed to load profile'))
+      .finally(() => setLoading(false));
+  }, [service, profileType, timeRange, compareMode, spanId]);
 
-    const params = new URLSearchParams({
-      query,
-      from: String(leftFrom),
-      until: String(rightUntil),
-      leftQuery: query,
-      leftFrom: String(leftFrom),
-      leftUntil: String(leftUntil),
-      rightQuery: query,
-      rightFrom: String(rightFrom),
-      rightUntil: String(rightUntil),
-    });
-    return `/api/v1/profiler/comparison-diff?${params.toString()}`;
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- load reacts to the toolbar selectors and sets state from the API response; the leading setLoading(true) is the intended pending state
+  useEffect(() => { load(); }, [load]);
+
+  const selectStyle: React.CSSProperties = {
+    background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.7)',
+    border: '1px solid ' + t.panelBorder, color: t.text1, padding: '9px 13px', borderRadius: '10px', fontSize: '13px', minWidth: '180px',
   };
 
-  const pyroscopeUrl = buildProfilerUrl();
+  const panelStyle: React.CSSProperties = {
+    flex: 1, borderRadius: '20px', overflow: 'hidden', background: t.panelBg,
+    border: '1px solid ' + t.panelBorder, backdropFilter: 'blur(30px) saturate(180%)', boxShadow: t.shadow, minHeight: '420px', display: 'flex', flexDirection: 'column',
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', height: '100%' }}>
@@ -78,124 +87,111 @@ export function ContinuousProfilerView() {
                 <a href="/profiler" style={{ color: t.accent }}>clear filter</a>
               </>
             ) : (
-              'Identify performance bottlenecks in production code down to the line number.'
+              'The hottest code paths in production, and how they regress release-over-release.'
             )}
           </p>
         </div>
       </div>
 
       {/* Toolbar */}
-      <div style={{
-        display: 'flex',
-        gap: '12px',
-        padding: '16px',
-        borderRadius: '18px',
-        background: t.panelBg,
-        border: '1px solid ' + t.panelBorder,
-        backdropFilter: 'blur(30px)',
-        marginBottom: '16px',
-        flexWrap: 'wrap',
-        alignItems: 'center',
-      }}>
-
-        <select
-          value={service}
-          onChange={(e) => setService(e.target.value)}
-          style={{
-            background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.7)',
-            border: '1px solid ' + t.panelBorder,
-            color: t.text1,
-            padding: '9px 13px',
-            borderRadius: '10px',
-            fontSize: '13px',
-            minWidth: '180px',
-          }}
-        >
+      <div style={{ display: 'flex', gap: '12px', padding: '16px', borderRadius: '18px', background: t.panelBg, border: '1px solid ' + t.panelBorder, backdropFilter: 'blur(30px)', flexWrap: 'wrap', alignItems: 'center' }}>
+        <select value={service} onChange={(e) => setService(e.target.value)} style={selectStyle}>
           {PROFILED_SERVICES.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
-
-        <select
-          value={profileType}
-          onChange={(e) => setProfileType(e.target.value)}
-          style={{
-            background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.7)',
-            border: '1px solid ' + t.panelBorder,
-            color: t.text1,
-            padding: '9px 13px',
-            borderRadius: '10px',
-            fontSize: '13px',
-            minWidth: '180px',
-          }}
-        >
+        <select value={profileType} onChange={(e) => setProfileType(e.target.value)} style={selectStyle}>
           <option value="process_cpu">CPU (process_cpu)</option>
           <option value="memory_alloc_objects">Memory Allocations</option>
           <option value="memory_inuse_space">Memory In-Use</option>
         </select>
-
-        <select
-          value={timeRange}
-          onChange={(e) => setTimeRange(e.target.value)}
-          style={{
-            background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.7)',
-            border: '1px solid ' + t.panelBorder,
-            color: t.text1,
-            padding: '9px 13px',
-            borderRadius: '10px',
-            fontSize: '13px',
-            minWidth: '180px',
-          }}
-        >
+        <select value={timeRange} onChange={(e) => setTimeRange(e.target.value)} style={selectStyle}>
           <option>Last 15 minutes</option>
           <option>Last 1 hour</option>
           <option>Last 24 hours</option>
         </select>
-
         <div style={{ flex: 1 }} />
-
         <button
           onClick={() => setCompareMode(prev => !prev)}
-          style={{
-            padding: '10px 22px',
-            borderRadius: '10px',
-            border: 'none',
-            background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
-            color: '#fff',
-            fontWeight: 600,
-            fontSize: '13px',
-            cursor: 'pointer',
-          }}
+          style={{ padding: '10px 22px', borderRadius: '10px', border: 'none', background: compareMode ? t.accent : `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, color: '#fff', fontWeight: 600, fontSize: '13px', cursor: 'pointer' }}
         >
-          {compareMode ? 'Back to Flame Graph' : 'Compare Profiles'}
+          {compareMode ? 'Back to Flat Profile' : 'Detect Regressions'}
         </button>
       </div>
 
-      {/* Interactive Flame Graph (Pyroscope UI Embed) */}
-      <div style={{
-        flex: 1,
-        display: 'flex',
-        flexDirection: 'column',
-        borderRadius: '20px',
-        overflow: 'hidden',
-        background: t.panelBg,
-        border: '1px solid ' + t.panelBorder,
-        backdropFilter: 'blur(30px) saturate(180%)',
-        boxShadow: t.shadow,
-        minHeight: '420px',
-      }}>
+      {/* Regression callout (compare mode) */}
+      {compareMode && !loading && !error && (
+        <div style={{
+          padding: '14px 20px', borderRadius: '14px',
+          background: regressionCount > 0 ? (t.dark ? 'rgba(241,107,99,0.12)' : 'rgba(224,82,75,0.08)') : (t.dark ? 'rgba(52,199,126,0.12)' : 'rgba(37,169,107,0.08)'),
+          border: '1px solid ' + (regressionCount > 0 ? t.red : t.green), color: regressionCount > 0 ? t.red : t.green, fontSize: '13.5px', fontWeight: 600,
+        }}>
+          {regressionCount > 0
+            ? `▲ ${regressionCount} function${regressionCount > 1 ? 's' : ''} regressed vs. the preceding ${timeRange.toLowerCase().replace('last ', '')} — their share of ${profileType} grew.`
+            : `✓ No profile regressions vs. the preceding period.`}
+        </div>
+      )}
+
+      {/* Data panel */}
+      <div style={panelStyle}>
         <div style={{ padding: '16px 24px', borderBottom: '1px solid ' + t.panelBorder, fontSize: '14px', fontWeight: 700 }}>
           {compareMode
-            ? `Comparing ${service} (${profileType}): ${timeRange} vs. the preceding period`
-            : `Flame Graph: ${service} (${profileType})`}
+            ? `Regression diff — ${service} (${profileType}): ${timeRange} vs. preceding period`
+            : `Top functions by self time — ${service} (${profileType})`}
         </div>
 
-        {/* We embed Pyroscope directly. Note: Pyroscope UI is light-themed by default. */}
-        <iframe
-          key={pyroscopeUrl}
-          src={pyroscopeUrl}
-          style={{ flex: 1, width: '100%', border: 'none' }}
-          title="Continuous Profiler Flamegraph"
-          sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
-        />
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          {loading ? (
+            <div style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>Loading profile…</div>
+          ) : error ? (
+            <div style={{ padding: '48px', textAlign: 'center', color: t.red }}>{error}</div>
+          ) : compareMode ? (
+            diffs.length === 0 ? (
+              <div style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>No profile samples in either window yet.</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid ' + t.panelBorder, background: t.dark ? 'rgba(0,0,0,0.15)' : 'rgba(0,0,0,0.03)' }}>
+                    <th style={{ padding: '13px 24px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Function</th>
+                    <th style={{ padding: '13px 16px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Baseline</th>
+                    <th style={{ padding: '13px 16px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Current</th>
+                    <th style={{ padding: '13px 16px', fontWeight: 600, color: t.text2, fontSize: '12.5px' }}>Δ (share)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {diffs.map((d, i) => {
+                    const up = d.delta_pct > 0;
+                    const color = d.regression ? t.red : d.delta_pct < 0 ? t.green : t.text2;
+                    return (
+                      <tr key={i} style={{ borderBottom: '1px solid ' + t.panelBorder }}>
+                        <td style={{ padding: '12px 24px', fontFamily: 'monospace', fontSize: '12.5px', color: t.text1, maxWidth: '460px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={d.name}>{d.name}</td>
+                        <td style={{ padding: '12px 16px', fontSize: '13px', color: t.text2 }}>{d.baseline_pct.toFixed(1)}%</td>
+                        <td style={{ padding: '12px 16px', fontSize: '13px', color: t.text1 }}>{d.comparison_pct.toFixed(1)}%</td>
+                        <td style={{ padding: '12px 16px', fontSize: '13px', fontWeight: 700, color }}>
+                          {up ? '▲' : d.delta_pct < 0 ? '▼' : ''} {d.delta_pct > 0 ? '+' : ''}{d.delta_pct.toFixed(1)} pp
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )
+          ) : functions.length === 0 ? (
+            <div style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>No profile samples in this window yet. Profiling data appears once the selected service reports to Pyroscope.</div>
+          ) : (
+            <div style={{ padding: '12px 24px' }}>
+              {functions.map((f, i) => (
+                <div key={i} style={{ padding: '9px 0', borderBottom: '1px solid ' + t.panelBorder }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px', marginBottom: '5px' }}>
+                    <span style={{ fontFamily: 'monospace', fontSize: '12.5px', color: t.text1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.name}>{f.name}</span>
+                    <span style={{ fontSize: '12.5px', fontWeight: 700, color: t.accent, flexShrink: 0 }}>{f.pct.toFixed(1)}%</span>
+                  </div>
+                  <div style={{ height: '6px', borderRadius: '100px', background: t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)' }}>
+                    <div style={{ width: `${Math.min(f.pct, 100)}%`, height: '100%', borderRadius: '100px', background: `linear-gradient(90deg, ${t.accent}, ${t.accent2})` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
     </div>

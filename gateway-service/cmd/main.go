@@ -117,6 +117,7 @@ func main() {
 	alertRuleHandler := handler.NewAlertRuleHandler(authHandler.GetDB())
 	rateLimitRuleHandler.StartPolling(ctx, 5*time.Second)
 	rumHandler := handler.NewRUMHandler(clickhouseURL, usageMeter)
+	profilerHandler := handler.NewProfilerHandler(pyroscopeURL)
 	syntheticsHandler := handler.NewSyntheticsHandler(clickhouseURL, authHandler.GetDB())
 	// StartWorker is deferred until after the Kafka log producer is available, so
 	// the worker can be wired with the failure→alert publisher (see below).
@@ -303,6 +304,11 @@ func main() {
 	mux.HandleFunc("POST /api/v1/rum/ingest", rumHandler.Ingest)
 	mux.HandleFunc("GET /api/v1/rum/analytics", rumHandler.GetAnalytics)
 	mux.HandleFunc("GET /api/v1/rum/errors", rumHandler.GetErrors)
+	// Native profiler surface: these specific paths win over the /api/v1/profiler/
+	// catch-all proxy (mux most-specific-wins), so PulseTrace computes the flat
+	// profile + diff itself instead of embedding Pyroscope's UI.
+	mux.HandleFunc("GET /api/v1/profiler/functions", profilerHandler.GetFunctions)
+	mux.HandleFunc("GET /api/v1/profiler/diff", profilerHandler.GetDiff)
 	mux.HandleFunc("GET /api/v1/rum/trends", rumHandler.GetTrends)
 	mux.HandleFunc("GET /api/v1/rum/sessions", rumHandler.GetSessions)
 	mux.HandleFunc("GET /api/v1/rum/devices", rumHandler.GetDevices)

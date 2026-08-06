@@ -12,6 +12,7 @@ import { BillingPanel } from './BillingPanel';
 import { IngestionKeysPanel } from './IngestionKeysPanel';
 import { DataPrivacyPanel } from './DataPrivacyPanel';
 import { ChannelsPanel } from './ChannelsPanel';
+import { AnomalyConfigPanel } from './AnomalyConfigPanel';
 import { useTheme } from '@/context/ThemeContext';
 
 interface User { id: string; username: string; role: string; created_at?: string; }
@@ -218,7 +219,7 @@ export function SettingsView() {
       <div style={{ width: '230px', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '4px' }}>
         <h2 style={{ fontSize: '24px', fontWeight: 700, margin: '0 0 20px', color: t.text1 }}>Settings</h2>
 
-        {['users', 'billing', 'roles', 'policies', 'ratelimits', 'audit', 'apikeys', 'sso', 'alerts', 'privacy'].map(tab => (
+        {['users', 'billing', 'roles', 'policies', 'ratelimits', 'audit', 'apikeys', 'sso', 'alerts', 'anomalies', 'privacy'].map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -245,6 +246,7 @@ export function SettingsView() {
               : tab === 'apikeys' ? 'API Keys'
               : tab === 'sso' ? 'SSO / SAML'
               : tab === 'alerts' ? 'Alert Channels'
+              : tab === 'anomalies' ? 'Anomalies'
               : 'Data & Privacy'}
           </button>
         ))}
@@ -379,6 +381,8 @@ export function SettingsView() {
              </div>
            </div>
         )}
+
+        {activeTab === 'anomalies' && <AnomalyConfigPanel />}
 
         {activeTab === 'privacy' && <DataPrivacyPanel />}
 

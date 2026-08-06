@@ -137,6 +137,9 @@ func main() {
 		{Prefix: "/api/v1/alerts", Upstream: alertServiceURL},
 		{Prefix: "/api/v1/incidents", Upstream: correlationServiceURL},
 		{Prefix: "/api/v1/slo", Upstream: correlationServiceURL},
+		// Per-tenant anomaly-detection tuning (F14): read/update thresholds +
+		// on/off on correlation-service; admin-gated by RBAC, tenant-scoped.
+		{Prefix: "/api/v1/anomaly", Upstream: correlationServiceURL},
 		// Per-tenant alert delivery channels (F3): CRUD + test-send live on
 		// notification-service; admin-gated by RBACEngine.Middleware like other
 		// /api/v1 admin surfaces, and tenant-scoped from the JWT server-side.

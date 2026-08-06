@@ -223,6 +223,15 @@ export interface Alert {
   created_at?: string;
 }
 
+// ── Anomaly-detection tuning (ROAD_TO_100 · F14) ──────────────────────────────
+export interface AnomalyConfig {
+  enabled: boolean;
+  p99_multiplier: number;        // fire when p99 >= this × baseline
+  error_rate_jump_points: number; // absolute % points above baseline
+  min_error_rate: number;         // floor: error rate must also clear this %
+  throughput_drop_ratio: number;  // fire when throughput <= this × baseline (0–1)
+}
+
 // ── Alert delivery channels (ROAD_TO_100 · F3) ────────────────────────────────
 export type ChannelType = 'slack' | 'email' | 'pagerduty' | 'opsgenie' | 'webhook';
 

@@ -69,6 +69,15 @@ test.describe('Settings', () => {
     await expect(page.getByText(name).first()).toBeVisible({ timeout: 10000 });
   });
 
+  test('Anomalies tab loads the detection tuning', async ({ page }) => {
+    await page.goto('/settings');
+    await page.getByRole('button', { name: 'Anomalies' }).click();
+    await expect(page.getByRole('heading', { name: 'Anomaly Detection' })).toBeVisible();
+    // Config loads (defaults when unset) — the enable toggle and a threshold field render.
+    await expect(page.getByText('Anomaly detection enabled')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByLabel('Latency spike (× baseline)')).toBeVisible();
+  });
+
   test('Data & Privacy tab gates deletion behind a type-to-confirm modal', async ({ page }) => {
     await page.goto('/settings');
     await page.getByRole('button', { name: 'Data & Privacy' }).click();

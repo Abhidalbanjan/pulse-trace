@@ -3,6 +3,8 @@ package engine
 import (
 	"strings"
 	"testing"
+
+	"github.com/pulsetrace/correlation-service/internal/repository"
 )
 
 // baseline with enough samples to be trusted, and modest healthy values.
@@ -50,7 +52,7 @@ func TestDetectAnomalies(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			reasons := detectAnomalies(healthyBaseline(), c.row)
+			reasons := detectAnomalies(healthyBaseline(), c.row, repository.DefaultAnomalyConfig())
 			joined := strings.Join(reasons, "; ")
 			if c.wantHit == "" {
 				if len(reasons) != 0 {
@@ -65,10 +67,28 @@ func TestDetectAnomalies(t *testing.T) {
 	}
 }
 
+// TestDetectAnomaliesRespectsConfig proves the per-tenant tuning (F14) actually
+// changes the verdict: the same 1.5×-baseline p99 is healthy under the default
+// 1.6× multiplier but anomalous under a stricter 1.4×.
+func TestDetectAnomaliesRespectsConfig(t *testing.T) {
+	b := healthyBaseline() // ewmaP99Ms = 100
+	row := serviceRow{Requests: 1000, Errors: 10, P99Ms: 150} // 1.5× baseline, 1% errors
+
+	if r := detectAnomalies(b, row, repository.DefaultAnomalyConfig()); len(r) != 0 {
+		t.Errorf("1.5× baseline under the default 1.6× multiplier must not fire, got %q", strings.Join(r, "; "))
+	}
+
+	strict := repository.DefaultAnomalyConfig()
+	strict.P99Multiplier = 1.4
+	if r := detectAnomalies(b, row, strict); len(r) == 0 {
+		t.Error("1.5× baseline under a stricter 1.4× multiplier must fire")
+	}
+}
+
 // A cold baseline (too few samples) must never fire, however extreme the input.
 func TestDetectAnomaliesRequiresBaselineHistory(t *testing.T) {
 	cold := &serviceBaseline{ewmaP99Ms: 100, ewmaErrorRate: 1, ewmaRequests: 1000, samples: 1}
-	if r := detectAnomalies(cold, serviceRow{Requests: 5000, Errors: 5000, P99Ms: 9999}); len(r) != 0 {
+	if r := detectAnomalies(cold, serviceRow{Requests: 5000, Errors: 5000, P99Ms: 9999}, repository.DefaultAnomalyConfig()); len(r) != 0 {
 		t.Errorf("cold baseline should not fire, got %q", strings.Join(r, "; "))
 	}
 }

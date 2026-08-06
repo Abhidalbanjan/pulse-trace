@@ -92,7 +92,7 @@ highest-priority parity work.
 | Ingestion-key rotation | ✅ | ✅ Keys panel (list/create/rotate/revoke) | ✅ Done (F4). |
 | Deploy gates (shift-left) | ✅ | ✅ live gate feed | ✅ Done (F5) — wired, not removed. |
 | AI-SRE remediation execute | ✅ | ✅ confirm→run→result | ✅ Done (F1) — `alert()` replaced. |
-| Anomaly detection config/thresholds | ⚠️ engine only | ❌ none | No config endpoint exists yet — needs backend first (F14, reclassified to Wave 3). Not a parity orphan. |
+| Anomaly detection config/thresholds | ✅ | ✅ Settings → Anomalies | ✅ Done (F14) — per-tenant tuning, live-applied. |
 | Data retention/deletion (GDPR) | ✅ | ✅ Settings → Data & Privacy | ✅ Done (F19). |
 | Usage vs quota | ✅ | ✅ Billing & Usage panel | `GET /api/v1/usage` already consumed (BillingPanel). Depth (quota bars/projection) is Wave 3, not a parity orphan. |
 | Alerts (raw stream) / alert detail | ✅ | ✅ Alerts screen | ✅ Done. |
@@ -184,10 +184,13 @@ Rotation shipped in the backend (grace window, `replaced_by`); the Settings "API
 - **Frontend:** filter/focus/collapse on large graphs, health overlay, catalog scorecards + search.
 - **DoD:** topology is usable at 100s of services; catalog carries ownership/SLO.
 
-### F14 — Anomaly detection · 68→**100** BE, 0→**100** UI · effort M
-- **Backend:** seasonality-aware baselines, multi-metric, alert-fatigue controls.
-- **Frontend:** anomaly config/thresholds UI + anomaly overlay on metric/service charts (currently no UI at all).
-- **DoD:** users tune sensitivity and see flagged anomalies inline.
+### F14 — Anomaly detection · 68→**100** BE, 0→**100** UI · effort M · ✅ delivered (tuning)
+The EWMA detector's sensitivity was hardcoded constants with no config surface.
+- ✅ **Backend:** per-tenant `anomaly_config` ([correlation migration 005](correlation-service/migrations/005_create_anomaly_config.sql)) with the four thresholds (p99 multiplier, error-rate jump, min error rate, throughput-drop ratio) + an enable switch; a [repository](correlation-service/internal/repository/anomaly_config_repository.go) (defaults when unset, server-side clamping) and a GET/PUT API ([`anomaly_handler.go`](correlation-service/internal/handler/anomaly_handler.go)), gateway-proxied at `/api/v1/anomaly` (admin-gated, tenant-scoped). The detector now reads the tenant's config (cached ~30s) instead of constants and **skips evaluation entirely when disabled** (still warming the baseline), so tuning takes effect at runtime.
+- ✅ **Frontend** (Settings → **Anomalies** — [`AnomalyConfigPanel`](frontend/src/components/Settings/AnomalyConfigPanel.tsx)): enable toggle + labelled threshold inputs with plain-language help; Save round-trips to the API.
+- ✅ **Tests:** Go — config-driven detection (same 1.5× spike is healthy at 1.6× but anomalous at 1.4×), repo Get/Upsert/clamp/tenant-isolation (green against Postgres); Playwright anomalies-tab load.
+- ↪ Deferred (depth): seasonality-aware baselines, multi-metric, and the anomaly overlay on charts — the tuning substrate + live-apply are in place for them.
+- **DoD:** users tune sensitivity per tenant and it changes detector behavior live; R1–R3/R5/R7 met.
 
 ### F15 — Causal AI / RCA · 62→**100** BE, 58→**100** UI · effort L
 - **Backend:** the eval harness (F0.5), hallucination guardrails, cost/latency budgets, provider health surfaced.

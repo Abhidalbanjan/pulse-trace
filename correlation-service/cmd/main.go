@@ -165,7 +165,11 @@ func main() {
 	go sloWorker.Start(ctx)
 
 	// ── Anomaly Detector ──────────────────────────────────────────────────────
-	anomalyDetector := engine.NewAnomalyDetector(topoClient)
+	// Per-tenant tuning (F14) comes from anomaly_config; the detector reads it
+	// (cached) so the UI can adjust sensitivity / disable detection at runtime.
+	anomalyConfigRepo := repository.NewAnomalyConfigRepository(pool)
+	anomalyHandler := handler.NewAnomalyHandler(anomalyConfigRepo)
+	anomalyDetector := engine.NewAnomalyDetector(topoClient).WithConfig(anomalyConfigRepo)
 	go anomalyDetector.Start(ctx)
 
 	// ── User-Defined Alert Rules ──────────────────────────────────────────────
@@ -216,6 +220,7 @@ func main() {
 	incidentHandler.RegisterRoutes(mux)
 	playbookHandler.RegisterRoutes(mux)
 	sloHandler.RegisterRoutes(mux)
+	anomalyHandler.RegisterRoutes(mux)
 	chatHandler.RegisterRoutes(mux)
 	mux.Handle("/debug/pprof/", http.DefaultServeMux)
 

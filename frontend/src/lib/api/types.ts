@@ -223,6 +223,20 @@ export interface Alert {
   created_at?: string;
 }
 
+// ── Shift-left deploy gates (ROAD_TO_100 · F5) ────────────────────────────────
+export interface DeployGate {
+  id: string;
+  pr_number: number;
+  title: string;
+  author: string;
+  repo: string;
+  sha: string;
+  decision: string; // APPROVE | BLOCK
+  reason: string;
+  pr_url: string;
+  created_at: string;
+}
+
 // ── Tenant data deletion (ROAD_TO_100 · F19) ──────────────────────────────────
 // The per-store result of a purge/close, doubling as a deletion certificate:
 // each attempted store lands in steps[] (ok) or errors[].

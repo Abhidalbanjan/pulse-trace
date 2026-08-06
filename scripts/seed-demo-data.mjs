@@ -153,6 +153,18 @@ async function seedAdmin(token) {
   if (await authed(token, '/api/v1/admin/ingestion-keys', { name: 'production-agents', tier: 'standard', scope: 'ingest' }) < 300) ok++;
   if (await authed(token, '/api/v1/slo/definitions', { service_name: 'payment-service', slo_target: 99.9, sli_type: 'availability', window_days: 30 }) < 300) ok++;
   console.log(`  admin: ${ok}/6 (role/policy/rate-limit/user/ingestion-key/slo) created`);
+
+  // A shift-left deploy gate: POST a PR event to the (public) GitHub webhook so
+  // the Deploy Gates screen has a recorded verdict to show.
+  await fetch(`${GATEWAY}/api/v1/webhooks/github`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-GitHub-Event': 'pull_request' },
+    body: JSON.stringify({
+      action: 'opened',
+      pull_request: { number: 128, title: 'Add caching layer to catalog-service', user: { login: 'demo-dev' }, html_url: 'https://github.com/acme/app/pull/128', head: { sha: 'a1b2c3d' } },
+      repository: { full_name: 'acme/app' },
+    }),
+  }).catch(() => {});
 }
 
 async function main() {

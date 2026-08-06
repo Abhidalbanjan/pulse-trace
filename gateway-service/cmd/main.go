@@ -209,6 +209,15 @@ func main() {
 		mux.HandleFunc("POST /api/v1/admin/tenant/purge-data", purger.PurgeDataHandler)
 		mux.HandleFunc("POST /api/v1/admin/tenant/close", purger.CloseAccountHandler)
 
+		// Shift-left deploy gates (F5): the GitHub webhook runs each PR through the
+		// SLO-risk evaluator and records the verdict; the Deploy Gates screen reads
+		// the recorded feed. The webhook is public (GitHub can't present a JWT) and
+		// HMAC-verified when GITHUB_WEBHOOK_SECRET is set — see the AuthMiddleware
+		// allowlist. The read endpoint is tenant-scoped and JWT-gated.
+		githubHandler := handler.NewGithubWebhookHandler(authHandler.GetDB(), correlationServiceURL)
+		mux.HandleFunc("POST /api/v1/webhooks/github", githubHandler.Handle)
+		mux.HandleFunc("GET /api/v1/deployments/gates", githubHandler.ListGates)
+
 		// Per-tenant ingestion keys: mint/list/revoke the credentials telemetry
 		// agents present so ingestion is attributed to a tenant server-side rather
 		// than from a spoofable header. Admin-gated by RBACEngine.Middleware like
@@ -302,9 +311,8 @@ func main() {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "received", "action": "stored_in_saas_db"})
 	})
 
-	// USP 3: Preventative Shift-Left Gates (GitHub Webhook)
-	githubWebhookHandler := handler.NewGithubWebhookHandler()
-	mux.HandleFunc("POST /api/v1/webhooks/github", githubWebhookHandler.Handle)
+	// Shift-left deploy gate (GitHub webhook) + its read feed are registered in the
+	// authHandler block above, with DB persistence and tenant-scoped listing.
 
 	// OTLP/HTTP ingestion, terminated in-process so each payload is tenant-stamped
 	// (tenant resolved onto X-Tenant-ID by AuthMiddleware) before forwarding to the

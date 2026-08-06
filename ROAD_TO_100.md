@@ -90,7 +90,7 @@ highest-priority parity work.
 | SLO / error-budget / burn-rate | ✅ | ✅ SLOs screen | ✅ Done (F2). |
 | **Alert delivery channels** (Slack/PD/Opsgenie/webhook) | ✅ | ❌ env-only | **Build Channels settings panel + test-send (F3).** |
 | Ingestion-key rotation | ✅ | ✅ Keys panel (list/create/rotate/revoke) | ✅ Done (F4). |
-| **Deploy gates (shift-left)** | ⚠️ partial | ⚠️ placeholder | **Wire to real data or remove from nav (F5).** |
+| Deploy gates (shift-left) | ✅ | ✅ live gate feed | ✅ Done (F5) — wired, not removed. |
 | AI-SRE remediation execute | ✅ | ✅ confirm→run→result | ✅ Done (F1) — `alert()` replaced. |
 | Anomaly detection config/thresholds | ⚠️ engine only | ❌ none | No config endpoint exists yet — needs backend first (F14, reclassified to Wave 3). Not a parity orphan. |
 | Data retention/deletion (GDPR) | ✅ | ✅ Settings → Data & Privacy | ✅ Done (F19). |
@@ -135,13 +135,13 @@ Rotation shipped in the backend (grace window, `replaced_by`); the Settings "API
 - ↪ **Backend (deferred, optional):** auto-rotation scheduler + expiry reminders — not required to close parity.
 - ✅ **DoD:** full key lifecycle (mint/list/rotate/revoke) is UI-drivable; parity registry's two F4 orphans delisted; R2 closed for this row.
 
-### F5 — Deploy gates (shift-left) · partial→**100** · effort M (or **remove**)
-Today the screen fetches nothing — a placeholder in the nav.
-- **Decision first:** if the GitHub-webhook shift-left gate (`github_webhook.go`) is a shipping feature, wire it; if not, **remove it from the nav** (a dead screen is worse than an absent one — R1/R7).
-- **If wired — Backend:** persist gate decisions per PR (predicted violations, status, linked trace) and expose `GET /deployments/gates`.
-- **Frontend:** real gate list, per-PR detail, override action (audit-logged).
-- **Tests:** e2e webhook → gate appears → override.
-- **DoD:** the screen shows live gate data or is gone; no placeholder in prod nav.
+### F5 — Deploy gates (shift-left) · partial→**100** · effort M · ✅ delivered (wired, not removed)
+**Decision: wired.** The gate was worse than a placeholder — the webhook wasn't even registered, used a hardcoded `localhost:8083`, and persisted nothing. Now a real feature.
+- ✅ **Backend:** the GitHub webhook is registered (public + **HMAC-verified** when `GITHUB_WEBHOOK_SECRET` is set), evaluates each PR via correlation-service's SLO-risk evaluator (**fails open** on evaluator outage — advisory, not a hard deploy dependency), and **persists every verdict** ([migration 017 `deploy_gates`](gateway-service/migrations/017_create_deploy_gates.sql)). New tenant-scoped read endpoint `GET /api/v1/deployments/gates` ([`github_webhook.go`](gateway-service/internal/handler/github_webhook.go)). Fixed the hardcoded correlation URL.
+- ✅ **Frontend** ([`DeploymentsView`](frontend/src/components/Deployments/DeploymentsView.tsx)): the placeholder is replaced by the **real gate feed** (typed client + `useApiResource` + `StateBoundary`, polled), with PR links, decision badges, and a webhook-setup helper. Dead buttons removed — read-only by design (the verdict is returned to GitHub as a commit status, so there's no override to fake).
+- ✅ **Tests:** Go DB-backed ([`github_webhook_test.go`](gateway-service/internal/handler/github_webhook_test.go)) — BLOCK persists + lists, HMAC verification, evaluator-down fail-open (all green against Postgres); Playwright (`deployments.spec`) — feed + webhook-setup URL. Seed posts a demo PR through the webhook.
+- ↪ **Documented limitation:** the webhook is unauthenticated (GitHub can't send a JWT), so verdicts land in the `default` tenant — correct for single-tenant on-prem; a SaaS repo→tenant mapping is a follow-up.
+- **DoD:** the screen shows live gate data, no placeholder remains; R1–R3/R5/R7 met.
 
 ### F6 — Logs (Explorer) · 78→**100** BE, 78→**100** UI · effort M
 - **Backend:** validate at cardinality (F0.2); retention/reindex ops; live-tail endpoint.
@@ -233,7 +233,7 @@ Ordered for maximum leverage and to keep BE/UI in lockstep.
 | Wave | Theme | Contents | Exit criteria |
 | --- | --- | --- | --- |
 | **1** ✅ | Foundations | F0.1 parity gate, F0.4 FE platform, F0.2 load harness, F0.3 isolation, F0.5 eval harness | ✅ **All five delivered.** Parity CI green; perf harness + baseline; structural tenant isolation (+2 live leaks fixed); typed FE platform; causal-AI eval gate at 90.9%. |
-| **2** ✅ | **Close the parity orphans** | ✅ F4 keys, F1 remediation UI, F2 SLO screen, F19 deletion UI, F17 plan, F18 role edit, Alerts screen, F13 downstream, F6 log permalink | ✅ **Parity gate at 100% — 0 registry orphans; every backend route has a UI (R2 = 100%).** Note: F3 channels & F14 anomaly config have **no backend endpoints** (env/engine-only) so they are not parity orphans — reclassified to Wave 3 (need backend built first). F16 usage already consumed. F5 deploy-gates decision remains (below). |
+| **2** ✅ | **Close the parity orphans** | ✅ F4 keys, F1 remediation UI, F2 SLO screen, F19 deletion UI, F17 plan, F18 role edit, Alerts screen, F13 downstream, F6 log permalink | ✅ **Parity gate at 100% — 0 registry orphans; every backend route has a UI (R2 = 100%).** Note: F3 channels & F14 anomaly config have **no backend endpoints** (env/engine-only) so they are not parity orphans — reclassified to Wave 3 (need backend built first). F16 usage already consumed. F5 deploy-gates: **wired** (real feed + persistence + HMAC webhook). |
 | **3** | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. |
 | **4** | Revenue & enterprise | F17 billing, F18 SSO/MFA/policy UX, F20 audit, F21 infra/DR | Self-serve money path + enterprise procurement bar met. |
 

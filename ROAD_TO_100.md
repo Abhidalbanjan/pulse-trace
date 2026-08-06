@@ -152,10 +152,13 @@ Facets, volume histogram, regex, saved searches and live tail shipped in Wave 2;
 - ↪ Deferred (depth): a dedicated server-side live-tail cursor endpoint (client polling covers it today) and retention/reindex ops.
 - **DoD:** power-user query UX (context + shareable searches) complete; R1–R3/R5/R7 met for the UI slice; R4 covered by F0.2.
 
-### F7 — Traces · 75→**100** BE, 78→**100** UI · effort M
-- **Backend:** trace↔logs correlation by trace_id at query time; exemplars from metrics; scale proof.
-- **Frontend:** span-detail deep links, trace→logs jump, service-map-from-traces.
-- **DoD:** a user pivots trace→logs→metrics without leaving context.
+### F7 — Traces · 75→**100** BE, 78→**100** UI · effort M · ✅ correlation delivered
+The trace↔logs correlation backend already worked (log-service indexes `trace_id`; the waterfall shows per-trace correlated logs inline). The gap was the **bidirectional UI pivot** — the Explorer's "View Trace" button was literally dead, and there was no jump from a trace to the full Explorer.
+- ✅ **log→trace pivot** ([`ExplorerView.tsx`](frontend/src/components/Explorer/ExplorerView.tsx)): the previously-dead "View Trace" button now deep-links to `/traces?trace=<id>`, which `TracesView` already resolves into the waterfall.
+- ✅ **trace→logs jump** ([`TraceWaterfall.tsx`](frontend/src/components/Traces/TraceWaterfall.tsx)): an **Open in Explorer** action on the correlated-logs panel navigates to `/explorer?q=trace_id:"<id>"`, **reusing F6's shareable-query URL** so the pivot lands on a fully-scoped, further-refinable search rather than a dead-end preview.
+- ✅ **Tests:** Playwright — `explorer.spec` asserts the log→trace deep link (seeded logs carry `trace_id`); `traces.spec` opens a trace, selects a span, and asserts the trace→logs pivot lands on `/explorer?q=…trace_id`.
+- ↪ Deferred (depth): span-level log correlation (the Quickwit logs index carries `trace_id` but not `span_id`, so span-precise filtering would query a non-existent field — an honest limitation, not shipped as a broken control), metric exemplars, and service-map-from-traces.
+- **DoD:** a user pivots trace→logs and logs→trace without leaving context; the profiler pivot (span→profile) already existed. R1–R3/R5/R7 met for the correlation slice.
 
 ### F8 — Metrics · 66→**100** BE, 68→**100** UI · effort M
 - **Backend:** finish per-service `/metrics` handlers (roadmap gap); a query API with functions (rate/quantile/aggregations).
@@ -241,7 +244,7 @@ Ordered for maximum leverage and to keep BE/UI in lockstep.
 | --- | --- | --- | --- |
 | **1** ✅ | Foundations | F0.1 parity gate, F0.4 FE platform, F0.2 load harness, F0.3 isolation, F0.5 eval harness | ✅ **All five delivered.** Parity CI green; perf harness + baseline; structural tenant isolation (+2 live leaks fixed); typed FE platform; causal-AI eval gate at 90.9%. |
 | **2** ✅ | **Close the parity orphans** | ✅ F4 keys, F1 remediation UI, F2 SLO screen, F19 deletion UI, F17 plan, F18 role edit, Alerts screen, F13 downstream, F6 log permalink | ✅ **Parity gate at 100% — 0 registry orphans; every backend route has a UI (R2 = 100%).** Note: F3 channels & F14 anomaly config have **no backend endpoints** (env/engine-only) so they are not parity orphans — reclassified to Wave 3 (need backend built first). F16 usage already consumed. F5 deploy-gates: **wired** (real feed + persistence + HMAC webhook). |
-| **3** 🔄 | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. **In progress:** ✅ F6 logs (context view + shareable searches). |
+| **3** 🔄 | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. **In progress:** ✅ F6 logs (context view + shareable searches), ✅ F7 traces (bidirectional trace↔logs pivot). |
 | **4** | Revenue & enterprise | F17 billing, F18 SSO/MFA/policy UX, F20 audit, F21 infra/DR | Self-serve money path + enterprise procurement bar met. |
 
 **Guiding gate between waves:** Wave 2 cannot be declared done while any row in the

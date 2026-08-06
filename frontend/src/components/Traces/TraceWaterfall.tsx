@@ -211,9 +211,25 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
             </div>
 
             <div style={{ padding: '22px', flex: 1, overflow: 'auto' }}>
-              <h4 style={{ fontSize: '18px', fontWeight: 600, marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', color: t.text1 }}>
-                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>subject</span> Correlated Logs
-              </h4>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', gap: '8px' }}>
+                <h4 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', color: t.text1, margin: 0 }}>
+                  <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>subject</span> Correlated Logs
+                </h4>
+                {/* Trace→logs pivot: open the full Explorer scoped to this trace,
+                    reusing the shareable-query URL (?q=). */}
+                <button
+                  onClick={() => router.push(`/explorer?q=${encodeURIComponent(`trace_id:"${traceId}"`)}`)}
+                  title="Open these logs in the Explorer"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: '6px',
+                    fontSize: '12px', padding: '6px 11px', background: 'transparent',
+                    border: '1px solid ' + t.panelBorder, borderRadius: '8px', color: t.accent, cursor: 'pointer', whiteSpace: 'nowrap',
+                  }}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>open_in_new</span>
+                  Open in Explorer
+                </button>
+              </div>
               {correlatedLogs.length === 0 ? (
                 <p style={{ fontSize: '13px', color: t.text2 }}>No logs found for this exact trace ID in Quickwit.</p>
               ) : (

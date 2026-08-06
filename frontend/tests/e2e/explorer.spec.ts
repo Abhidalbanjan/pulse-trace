@@ -37,6 +37,19 @@ test.describe('Log Explorer', () => {
     await expect(page.getByRole('button', { name: '24h', exact: true })).toBeVisible();
   });
 
+  test('log→trace pivot navigates to the trace waterfall', async ({ page }) => {
+    // Seeded logs carry a trace_id, so the detail drawer renders a "View Trace"
+    // pivot (F7). It must deep-link to the trace, not sit dead.
+    await page.goto('/explorer');
+    const firstLogRow = page.locator('main').getByText('Request completed successfully').first();
+    await expect(firstLogRow).toBeVisible({ timeout: 10000 });
+    await firstLogRow.click();
+    await expect(page.getByText('Log Details')).toBeVisible();
+    await page.getByRole('button', { name: /view trace/i }).click();
+    await expect(page).toHaveURL(/\/traces\?trace=/);
+    await expect(page.getByRole('button', { name: /back to traces/i })).toBeVisible({ timeout: 10000 });
+  });
+
   test('view-in-context opens the surrounding-logs overlay', async ({ page }) => {
     await page.goto('/explorer');
     const firstLogRow = page.locator('main').getByText('Request completed successfully').first();

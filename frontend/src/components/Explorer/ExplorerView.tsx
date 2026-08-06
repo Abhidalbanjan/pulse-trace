@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { fetchWithAuth } from '@/lib/api';
 import { BarChart, Bar, Tooltip, ResponsiveContainer } from 'recharts';
 import { useTheme } from '@/context/ThemeContext';
@@ -58,6 +59,7 @@ interface SavedSearch {
 
 export function ExplorerView() {
   const { tokens: t } = useTheme();
+  const router = useRouter();
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("*");
@@ -715,6 +717,8 @@ export function ExplorerView() {
               <div style={{ marginBottom: '20px' }}>
                 <div style={{ fontSize: '11px', color: t.text2, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '6px' }}>Distributed Trace</div>
                 <button
+                  onClick={() => router.push(`/traces?trace=${encodeURIComponent(selectedLog.trace_id!)}`)}
+                  title="Open the distributed trace this log belongs to"
                   style={{
                     width: '100%',
                     padding: '11px',

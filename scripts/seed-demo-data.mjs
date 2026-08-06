@@ -114,6 +114,51 @@ async function seedTraces() {
   console.log(`  traces: sent ${n} via OTLP`);
 }
 
+// buildMetrics emits an OTLP metrics payload for one service: a gauge
+// (queue_depth), a monotonic cumulative counter (requests_total, so rate()
+// renders a real per-second slope), and a byte-unit gauge (memory_bytes, so the
+// unit-aware axis has something to format). The collector writes these into
+// otel_metrics_gauge / otel_metrics_sum with a tenant.id resource dimension,
+// exactly like the trace path above.
+function buildMetrics(service) {
+  const nowMs = Date.now();
+  const N = 8; // one point per bucket over the recent window
+  const dp = (val, kFromNow) => ({
+    asDouble: val,
+    timeUnixNano: (BigInt(nowMs - kFromNow * 60000) * 1000000n).toString(),
+    startTimeUnixNano: (BigInt(nowMs - N * 60000) * 1000000n).toString(),
+  });
+  const gaugePoints = (base, jitter) => Array.from({ length: N }, (_, k) => dp(base + Math.random() * jitter, N - k));
+  const counterPoints = (start, step) => {
+    let v = start;
+    return Array.from({ length: N }, (_, k) => { v += step + Math.random() * step; return dp(Math.round(v), N - k); });
+  };
+  return {
+    resourceMetrics: [{
+      resource: { attributes: [{ key: 'service.name', value: { stringValue: service } }] },
+      scopeMetrics: [{
+        scope: { name: 'seed' },
+        metrics: [
+          { name: 'queue_depth', unit: '1', description: 'Pending items in the work queue', gauge: { dataPoints: gaugePoints(20, 40) } },
+          { name: 'requests_total', unit: '1', description: 'Total requests handled', sum: { isMonotonic: true, aggregationTemporality: 2, dataPoints: counterPoints(1000, 60) } },
+          { name: 'memory_bytes', unit: 'By', description: 'Resident set size', gauge: { dataPoints: gaugePoints(2e8, 5e7) } },
+        ],
+      }],
+    }],
+  };
+}
+
+async function seedMetrics() {
+  const OTLP_METRICS = `${GATEWAY}/v1/metrics`; // gateway proxies to the otel-collector
+  let n = 0;
+  for (const svc of SERVICES) {
+    const res = await fetch(OTLP_METRICS, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildMetrics(svc)) });
+    if (!res.ok) console.error('  otlp metrics send failed', res.status, await res.text());
+    else n++;
+  }
+  console.log(`  metrics: sent ${n} services via OTLP (gauge + counter + bytes)`);
+}
+
 async function seedDeployments(token) {
   let ok = 0;
   for (const svc of ['cart-service', 'payment-service', 'gateway-service']) {
@@ -174,6 +219,7 @@ async function main() {
   const token = await login();
   await seedLogs();
   await seedTraces();
+  await seedMetrics();
   await seedDeployments(token);
   await seedSynthetics(token);
   await seedCatalog(token);

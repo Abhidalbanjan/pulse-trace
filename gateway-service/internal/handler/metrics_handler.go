@@ -47,6 +47,60 @@ var metricIntervalToBucket = map[string]string{
 	"7d":  "toStartOfHour(TimeUnix)",
 }
 
+// metricIntervalBucketSeconds is the width, in seconds, of each time bucket for
+// a given interval — the denominator rate() divides the per-bucket counter
+// increase by to produce a per-second rate. It must stay in lock-step with
+// metricIntervalToBucket above.
+var metricIntervalBucketSeconds = map[string]int{
+	"1h":  60,   // toStartOfMinute
+	"24h": 900,  // 15-minute buckets
+	"7d":  3600, // hourly buckets
+}
+
+// metricAggExpr returns the ClickHouse aggregate expression that produces each
+// bucket's `value` for the requested function, plus whether the function is
+// supported. This is the heart of the "query API with functions" — it is a pure
+// string builder so it can be unit-tested without a live ClickHouse.
+//
+// Semantics per function:
+//   - avg/min/max/sum: the obvious aggregate over the raw datapoints in the bucket.
+//   - rate: the monotonic-counter increase across the bucket, per second. It
+//     assumes the counter does not reset mid-bucket (the standard rate() caveat);
+//     greatest(...,0) means a reset degrades to a one-bucket dip toward zero
+//     rather than a negative spike. Meaningful for `sum` (counter) series.
+//   - p50/p90/p95/p99: the distribution of datapoint values within the bucket
+//     (ClickHouse quantile). Meaningful for `gauge` series (e.g. queue depth).
+//
+// An unknown function returns ("", false) so the handler can 400 rather than
+// silently substituting avg and returning a number that isn't what was asked for.
+func metricAggExpr(fn string, bucketSeconds int) (string, bool) {
+	switch fn {
+	case "", "avg":
+		return "avg(Value)", true
+	case "min":
+		return "min(Value)", true
+	case "max":
+		return "max(Value)", true
+	case "sum":
+		return "sum(Value)", true
+	case "rate":
+		if bucketSeconds <= 0 {
+			return "", false
+		}
+		return fmt.Sprintf("greatest(max(Value) - min(Value), 0) / %d", bucketSeconds), true
+	case "p50":
+		return "quantile(0.50)(Value)", true
+	case "p90":
+		return "quantile(0.90)(Value)", true
+	case "p95":
+		return "quantile(0.95)(Value)", true
+	case "p99":
+		return "quantile(0.99)(Value)", true
+	default:
+		return "", false
+	}
+}
+
 func (h *MetricsHandler) writeErrOrEmpty(w http.ResponseWriter, resp *http.Response, err error, logPrefix string) bool {
 	if err != nil {
 		log.Printf("[%s] query failed: %v", logPrefix, err)
@@ -124,6 +178,14 @@ func (h *MetricsHandler) QueryMetric(w http.ResponseWriter, r *http.Request) {
 	}
 	bucketExpr := metricIntervalToBucket[interval]
 
+	// fn selects the per-bucket aggregation (avg by default). Validate against a
+	// closed allowlist so an unknown function is a 400, never a silent avg.
+	valueExpr, ok := metricAggExpr(r.URL.Query().Get("fn"), metricIntervalBucketSeconds[interval])
+	if !ok {
+		http.Error(w, "'fn' must be one of: avg, min, max, sum, rate, p50, p90, p95, p99", http.StatusBadRequest)
+		return
+	}
+
 	service := r.URL.Query().Get("service")
 	params := map[string]string{"metric": stringParam(metricName), "tenant": tenantFromRequest(r)}
 
@@ -136,20 +198,14 @@ func (h *MetricsHandler) QueryMetric(w http.ResponseWriter, r *http.Request) {
 		selectService = "ServiceName as service,"
 	}
 
-	// Aggregation choice: sum tables are monotonic counters, so a rate-like
-	// "how much happened in this bucket" reading comes from the delta between
-	// consecutive raw values — but computing true resets-aware deltas needs
-	// window functions per-series. For v1 we report avg(Value) per bucket for
-	// both types (matches what a gauge naturally represents; for a sum this
-	// is the average of the running total within the bucket, which is a
-	// coarser but still genuinely real, non-fabricated signal — not a
-	// substitute for true rate() semantics, which is flagged as a known
-	// follow-up rather than silently pretending to be exact).
+	// The per-bucket `value` is produced by the caller-selected function
+	// (metricAggExpr); min/max/sample_count are always returned as context for
+	// the primary value regardless of which function was chosen.
 	query := fmt.Sprintf(`
 		SELECT
 			%s as time_bucket,
 			%s
-			avg(Value) as value,
+			%s as value,
 			min(Value) as min_value,
 			max(Value) as max_value,
 			count() as sample_count
@@ -158,7 +214,7 @@ func (h *MetricsHandler) QueryMetric(w http.ResponseWriter, r *http.Request) {
 		GROUP BY time_bucket%s
 		ORDER BY time_bucket ASC
 		FORMAT JSON
-	`, bucketExpr, selectService, table, whereService, sqlInterval, groupService)
+	`, bucketExpr, selectService, valueExpr, table, whereService, sqlInterval, groupService)
 
 	resp, err := h.ch.queryScoped(tenantFromRequest(r), query, params)
 	if !h.writeErrOrEmpty(w, resp, err, "MetricsHandler.QueryMetric") {
@@ -189,5 +245,9 @@ func (h *MetricsHandler) QueryMetric(w http.ResponseWriter, r *http.Request) {
 			series[svc] = append(series[svc], row)
 		}
 	}
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"metric": metricName, "type": metricType, "series": series})
+	fn := r.URL.Query().Get("fn")
+	if fn == "" {
+		fn = "avg"
+	}
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"metric": metricName, "type": metricType, "fn": fn, "series": series})
 }

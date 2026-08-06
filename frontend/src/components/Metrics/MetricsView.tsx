@@ -11,6 +11,32 @@ const INTERVAL_OPTIONS = [
   { value: '7d', label: 'Last 7 Days' },
 ];
 
+// Per-bucket aggregation functions, mirroring the gateway's metricAggExpr
+// allowlist. rate() is a per-second counter increase; p50–p99 are the
+// distribution of datapoint values within each bucket.
+const FN_OPTIONS = [
+  { value: 'avg', label: 'avg' },
+  { value: 'rate', label: 'rate' },
+  { value: 'max', label: 'max' },
+  { value: 'min', label: 'min' },
+  { value: 'sum', label: 'sum' },
+  { value: 'p50', label: 'p50' },
+  { value: 'p90', label: 'p90' },
+  { value: 'p95', label: 'p95' },
+  { value: 'p99', label: 'p99' },
+];
+
+// formatMetricValue renders a metric value compactly (k/M/G) so a Y-axis tick or
+// tooltip stays legible at any magnitude.
+function formatMetricValue(v: number): string {
+  if (!Number.isFinite(v)) return String(v);
+  const abs = Math.abs(v);
+  if (abs >= 1e9) return (v / 1e9).toFixed(1) + 'G';
+  if (abs >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+  if (abs >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}
+
 const SERIES_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4', '#a855f7', '#ec4899', '#84cc16'];
 
 interface MetricName {
@@ -38,6 +64,7 @@ export function MetricsView() {
   const [namesError, setNamesError] = useState<string | null>(null);
   const [selected, setSelected] = useState<MetricName | null>(null);
   const [interval, setInterval_] = useState('1h');
+  const [fn, setFn] = useState('avg');
   const [series, setSeries] = useState<Record<string, MetricRow[]>>({});
   const [chartLoading, setChartLoading] = useState(false);
   const [chartError, setChartError] = useState<string | null>(null);
@@ -63,7 +90,7 @@ export function MetricsView() {
   const fetchSeries = useCallback(() => {
     if (!selected) return;
     setChartLoading(true);
-    const params = new URLSearchParams({ metric: selected.name, type: selected.type, interval });
+    const params = new URLSearchParams({ metric: selected.name, type: selected.type, interval, fn });
     fetchWithAuth(`/api/v1/metrics/query?${params.toString()}`)
       .then(async res => {
         if (!res.ok) throw new Error(await res.text());
@@ -75,7 +102,7 @@ export function MetricsView() {
       })
       .catch(err => setChartError(err.message || 'Failed to load metric data'))
       .finally(() => setChartLoading(false));
-  }, [selected, interval]);
+  }, [selected, interval, fn]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
   useEffect(() => { fetchSeries(); }, [fetchSeries]);
@@ -103,6 +130,14 @@ export function MetricsView() {
 
   const serviceKeys = Object.keys(series);
   const filteredNames = names.filter(n => n.name.toLowerCase().includes(search.toLowerCase()));
+
+  // Unit shown on the Y-axis / tooltip. OTLP uses "1" for dimensionless; rate
+  // turns any unit into a per-second rate.
+  const unitLabel = (() => {
+    const u = selected?.unit && selected.unit !== '1' ? selected.unit : '';
+    if (fn === 'rate') return u ? `${u}/s` : 'per second';
+    return u;
+  })();
 
   return (
     <div style={{ display: 'flex', height: '100%', gap: '20px' }}>
@@ -164,7 +199,18 @@ export function MetricsView() {
                 <h3 style={{ fontSize: '18px', fontWeight: 700, margin: '0 0 4px', color: t.text1, fontFamily: 'monospace' }}>{selected.name}</h3>
                 {selected.description && <p style={{ color: t.text2, fontSize: '13px' }}>{selected.description}</p>}
               </div>
-              <div style={{ display: 'flex', gap: '8px' }}>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <select
+                  value={fn}
+                  onChange={e => setFn(e.target.value)}
+                  aria-label="Aggregation function"
+                  title="Aggregation function applied per time bucket"
+                  style={{ ...primaryBtnStyle, paddingRight: '8px' }}
+                >
+                  {FN_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
                 {INTERVAL_OPTIONS.map(opt => (
                   <button
                     key={opt.value}
@@ -191,8 +237,16 @@ export function MetricsView() {
                   <LineChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke={t.panelBorder} />
                     <XAxis dataKey="time_bucket" tick={{ fontSize: 11, fill: t.text2 }} minTickGap={40} />
-                    <YAxis tick={{ fontSize: 11, fill: t.text2 }} />
-                    <Tooltip contentStyle={{ background: t.panelBg, border: '1px solid ' + t.panelBorder, borderRadius: '8px', fontSize: '12px' }} />
+                    <YAxis
+                      tick={{ fontSize: 11, fill: t.text2 }}
+                      width={54}
+                      tickFormatter={formatMetricValue}
+                      label={unitLabel ? { value: unitLabel, angle: -90, position: 'insideLeft', style: { fill: t.text2, fontSize: 11, textAnchor: 'middle' } } : undefined}
+                    />
+                    <Tooltip
+                      contentStyle={{ background: t.panelBg, border: '1px solid ' + t.panelBorder, borderRadius: '8px', fontSize: '12px' }}
+                      formatter={(value, name) => [`${formatMetricValue(Number(value))}${unitLabel ? ' ' + unitLabel : ''}`, name]}
+                    />
                     <Legend wrapperStyle={{ fontSize: '12px' }} />
                     {serviceKeys.map((svc, i) => (
                       <Line key={svc} type="monotone" dataKey={svc} name={svc} stroke={SERIES_COLORS[i % SERIES_COLORS.length]} strokeWidth={2} dot={false} />

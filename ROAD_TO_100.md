@@ -160,10 +160,13 @@ The trace↔logs correlation backend already worked (log-service indexes `trace_
 - ↪ Deferred (depth): span-level log correlation (the Quickwit logs index carries `trace_id` but not `span_id`, so span-precise filtering would query a non-existent field — an honest limitation, not shipped as a broken control), metric exemplars, and service-map-from-traces.
 - **DoD:** a user pivots trace→logs and logs→trace without leaving context; the profiler pivot (span→profile) already existed. R1–R3/R5/R7 met for the correlation slice.
 
-### F8 — Metrics · 66→**100** BE, 68→**100** UI · effort M
-- **Backend:** finish per-service `/metrics` handlers (roadmap gap); a query API with functions (rate/quantile/aggregations).
-- **Frontend:** multi-series charts, saveable dashboards, alert-from-chart, unit-aware axes.
-- **DoD:** metrics is a first-class explorable pillar, not single-series.
+### F8 — Metrics · 66→**100** BE, 68→**100** UI · effort M · ✅ query functions delivered
+The native OTLP metrics pillar (ClickHouse-backed catalog + per-service multi-series) already existed but was **avg-only** — its own code flagged "not a substitute for true rate()." This slice adds the query-function layer and unit-aware rendering.
+- ✅ **Backend query functions** ([`metrics_handler.go`](gateway-service/internal/handler/metrics_handler.go)): `GET /api/v1/metrics/query` now takes `fn=avg|min|max|sum|rate|p50|p90|p95|p99`, resolved by a pure `metricAggExpr` builder validated against a closed allowlist (unknown `fn` → 400, never a silent avg). **rate()** is the per-second monotonic-counter increase over each bucket (`greatest(max−min,0)/bucketSeconds`, reset-safe); **p50–p99** are ClickHouse `quantile` over the bucket's datapoints. Bucket widths are tracked alongside the bucket expressions so rate's denominator stays correct per interval.
+- ✅ **Frontend** ([`MetricsView.tsx`](frontend/src/components/Metrics/MetricsView.tsx)): a **function selector** (avg/rate/min/max/sum/p50–p99) alongside the interval picker, and **unit-aware axes** — the Y-axis formats magnitudes (k/M/G) and labels the metric's OTLP unit (`By`, `ms`, …), turning into `<unit>/s` under rate. Multi-series (per-service lines) already existed.
+- ✅ **Tests:** Go unit ([`metrics_handler_test.go`](gateway-service/internal/handler/metrics_handler_test.go)) — every supported `fn` → expression, rate's bucket-width denominator + reset clamp, invalid-`fn` rejection, and a lock-step check that every bucketed interval has a rate denominator. Playwright (`metrics.spec`) — catalog lists seeded metrics; selecting `rate` on the counter applies without error. The **seed now emits OTLP metrics** (gauge + monotonic counter + byte-unit gauge per service) so the pillar renders end-to-end.
+- ↪ Deferred (depth): saveable dashboards, alert-from-chart, and histogram/summary percentile math (bucket-aware, its own endpoint).
+- **DoD:** metrics is a first-class explorable pillar with real aggregation functions and unit-aware charts, not single-series avg; R1–R3/R5/R7 met.
 
 ### F9 — RUM · 70→**100** BE, 62→**100** UI · effort M
 - **Backend:** sampling controls, session stitching, geo/device enrichment; versioned browser SDK.
@@ -244,7 +247,7 @@ Ordered for maximum leverage and to keep BE/UI in lockstep.
 | --- | --- | --- | --- |
 | **1** ✅ | Foundations | F0.1 parity gate, F0.4 FE platform, F0.2 load harness, F0.3 isolation, F0.5 eval harness | ✅ **All five delivered.** Parity CI green; perf harness + baseline; structural tenant isolation (+2 live leaks fixed); typed FE platform; causal-AI eval gate at 90.9%. |
 | **2** ✅ | **Close the parity orphans** | ✅ F4 keys, F1 remediation UI, F2 SLO screen, F19 deletion UI, F17 plan, F18 role edit, Alerts screen, F13 downstream, F6 log permalink | ✅ **Parity gate at 100% — 0 registry orphans; every backend route has a UI (R2 = 100%).** Note: F3 channels & F14 anomaly config have **no backend endpoints** (env/engine-only) so they are not parity orphans — reclassified to Wave 3 (need backend built first). F16 usage already consumed. F5 deploy-gates: **wired** (real feed + persistence + HMAC webhook). |
-| **3** 🔄 | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. **In progress:** ✅ F6 logs (context view + shareable searches), ✅ F7 traces (bidirectional trace↔logs pivot). |
+| **3** 🔄 | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. **In progress:** ✅ F6 logs (context view + shareable searches), ✅ F7 traces (bidirectional trace↔logs pivot), ✅ F8 metrics (query functions + unit-aware charts). |
 | **4** | Revenue & enterprise | F17 billing, F18 SSO/MFA/policy UX, F20 audit, F21 infra/DR | Self-serve money path + enterprise procurement bar met. |
 
 **Guiding gate between waves:** Wave 2 cannot be declared done while any row in the

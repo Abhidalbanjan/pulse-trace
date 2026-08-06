@@ -144,10 +144,13 @@ Rotation shipped in the backend (grace window, `replaced_by`); the Settings "API
 - ↪ **Documented limitation:** the webhook is unauthenticated (GitHub can't send a JWT), so verdicts land in the `default` tenant — correct for single-tenant on-prem; a SaaS repo→tenant mapping is a follow-up.
 - **DoD:** the screen shows live gate data, no placeholder remains; R1–R3/R5/R7 met.
 
-### F6 — Logs (Explorer) · 78→**100** BE, 78→**100** UI · effort M
-- **Backend:** validate at cardinality (F0.2); retention/reindex ops; live-tail endpoint.
-- **Frontend:** field histograms, live tail, surrounding-context view, shareable query URLs.
-- **DoD:** scale numbers published; R4 met; power-user query UX.
+### F6 — Logs (Explorer) · 78→**100** BE, 78→**100** UI · effort M · ✅ delivered
+Facets, volume histogram, regex, saved searches and live tail shipped in Wave 2; this slice closes the two remaining power-user gaps.
+- ✅ **Surrounding-context view:** new tenant-scoped backend endpoint `GET /api/v1/logs/{id}/context?before=N&after=N` ([`log_handler.go`](log-service/internal/handler/log_handler.go)) — resolves the anchor server-side (never trusts a client-supplied service/timestamp), then fetches N neighbours per side on the **same service** by timestamp, de-dupes the anchor and any tie-timestamp log, and clamps the window (default 25/side, max 200). The Explorer detail drawer gains a **View in context** action opening an overlay that renders `before · anchor(highlighted) · after` ([`ExplorerView.tsx`](frontend/src/components/Explorer/ExplorerView.tsx)).
+- ✅ **Shareable query URLs:** the full search state (box text, regex toggle, time window) round-trips through the URL (`?q=&regex=&range=`) — a **Share** button copies a link that reproduces the exact search (not just the pre-existing single-log `?log=` permalink), and the state hydrates from the URL on mount.
+- ✅ **Tests:** Go unit — `clampContextWindow` bounds, `buildContextQuery` tenant/service scoping + range direction, `assembleContext` chronological ordering + cross-side de-dup + anchor removal; Playwright (`explorer.spec`) — shareable-link hydration, view-in-context overlay resolves to a real state. Ingestion scale is validated by F0.2.
+- ↪ Deferred (depth): a dedicated server-side live-tail cursor endpoint (client polling covers it today) and retention/reindex ops.
+- **DoD:** power-user query UX (context + shareable searches) complete; R1–R3/R5/R7 met for the UI slice; R4 covered by F0.2.
 
 ### F7 — Traces · 75→**100** BE, 78→**100** UI · effort M
 - **Backend:** trace↔logs correlation by trace_id at query time; exemplars from metrics; scale proof.
@@ -238,7 +241,7 @@ Ordered for maximum leverage and to keep BE/UI in lockstep.
 | --- | --- | --- | --- |
 | **1** ✅ | Foundations | F0.1 parity gate, F0.4 FE platform, F0.2 load harness, F0.3 isolation, F0.5 eval harness | ✅ **All five delivered.** Parity CI green; perf harness + baseline; structural tenant isolation (+2 live leaks fixed); typed FE platform; causal-AI eval gate at 90.9%. |
 | **2** ✅ | **Close the parity orphans** | ✅ F4 keys, F1 remediation UI, F2 SLO screen, F19 deletion UI, F17 plan, F18 role edit, Alerts screen, F13 downstream, F6 log permalink | ✅ **Parity gate at 100% — 0 registry orphans; every backend route has a UI (R2 = 100%).** Note: F3 channels & F14 anomaly config have **no backend endpoints** (env/engine-only) so they are not parity orphans — reclassified to Wave 3 (need backend built first). F16 usage already consumed. F5 deploy-gates: **wired** (real feed + persistence + HMAC webhook). |
-| **3** | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. |
+| **3** 🔄 | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. **In progress:** ✅ F6 logs (context view + shareable searches). |
 | **4** | Revenue & enterprise | F17 billing, F18 SSO/MFA/policy UX, F20 audit, F21 infra/DR | Self-serve money path + enterprise procurement bar met. |
 
 **Guiding gate between waves:** Wave 2 cannot be declared done while any row in the

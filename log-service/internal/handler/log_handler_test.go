@@ -307,6 +307,111 @@ func extractLowerBound(t *testing.T, query string) time.Time {
 	return ts
 }
 
+func TestClampContextWindow(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"", defaultContextWindow},
+		{"0", 0},
+		{"10", 10},
+		{"200", maxContextWindow},
+		{"5000", maxContextWindow}, // capped
+		{"-3", defaultContextWindow},
+		{"abc", defaultContextWindow}, // non-numeric degrades to default, never 400s
+	}
+	for _, c := range cases {
+		if got := clampContextWindow(c.in); got != c.want {
+			t.Errorf("clampContextWindow(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestBuildContextQuery(t *testing.T) {
+	const ts = "2026-01-01T00:00:00Z"
+
+	before := buildContextQuery("acme", "cart-service", ts, contextBefore)
+	for _, want := range []string{`tenant_id:"acme"`, `service_name:"cart-service"`, "timestamp:[* TO " + ts + "]"} {
+		if !strings.Contains(before, want) {
+			t.Errorf("before query missing %q; got %q", want, before)
+		}
+	}
+
+	after := buildContextQuery("acme", "cart-service", ts, contextAfter)
+	if !strings.Contains(after, "timestamp:["+ts+" TO *]") {
+		t.Errorf("after query wrong bound: %q", after)
+	}
+
+	// Tenant scope is non-negotiable on both sides — it's the isolation guarantee.
+	if !strings.Contains(after, `tenant_id:"acme"`) {
+		t.Errorf("after query missing tenant scope: %q", after)
+	}
+}
+
+// rawLog builds a minimal Quickwit hit document for the context assembly tests.
+func rawLog(t *testing.T, id, ts string) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(logDocMeta{ID: id, Timestamp: ts, ServiceName: "svc"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+func ids(raws []json.RawMessage) []string {
+	out := make([]string, len(raws))
+	for i, r := range raws {
+		out[i] = hitMeta(r).ID
+	}
+	return out
+}
+
+func TestAssembleContext_OrdersAndDropsAnchor(t *testing.T) {
+	// Quickwit returns `before` newest-first and `after` oldest-first. The anchor
+	// sits on the inclusive boundary of both ranges, so it appears in each.
+	beforeDesc := []json.RawMessage{
+		rawLog(t, "anchor", "2026-01-01T00:00:05Z"),
+		rawLog(t, "b2", "2026-01-01T00:00:04Z"),
+		rawLog(t, "b1", "2026-01-01T00:00:03Z"),
+	}
+	afterAsc := []json.RawMessage{
+		rawLog(t, "anchor", "2026-01-01T00:00:05Z"),
+		rawLog(t, "a1", "2026-01-01T00:00:06Z"),
+		rawLog(t, "a2", "2026-01-01T00:00:07Z"),
+	}
+
+	before, after := assembleContext("anchor", beforeDesc, afterAsc)
+
+	// before must be chronological (oldest→newest) and anchor-free.
+	if got := ids(before); len(got) != 2 || got[0] != "b1" || got[1] != "b2" {
+		t.Errorf("before order/content wrong: %v", got)
+	}
+	if got := ids(after); len(got) != 2 || got[0] != "a1" || got[1] != "a2" {
+		t.Errorf("after order/content wrong: %v", got)
+	}
+}
+
+func TestAssembleContext_DedupesAcrossSides(t *testing.T) {
+	// A log sharing the anchor's exact timestamp lands in both inclusive ranges;
+	// it must be shown once, not duplicated across before/after.
+	shared := rawLog(t, "tie", "2026-01-01T00:00:05Z")
+	beforeDesc := []json.RawMessage{rawLog(t, "anchor", "2026-01-01T00:00:05Z"), shared}
+	afterAsc := []json.RawMessage{rawLog(t, "anchor", "2026-01-01T00:00:05Z"), shared, rawLog(t, "a1", "2026-01-01T00:00:06Z")}
+
+	before, after := assembleContext("anchor", beforeDesc, afterAsc)
+
+	seen := map[string]int{}
+	for _, id := range append(ids(before), ids(after)...) {
+		seen[id]++
+	}
+	if seen["tie"] != 1 {
+		t.Errorf("tie-timestamp log should appear exactly once, appeared %d times", seen["tie"])
+	}
+	if seen["anchor"] != 0 {
+		t.Errorf("anchor must never appear in its own context window")
+	}
+}
+
 func TestIngest_ValidLevelsPassThrough(t *testing.T) {
 	for _, lvl := range []models.LogLevel{models.LogLevelDebug, models.LogLevelInfo, models.LogLevelWarning, models.LogLevelError, models.LogLevelFatal} {
 		h := newTestHandler(10)

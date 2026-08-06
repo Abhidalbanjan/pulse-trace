@@ -63,6 +63,35 @@ export function ExplorerView() {
   const [query, setQuery] = useState("*");
   const [selectedLog, setSelectedLog] = useState<LogEntry | null>(null);
   const [permalinkCopied, setPermalinkCopied] = useState(false);
+  const [searchLinkCopied, setSearchLinkCopied] = useState(false);
+
+  // F6: surrounding-context view. Given an anchor log, fetch the logs
+  // immediately before/after it on the same service (regardless of the current
+  // query) so an operator can read an error line in situ.
+  const [context, setContext] = useState<{ anchor: LogEntry; before: LogEntry[]; after: LogEntry[] } | null>(null);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextError, setContextError] = useState<string | null>(null);
+
+  const openContext = async (log: LogEntry) => {
+    setContext(null);
+    setContextError(null);
+    setContextLoading(true);
+    try {
+      const res = await fetchWithAuth(`/api/v1/logs/${encodeURIComponent(log.id)}/context?before=25&after=25`);
+      if (!res.ok) throw new Error(`Context unavailable (${res.status})`);
+      const body = await res.json();
+      const d = body?.data ?? body;
+      setContext({
+        anchor: d.anchor ? toLogEntry(d.anchor) : log,
+        before: (d.before || []).map(toLogEntry),
+        after: (d.after || []).map(toLogEntry),
+      });
+    } catch (err) {
+      setContextError(err instanceof Error ? err.message : 'Failed to load context');
+    } finally {
+      setContextLoading(false);
+    }
+  };
 
   // F6: single-log permalink. Copy a shareable URL to a specific log, and on
   // load resolve ?log=<id> straight to its canonical record via GET /logs/{id}.
@@ -138,6 +167,38 @@ export function ExplorerView() {
     const tc = timeClause(timeRange);
     if (tc) clauses.push(tc);
     return clauses.length ? clauses.join(" AND ") : "*";
+  };
+
+  // F6: shareable query URLs. Hydrate the full search state (box text, regex
+  // toggle, time window) from the URL on mount so a pasted link reproduces the
+  // exact search — not just a single-log permalink. `?log=` still deep-links to
+  // one record (handled separately above); these params drive the query itself.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    const q = p.get('q');
+    const regex = p.get('regex');
+    const range = p.get('range');
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot hydration from the URL on mount; the effect is the correct client-only place to read window.location
+    if (q !== null) setQuery(q);
+    if (regex === 'true') setRegexMode(true);
+    if (range && TIME_RANGES.some((r) => r.key === range)) setTimeRange(range as TimeRange);
+  }, []);
+
+  // copySearchLink builds a shareable URL encoding the current search state.
+  const copySearchLink = async () => {
+    const p = new URLSearchParams();
+    if (query && query !== '*') p.set('q', query);
+    if (regexMode) p.set('regex', 'true');
+    if (timeRange !== 'all') p.set('range', timeRange);
+    const qs = p.toString();
+    const url = `${window.location.origin}/explorer${qs ? `?${qs}` : ''}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setSearchLinkCopied(true);
+      window.setTimeout(() => setSearchLinkCopied(false), 2000);
+    } catch {
+      // Clipboard unavailable (insecure context) — the URL is still shareable.
+    }
   };
 
   const fetchLogs = () => {
@@ -491,6 +552,21 @@ export function ExplorerView() {
           </div>
 
           <button
+            onClick={copySearchLink}
+            title="Copy a shareable link that reproduces this exact search"
+            style={{
+              display: 'flex', alignItems: 'center', gap: '8px',
+              padding: '11px 16px', borderRadius: '14px',
+              border: `1px solid ${searchLinkCopied ? t.green : t.panelBorder}`,
+              background: 'transparent', color: searchLinkCopied ? t.green : t.text2,
+              fontSize: '13px', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+            }}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>{searchLinkCopied ? 'check' : 'link'}</span>
+            {searchLinkCopied ? 'Copied' : 'Share'}
+          </button>
+
+          <button
             onClick={toggleLiveTail}
             style={{
               display: 'flex',
@@ -619,6 +695,22 @@ export function ExplorerView() {
               </div>
             </div>
 
+            <div style={{ marginBottom: '20px' }}>
+              <button
+                onClick={() => openContext(selectedLog)}
+                title="Show the logs immediately before and after this one on the same service"
+                style={{
+                  width: '100%', padding: '11px', borderRadius: '10px',
+                  border: `1px solid ${t.panelBorder}`, background: 'transparent',
+                  color: t.text1, fontSize: '13px', fontWeight: 600,
+                  display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', cursor: 'pointer',
+                }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>unfold_more</span>
+                View in context
+              </button>
+            </div>
+
             {selectedLog.trace_id && (
               <div style={{ marginBottom: '20px' }}>
                 <div style={{ fontSize: '11px', color: t.text2, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '6px' }}>Distributed Trace</div>
@@ -652,6 +744,54 @@ export function ExplorerView() {
               </pre>
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* Surrounding-context overlay (F6) */}
+      {(context || contextLoading || contextError) && (
+        <div
+          onClick={() => { setContext(null); setContextError(null); }}
+          style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '32px' }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-label="Log context"
+            style={{ ...glassPanel, width: 'min(880px, 92vw)', maxHeight: '82vh', borderRadius: '20px', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+          >
+            <div style={{ padding: '16px 20px', borderBottom: `1px solid ${t.panelBorder}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ fontSize: '15px', fontWeight: 600, color: t.text1, margin: 0 }}>
+                Log context{context ? ` · ${context.anchor.service_name}` : ''}
+              </h3>
+              <button onClick={() => { setContext(null); setContextError(null); }} aria-label="Close context" style={{ background: 'transparent', border: 'none', color: t.text2, cursor: 'pointer', fontSize: '18px', lineHeight: 1 }}>✕</button>
+            </div>
+            <div style={{ overflowY: 'auto', padding: '10px', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+              {contextLoading && <div style={{ color: t.text2, textAlign: 'center', padding: '40px', fontSize: '13px' }}>Loading context…</div>}
+              {contextError && <div style={{ color: t.red, textAlign: 'center', padding: '40px', fontSize: '13px' }}>{contextError}</div>}
+              {context && [...context.before, context.anchor, ...context.after].map((log, i) => {
+                const isAnchor = log.id === context.anchor.id && i === context.before.length;
+                return (
+                  <div
+                    key={`${log.id}-${i}`}
+                    style={{
+                      display: 'flex', gap: '16px', padding: '8px 14px', borderRadius: '8px',
+                      fontFamily: 'monospace', fontSize: '12.5px',
+                      borderLeft: `3px solid ${getLevelColor(log.level)}`,
+                      background: isAnchor ? (t.dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.08)') : 'transparent',
+                      outline: isAnchor ? `1px solid ${t.accent}` : 'none',
+                    }}
+                  >
+                    <span style={{ color: t.text2, width: '90px', flexShrink: 0 }}>{new Date(log.timestamp).toLocaleTimeString([], { hour12: false })}</span>
+                    <span style={{ color: getLevelColor(log.level), width: '48px', fontWeight: 700, flexShrink: 0 }}>{log.level}</span>
+                    <span style={{ color: t.text1, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{log.message}</span>
+                  </div>
+                );
+              })}
+              {context && context.before.length === 0 && context.after.length === 0 && (
+                <div style={{ color: t.text2, textAlign: 'center', padding: '20px', fontSize: '12.5px' }}>No surrounding logs on this service.</div>
+              )}
+            </div>
           </div>
         </div>
       )}

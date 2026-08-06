@@ -79,6 +79,7 @@ func (h *LogHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/logs", h.IngestLog)
 	mux.HandleFunc("GET /api/v1/logs", h.ListLogs)
 	mux.HandleFunc("GET /api/v1/logs/{id}", h.GetLog)
+	mux.HandleFunc("GET /api/v1/logs/{id}/context", h.LogContext)
 	mux.HandleFunc("GET /healthz", h.Health)
 }
 
@@ -530,6 +531,217 @@ func (h *LogHandler) GetLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.OK(hits[0]))
+}
+
+const (
+	// defaultContextWindow / maxContextWindow bound how many neighbouring log
+	// lines the surrounding-context view returns on each side of the anchor.
+	// The cap protects the search backend from an operator-supplied huge window.
+	defaultContextWindow = 25
+	maxContextWindow     = 200
+
+	contextBefore = "before"
+	contextAfter  = "after"
+)
+
+// logDocMeta is the minimal projection of a log document the context view needs
+// to anchor the surrounding window: its own id (to dedupe), its timestamp (the
+// pivot of the range query), and its service (context is same-service by
+// design — interleaving every service's logs would defeat the purpose).
+type logDocMeta struct {
+	ID          string `json:"id"`
+	Timestamp   string `json:"timestamp"`
+	ServiceName string `json:"service_name"`
+}
+
+// hitMeta extracts the anchoring fields from a raw Quickwit hit. A malformed
+// hit yields a zero value (empty fields), which callers treat as "unusable".
+func hitMeta(raw json.RawMessage) logDocMeta {
+	var m logDocMeta
+	_ = json.Unmarshal(raw, &m)
+	return m
+}
+
+// logContextResponse is the surrounding-context payload: the anchor log plus its
+// chronological neighbours on the same service. `before` runs oldest→newest and
+// ends just before the anchor; `after` runs newest-after→latest.
+type logContextResponse struct {
+	Before []json.RawMessage `json:"before"`
+	Anchor json.RawMessage   `json:"anchor"`
+	After  []json.RawMessage `json:"after"`
+}
+
+// clampContextWindow parses a per-side window size, falling back to the default
+// for empty/invalid input and capping at maxContextWindow. It never errors — a
+// nonsensical value degrades to a sane window rather than 400-ing an operator
+// who is mid-incident.
+func clampContextWindow(raw string) int {
+	if raw == "" {
+		return defaultContextWindow
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return defaultContextWindow
+	}
+	if n > maxContextWindow {
+		return maxContextWindow
+	}
+	return n
+}
+
+// buildContextQuery builds the Quickwit query for one side of the context
+// window: same tenant, same service, timestamps on the requested side of the
+// anchor. The range is inclusive of the anchor's own timestamp (so the anchor —
+// and any log sharing its exact timestamp — is captured); assembleContext then
+// removes the anchor and de-duplicates. Values are quoted so a service name with
+// odd characters can't break the query.
+func buildContextQuery(tenantID, service, anchorTS, direction string) string {
+	base := fmt.Sprintf("tenant_id:%q AND service_name:%q", tenantID, service)
+	if direction == contextBefore {
+		return base + fmt.Sprintf(" AND timestamp:[* TO %s]", anchorTS)
+	}
+	return base + fmt.Sprintf(" AND timestamp:[%s TO *]", anchorTS)
+}
+
+// assembleContext turns the two raw Quickwit result sets into chronological
+// neighbour lists. `beforeDesc` arrives newest-first (Quickwit -timestamp) and
+// is reversed to chronological order; `afterAsc` arrives oldest-first. The
+// anchor is dropped and every log is emitted at most once — a log sharing the
+// anchor's exact timestamp can appear on both sides of the inclusive range, and
+// showing it twice would mislead an operator reading the window.
+func assembleContext(anchorID string, beforeDesc, afterAsc []json.RawMessage) (before, after []json.RawMessage) {
+	seen := map[string]bool{}
+	if anchorID != "" {
+		seen[anchorID] = true
+	}
+	keep := func(raw json.RawMessage) bool {
+		id := hitMeta(raw).ID
+		if id == "" {
+			return true // can't dedupe an id-less hit; keep it rather than drop data
+		}
+		if seen[id] {
+			return false
+		}
+		seen[id] = true
+		return true
+	}
+	for i := len(beforeDesc) - 1; i >= 0; i-- { // reverse newest-first → chronological
+		if keep(beforeDesc[i]) {
+			before = append(before, beforeDesc[i])
+		}
+	}
+	for _, raw := range afterAsc {
+		if keep(raw) {
+			after = append(after, raw)
+		}
+	}
+	return before, after
+}
+
+// LogContext returns the log immediately surrounding a given log on the same
+// service — the "view in context" an operator reaches for after landing on a
+// single error line. It resolves the anchor (tenant-scoped), then fetches N
+// neighbours on each side by timestamp.
+//
+//	GET /api/v1/logs/{id}/context?before=N&after=N
+func (h *LogHandler) LogContext(w http.ResponseWriter, r *http.Request) {
+	tracer := otel.Tracer(serviceName)
+	ctx, span := tracer.Start(r.Context(), "log.context")
+	defer span.End()
+
+	if h.quickwitURL == "" {
+		writeJSON(w, http.StatusServiceUnavailable, models.Fail("log search is not configured (QUICKWIT_URL unset)"))
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, models.Fail("log id is required"))
+		return
+	}
+
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	before := clampContextWindow(r.URL.Query().Get("before"))
+	after := clampContextWindow(r.URL.Query().Get("after"))
+
+	// 1. Resolve the anchor, tenant-scoped — never trust a client-supplied
+	//    service/timestamp for the window; derive them from the stored document.
+	anchorHits, err := h.searchQuickwit(ctx, quickwitSearchRequest{
+		Query:   fmt.Sprintf("id:%q AND tenant_id:%q", id, tenantID),
+		MaxHits: 1,
+	})
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "quickwit anchor lookup failed")
+		log.Printf("log-service: LogContext anchor lookup failed: %v", err)
+		writeJSON(w, http.StatusBadGateway, models.Fail("log search backend unavailable: "+err.Error()))
+		return
+	}
+	if len(anchorHits) == 0 {
+		writeJSON(w, http.StatusNotFound, models.Fail("log not found"))
+		return
+	}
+	anchor := anchorHits[0]
+	meta := hitMeta(anchor)
+	if meta.ServiceName == "" || meta.Timestamp == "" {
+		writeJSON(w, http.StatusBadGateway, models.Fail("anchor log is missing service/timestamp; cannot build context"))
+		return
+	}
+	if _, perr := time.Parse(time.RFC3339, meta.Timestamp); perr != nil {
+		if _, perr = time.Parse(time.RFC3339Nano, meta.Timestamp); perr != nil {
+			writeJSON(w, http.StatusBadGateway, models.Fail("anchor timestamp is not RFC3339"))
+			return
+		}
+	}
+
+	// 2. Fetch each side. Over-fetch by one to absorb the anchor itself, which
+	//    sits on the inclusive boundary of both ranges.
+	beforeHits, err := h.searchQuickwit(ctx, quickwitSearchRequest{
+		Query:       buildContextQuery(tenantID, meta.ServiceName, meta.Timestamp, contextBefore),
+		MaxHits:     before + 1,
+		SortByField: "-timestamp",
+	})
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "quickwit before-context search failed")
+		log.Printf("log-service: LogContext before search failed: %v", err)
+		writeJSON(w, http.StatusBadGateway, models.Fail("log search backend unavailable: "+err.Error()))
+		return
+	}
+	afterHits, err := h.searchQuickwit(ctx, quickwitSearchRequest{
+		Query:       buildContextQuery(tenantID, meta.ServiceName, meta.Timestamp, contextAfter),
+		MaxHits:     after + 1,
+		SortByField: "timestamp",
+	})
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "quickwit after-context search failed")
+		log.Printf("log-service: LogContext after search failed: %v", err)
+		writeJSON(w, http.StatusBadGateway, models.Fail("log search backend unavailable: "+err.Error()))
+		return
+	}
+
+	b, a := assembleContext(meta.ID, beforeHits, afterHits)
+	// Trim back to the requested per-side window, keeping the neighbours closest
+	// to the anchor (the tail of `before`, the head of `after`).
+	if len(b) > before {
+		b = b[len(b)-before:]
+	}
+	if len(a) > after {
+		a = a[:after]
+	}
+
+	span.SetAttributes(
+		attribute.String("log.id", meta.ID),
+		attribute.String("log.service", meta.ServiceName),
+		attribute.Int("context.before", len(b)),
+		attribute.Int("context.after", len(a)),
+	)
+	writeJSON(w, http.StatusOK, models.OK(logContextResponse{Before: b, Anchor: anchor, After: a}))
 }
 
 // searchQuickwit posts a search request to Quickwit's REST API and returns

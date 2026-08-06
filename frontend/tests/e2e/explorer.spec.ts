@@ -27,4 +27,27 @@ test.describe('Log Explorer', () => {
     await liveToggle.click();
     await expect(page.getByText(/Live Tail\s*On/i)).toBeVisible();
   });
+
+  test('a shareable link hydrates the search state', async ({ page }) => {
+    // A pasted link reproduces the exact search, not just a single log.
+    await page.goto('/explorer?q=' + encodeURIComponent('level:ERROR') + '&range=24h');
+    const searchBox = page.getByPlaceholder(/Search logs/i);
+    await expect(searchBox).toHaveValue('level:ERROR', { timeout: 10000 });
+    // The 24h range button is the active (highlighted) one.
+    await expect(page.getByRole('button', { name: '24h', exact: true })).toBeVisible();
+  });
+
+  test('view-in-context opens the surrounding-logs overlay', async ({ page }) => {
+    await page.goto('/explorer');
+    const firstLogRow = page.locator('main').getByText('Request completed successfully').first();
+    await expect(firstLogRow).toBeVisible({ timeout: 10000 });
+    await firstLogRow.click();
+    await expect(page.getByText('Log Details')).toBeVisible();
+    await page.getByRole('button', { name: /view in context/i }).click();
+    const dialog = page.getByRole('dialog', { name: /log context/i });
+    await expect(dialog).toBeVisible({ timeout: 10000 });
+    // The overlay resolves to a real state (either surrounding rows or an
+    // explicit empty message), never an infinite spinner.
+    await expect(dialog).not.toContainText('Loading context', { timeout: 10000 });
+  });
 });

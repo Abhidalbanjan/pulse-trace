@@ -11,6 +11,7 @@ import { AlertRulesPanel } from './AlertRulesPanel';
 import { BillingPanel } from './BillingPanel';
 import { IngestionKeysPanel } from './IngestionKeysPanel';
 import { DataPrivacyPanel } from './DataPrivacyPanel';
+import { ChannelsPanel } from './ChannelsPanel';
 import { useTheme } from '@/context/ThemeContext';
 
 interface User { id: string; username: string; role: string; created_at?: string; }
@@ -374,24 +375,7 @@ export function SettingsView() {
              <AlertRulesPanel />
 
              <div style={{ marginTop: '40px', paddingTop: '32px', borderTop: '1px solid ' + t.panelBorder }}>
-               <h3 style={{ fontSize: '16px', fontWeight: 700, margin: '0 0 8px', color: t.text1 }}>Alert Channels</h3>
-               <p style={{ color: t.text2, fontSize: '13px', maxWidth: '560px', lineHeight: 1.6, marginBottom: '20px' }}>
-                 Where matched alert rules are delivered. Configured via environment variables on notification-service — set these and redeploy to change delivery, there is no in-app channel editor yet.
-               </p>
-               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
-                  <div style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '24px', borderRadius: '12px', border: '1px solid ' + t.panelBorder }}>
-                    <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', color: t.text1, marginBottom: '12px' }}>
-                      <span style={{ color: '#E01E5A' }}>#</span> Slack
-                    </div>
-                    <p style={{ color: t.text2, fontSize: '13px' }}>Set <code>SLACK_WEBHOOK_URL</code> on notification-service to enable.</p>
-                  </div>
-                  <div style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '24px', borderRadius: '12px', border: '1px solid ' + t.panelBorder }}>
-                    <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', color: t.text1, marginBottom: '12px' }}>
-                      <span style={{ color: t.green }}>✉</span> Email (SMTP)
-                    </div>
-                    <p style={{ color: t.text2, fontSize: '13px' }}>Set <code>SMTP_HOST</code>, <code>SMTP_USERNAME</code>, <code>SMTP_PASSWORD</code> on notification-service to enable.</p>
-                  </div>
-               </div>
+               <ChannelsPanel />
              </div>
            </div>
         )}

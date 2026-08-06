@@ -125,6 +125,7 @@ func main() {
 	alertServiceURL := getEnv("ALERT_SERVICE_URL", "http://localhost:8082")
 	correlationServiceURL := getEnv("CORRELATION_SERVICE_URL", "http://localhost:8083")
 	topologyServiceURL := getEnv("TOPOLOGY_SERVICE_URL", "http://localhost:8084")
+	notificationServiceURL := getEnv("NOTIFICATION_SERVICE_URL", "http://localhost:8086")
 	actionServiceURL := getEnv("ACTION_SERVICE_URL", "http://localhost:8085")
 	otelCollectorHTTPURL := getEnv("OTEL_COLLECTOR_HTTP_URL", "http://localhost:4318")
 
@@ -136,6 +137,10 @@ func main() {
 		{Prefix: "/api/v1/alerts", Upstream: alertServiceURL},
 		{Prefix: "/api/v1/incidents", Upstream: correlationServiceURL},
 		{Prefix: "/api/v1/slo", Upstream: correlationServiceURL},
+		// Per-tenant alert delivery channels (F3): CRUD + test-send live on
+		// notification-service; admin-gated by RBACEngine.Middleware like other
+		// /api/v1 admin surfaces, and tenant-scoped from the JWT server-side.
+		{Prefix: "/api/v1/notification-channels", Upstream: notificationServiceURL},
 		// Remediation policy (GET /api/v1/remediation/policy) lives on
 		// correlation-service's playbook handler and gates the Incidents
 		// remediation UI's approve path — it needs its own prefix (it is not

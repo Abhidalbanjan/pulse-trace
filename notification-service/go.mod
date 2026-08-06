@@ -3,7 +3,9 @@ module github.com/pulsetrace/notification-service
 go 1.25.0
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/grafana/pyroscope-go v1.4.1
+	github.com/lib/pq v1.12.3
 	github.com/pulsetrace/shared v0.0.0
 	go.opentelemetry.io/otel v1.41.0
 )
@@ -19,7 +21,6 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grafana/pyroscope-go/godeltaprof v0.1.11 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.20.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect

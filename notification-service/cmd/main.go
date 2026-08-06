@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -9,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	_ "github.com/lib/pq"
+	"github.com/pulsetrace/notification-service/internal/channels"
 	"github.com/pulsetrace/notification-service/internal/worker"
 	"github.com/pulsetrace/shared/rabbitmq"
 	"github.com/pulsetrace/shared/telemetry"
@@ -66,6 +69,36 @@ func main() {
 	defer consumer.Close()
 
 	notifWorker := worker.NewNotificationWorker()
+
+	// ── Per-tenant channel store + management API (F3) ────────────────────────
+	// Optional: without DATABASE_URL the service still runs on env-configured
+	// channels; with it, tenants can manage channels from the UI and the worker
+	// also delivers to those DB-configured channels.
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		db, err := sql.Open("postgres", dsn)
+		if err != nil {
+			log.Printf("notification-service: channel store disabled (db open failed: %v)", err)
+		} else {
+			repo := channels.NewRepository(db)
+			notifWorker = notifWorker.WithChannels(repo)
+
+			apiMux := http.NewServeMux()
+			channels.NewHandler(repo).RegisterRoutes(apiMux)
+			apiPort := os.Getenv("CHANNELS_API_PORT")
+			if apiPort == "" {
+				apiPort = "8086"
+			}
+			go func() {
+				log.Printf("notification-service: channels API listening on :%s", apiPort)
+				if err := http.ListenAndServe(":"+apiPort, apiMux); err != nil {
+					log.Printf("notification-service: channels API server error: %v", err)
+				}
+			}()
+			if !channels.EncryptionConfigured() {
+				log.Printf("notification-service: WARNING — CHANNEL_ENCRYPTION_KEY not set; channel creation with secrets will be rejected until configured")
+			}
+		}
+	}
 
 	log.Printf("notification-service: listening on queue %q", rabbitmq.QueueNotifications)
 

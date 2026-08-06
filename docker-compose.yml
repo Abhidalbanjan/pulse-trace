@@ -413,10 +413,17 @@ services:
       OPSGENIE_API_URL: ${OPSGENIE_API_URL:-}
       WEBHOOK_URL: ${WEBHOOK_URL:-}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      # Per-tenant, UI-managed delivery channels (F3): DB store + encrypted
+      # secrets + the CRUD/test-send API on :8086 (proxied by the gateway).
+      DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
+      CHANNEL_ENCRYPTION_KEY: ${CHANNEL_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef}
+      CHANNELS_API_PORT: "8086"
     depends_on:
       rabbitmq:
         condition: service_healthy
       otel-collector:
+        condition: service_started
+      postgres:
         condition: service_started
 
   # ── Vector Agent (Edge Batching) ─────────────────────────────────────────────
@@ -448,6 +455,7 @@ services:
       ALERT_SERVICE_URL: http://alert-service:8082
       CORRELATION_SERVICE_URL: http://correlation-service:8083
       TOPOLOGY_SERVICE_URL: http://topology-service:8084
+      NOTIFICATION_SERVICE_URL: http://notification-service:8086
       DATABASE_URL: postgres://pulsetrace:pulsetrace_secret@postgres:5432/pulsetrace?sslmode=disable
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       SERVICE_VERSION: ${SERVICE_VERSION:-dev}

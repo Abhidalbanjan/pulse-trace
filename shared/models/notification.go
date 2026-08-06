@@ -34,6 +34,10 @@ const (
 type NotificationEvent struct {
 	ID         string              `json:"id"`
 	IncidentID string              `json:"incident_id"`
+	// TenantID scopes which per-tenant delivery channels (F3) this event routes
+	// to. Empty is treated as the "default" tenant for backward compatibility
+	// with older publishers and single-tenant deployments.
+	TenantID   string              `json:"tenant_id,omitempty"`
 	Channel    NotificationChannel `json:"channel"`
 	// Action is "triggered" (default) or "resolved". Empty is treated as
 	// triggered for backward compatibility with older publishers.

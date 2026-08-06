@@ -152,7 +152,9 @@ async function seedAdmin(token) {
   if (await authed(token, '/api/v1/admin/users', { username: 'sarah.oncall', password: 'sarah_secret_123', role: 'viewer' }) < 300) ok++;
   if (await authed(token, '/api/v1/admin/ingestion-keys', { name: 'production-agents', tier: 'standard', scope: 'ingest' }) < 300) ok++;
   if (await authed(token, '/api/v1/slo/definitions', { service_name: 'payment-service', slo_target: 99.9, sli_type: 'availability', window_days: 30 }) < 300) ok++;
-  console.log(`  admin: ${ok}/6 (role/policy/rate-limit/user/ingestion-key/slo) created`);
+  // A per-tenant delivery channel (F3). Secret is encrypted at rest server-side.
+  if (await authed(token, '/api/v1/notification-channels', { name: 'demo-webhook', type: 'webhook', config: { url: 'https://example.com/pulsetrace-hook' }, enabled: true }) < 300) ok++;
+  console.log(`  admin: ${ok}/7 (role/policy/rate-limit/user/ingestion-key/slo/channel) created`);
 
   // A shift-left deploy gate: POST a PR event to the (public) GitHub webhook so
   // the Deploy Gates screen has a recorded verdict to show.

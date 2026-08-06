@@ -52,6 +52,23 @@ test.describe('Settings', () => {
     await expect(page.getByText('Production Cluster Key')).toHaveCount(0);
   });
 
+  test('Alert Channels: lists the seeded channel and adds a new one', async ({ page }) => {
+    await page.goto('/settings');
+    await page.getByRole('button', { name: 'Alert Channels' }).click();
+    // The real Channels panel (not the old env-only info block) shows the seeded
+    // channel and an add control.
+    await expect(page.getByText('demo-webhook').first()).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('button', { name: '+ Add Channel' })).toBeVisible();
+
+    const name = `e2e-slack-${Date.now()}`;
+    await page.getByRole('button', { name: '+ Add Channel' }).click();
+    await page.getByPlaceholder('e.g. oncall-slack').fill(name);
+    // Default type is slack; fill its webhook URL and create.
+    await page.getByPlaceholder('https://hooks.slack.com/services/…').fill('https://hooks.slack.com/services/T/B/x');
+    await page.getByRole('button', { name: 'Create channel' }).click();
+    await expect(page.getByText(name).first()).toBeVisible({ timeout: 10000 });
+  });
+
   test('Data & Privacy tab gates deletion behind a type-to-confirm modal', async ({ page }) => {
     await page.goto('/settings');
     await page.getByRole('button', { name: 'Data & Privacy' }).click();

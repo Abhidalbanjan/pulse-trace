@@ -223,6 +223,22 @@ export interface Alert {
   created_at?: string;
 }
 
+// ── Alert delivery channels (ROAD_TO_100 · F3) ────────────────────────────────
+export type ChannelType = 'slack' | 'email' | 'pagerduty' | 'opsgenie' | 'webhook';
+
+export interface NotificationChannel {
+  id: string;
+  tenant_id: string;
+  name: string;
+  type: ChannelType;
+  // Non-secret config in clear; secret values are never returned — instead a
+  // `<key>_set: "true"` presence flag indicates a secret is configured.
+  config: Record<string, string>;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 // ── Shift-left deploy gates (ROAD_TO_100 · F5) ────────────────────────────────
 export interface DeployGate {
   id: string;

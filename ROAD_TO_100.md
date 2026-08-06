@@ -88,7 +88,7 @@ highest-priority parity work.
 | Roles / Policies / Rate-limits / Users / Alert-rules / Audit / Billing | ✅ | ✅ Settings panels | Minor: rotation button (below). |
 | Self-healing approve / reject / dry-run | ✅ | ✅ Incidents remediation panel | ✅ Done (F1). |
 | SLO / error-budget / burn-rate | ✅ | ✅ SLOs screen | ✅ Done (F2). |
-| **Alert delivery channels** (Slack/PD/Opsgenie/webhook) | ✅ | ❌ env-only | **Build Channels settings panel + test-send (F3).** |
+| Alert delivery channels (Slack/PD/Opsgenie/webhook) | ✅ | ✅ Channels panel + test-send | ✅ Done (F3) — per-tenant, DB-backed, encrypted. |
 | Ingestion-key rotation | ✅ | ✅ Keys panel (list/create/rotate/revoke) | ✅ Done (F4). |
 | Deploy gates (shift-left) | ✅ | ✅ live gate feed | ✅ Done (F5) — wired, not removed. |
 | AI-SRE remediation execute | ✅ | ✅ confirm→run→result | ✅ Done (F1) — `alert()` replaced. |
@@ -121,12 +121,13 @@ Real engine (`burn_rate_alerter.go`, `slo_worker.go`, `slo_repository.go`) had *
 - ↪ Deferred (depth): multi-window burn-rate alert config, per-service SLO surfaced on the Services screen, edit-in-place. Not needed to close the parity orphan.
 - **DoD (parity):** a user defines an SLO and sees budget burn + breach alerts from the UI; R1–R3/R5/R7 met.
 
-### F3 — Alert delivery channels · 80→**100** BE, 15→**100** UI · effort M
-Slack/PD/Opsgenie/webhook + auto-resolve are real but **env-var-only**.
-- **Backend:** move channel config from env to a tenant-scoped `notification_channels` table (encrypted secrets); add a **test-send** endpoint; add routing/escalation policies (severity→channel, on-call schedule) and de-dup windows.
-- **Frontend:** Settings → **Channels** panel: add/edit/remove a channel per type, **Send test**, and a routing-rules editor (severity/service → channel). Show delivery status/history.
-- **Tests:** test-send integration per channel type (stub servers already exist in `notification_worker_test.go`); e2e add-channel → trigger → delivered.
-- **DoD:** an admin configures and tests on-call delivery without touching env; secrets never rendered back; R1–R7.
+### F3 — Alert delivery channels · 80→**100** BE, 15→**100** UI · effort M · ✅ delivered
+Slack/PD/Opsgenie/webhook + auto-resolve were real but **env-var-only**. Now per-tenant, DB-backed, UI-managed.
+- ✅ **Backend:** channel config moved to a tenant-scoped `notification_channels` table ([migration 018](gateway-service/migrations/018_create_notification_channels.sql)) with **AES-256-GCM-encrypted secrets** at rest ([channels package](notification-service/internal/channels/) — crypto/model/repository/deliver/handler; **fails closed** without `CHANNEL_ENCRYPTION_KEY`, never stores plaintext). CRUD + **test-send** HTTP API on notification-service (:8086), gateway-proxied at `/api/v1/notification-channels` (**admin-gated** by RBAC, tenant-scoped from the JWT). The worker now delivers to env globals **and** each tenant's DB channels (additive, backward-compatible); `NotificationEvent` carries `TenantID` (set by the correlator) so events route to the right tenant. Delivery is one shared config-driven path (Slack/email/PagerDuty/Opsgenie/webhook-with-HMAC) used by both live dispatch and test-send, so behavior can't drift.
+- ✅ **Frontend** ([`ChannelsPanel`](frontend/src/components/Settings/ChannelsPanel.tsx) in Settings → Alert Channels): add/edit/remove per type with type-specific fields, **Send test**, enable/disable; secrets are **write-only** (shown as "configured", blank-to-keep on edit). Replaces the old env-only info block.
+- ✅ **Tests:** Go ([channels_test.go](notification-service/internal/channels/channels_test.go), green against Postgres) — AES round-trip + fresh nonce, redaction, delivery incl. **webhook HMAC verification**, disabled-is-no-op, and DB repo: encrypt-at-rest, decrypt-for-delivery, redact-for-API, blank-secret-preserving update, tenant isolation. Playwright (`settings.spec`) — lists the seeded channel + add flow. Compose wires `DATABASE_URL`/`CHANNEL_ENCRYPTION_KEY`/`NOTIFICATION_SERVICE_URL`; seed provisions a demo channel.
+- ↪ Deferred (depth): routing/escalation policies (severity/service→channel, on-call schedules) and de-dup windows — the delivery + config substrate is now in place for them.
+- **DoD:** an admin configures and tests on-call delivery from the UI without touching env; secrets are never rendered back; R1–R3/R5/R7 met.
 
 ### F4 — Ingestion-key lifecycle · 84→**100** BE, 40→**100** UI · effort S · ✅ delivered
 Rotation shipped in the backend (grace window, `replaced_by`); the Settings "API Keys" tab was a hardcoded placeholder (fake `pt_live_***` key, dead buttons). Now a real panel on the F0.4 platform.

@@ -297,6 +297,7 @@ func (c *Correlator) notify(ctx context.Context, incident *models.Incident, aler
 	event := models.NotificationEvent{
 		ID:         uuid.New().String(),
 		IncidentID: incident.ID,
+		TenantID:   incident.TenantID,
 		Channel:    models.NotificationChannelLog,
 		Action:     models.NotificationActionTriggered,
 		Title:      incident.Title,
@@ -371,6 +372,7 @@ func (c *Correlator) notifyResolved(ctx context.Context, incident *models.Incide
 	event := models.NotificationEvent{
 		ID:         uuid.New().String(),
 		IncidentID: incident.ID,
+		TenantID:   incident.TenantID,
 		Channel:    models.NotificationChannelLog,
 		Action:     models.NotificationActionResolved,
 		Title:      incident.Title,

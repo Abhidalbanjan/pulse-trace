@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
+	"github.com/pulsetrace/notification-service/internal/channels"
 	"github.com/pulsetrace/shared/models"
 )
 
@@ -59,7 +60,18 @@ type NotificationWorker struct {
 	webhookURL    string
 	webhookSecret string
 
+	// channelRepo, when set, adds per-tenant DB-configured channels (F3) on top
+	// of the env-configured globals above. Nil in deployments without a DB.
+	channelRepo *channels.Repository
+
 	httpClient *http.Client
+}
+
+// WithChannels attaches the per-tenant channel repository so Handle also delivers
+// to a tenant's DB-configured channels (in addition to the env globals).
+func (w *NotificationWorker) WithChannels(repo *channels.Repository) *NotificationWorker {
+	w.channelRepo = repo
+	return w
 }
 
 func NewNotificationWorker() *NotificationWorker {
@@ -166,6 +178,25 @@ func (w *NotificationWorker) Handle(ctx context.Context, body []byte) error {
 	if w.webhookURL != "" {
 		if err := w.sendWebhook(ctx, &event); err != nil {
 			errs = append(errs, fmt.Sprintf("webhook: %v", err))
+		}
+	}
+
+	// Per-tenant DB-configured channels (F3), additive to the env globals above.
+	if w.channelRepo != nil {
+		tenant := event.TenantID
+		if tenant == "" {
+			tenant = "default"
+		}
+		dbChannels, err := w.channelRepo.ListDecrypted(ctx, tenant)
+		if err != nil {
+			// A DB/lookup failure must not drop the env + log deliveries that
+			// already fired; record it and move on.
+			log.Printf("notification_worker: failed to load channels for tenant %s: %v", tenant, err)
+		}
+		for _, ch := range dbChannels {
+			if err := channels.Deliver(ctx, w.httpClient, ch, &event); err != nil {
+				errs = append(errs, fmt.Sprintf("channel %s (%s): %v", ch.Name, ch.Type, err))
+			}
 		}
 	}
 

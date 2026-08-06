@@ -290,6 +290,7 @@ func main() {
 
 	// Error Tracking APIs (ClickHouse grouping + Postgres triage workflow)
 	mux.HandleFunc("GET /api/v1/errors/groups", errorTrackingHandler.ListErrorGroups)
+	mux.HandleFunc("GET /api/v1/errors/groups/{fingerprint}/timeline", errorTrackingHandler.GetErrorGroupTimeline)
 	mux.HandleFunc("POST /api/v1/errors/groups/{fingerprint}/resolve", errorTrackingHandler.ResolveErrorGroup)
 	mux.HandleFunc("POST /api/v1/errors/groups/{fingerprint}/mute", errorTrackingHandler.MuteErrorGroup)
 	mux.HandleFunc("POST /api/v1/errors/groups/{fingerprint}/reopen", errorTrackingHandler.ReopenErrorGroup)
@@ -383,9 +384,10 @@ func main() {
 	// rather than blocking gateway boot on the optional migration feature.
 	if logProducer, err := kafka.NewProducer(); err != nil {
 		log.Printf("WARNING: log publishing to Quickwit disabled (kafka unavailable); migration + OTLP logs fall back to ClickHouse otel_logs: %v", err)
-		// No Kafka: the synthetics worker still probes and records results, it just
-		// can't page on failure.
+		// No Kafka: the synthetics + error-regression workers still run, they just
+		// can't page.
 		syntheticsHandler.StartWorker()
+		errorTrackingHandler.StartRegressionWorker()
 	} else {
 		defer logProducer.Close()
 		migrationProxy.SetLogSink(logProducer, usageMeter.Record, quotaEnforcer.Allow)
@@ -397,9 +399,11 @@ func main() {
 		otlpReceiver.SetLogSink(logBridge.Publish)
 		otlpHTTP.SetLogSink(logBridge.Publish)
 		log.Printf("logs (migration + OTLP-native) → Kafka topic 'logs' → Quickwit (log explorer)")
-		// Wire the synthetics failure→alert path onto the same logs topic, then
-		// start the worker (wiring before start avoids racing the first poll).
+		// Wire the synthetics failure→alert and error-regression→alert paths onto
+		// the same logs topic, then start their workers (wiring before start avoids
+		// racing the first poll).
 		syntheticsHandler.WithAlertPublisher(logProducer).StartWorker()
+		errorTrackingHandler.WithAlertPublisher(logProducer).StartRegressionWorker()
 	}
 	migrationProxy.RegisterRoutes(mux)
 	// Optional TLS/mTLS for the OTLP/gRPC listener, so the per-tenant ingestion

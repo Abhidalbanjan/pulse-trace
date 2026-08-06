@@ -1,15 +1,21 @@
 package handler
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/pulsetrace/shared/models"
 )
 
 // ErrorTrackingHandler groups trace errors (StatusCode = STATUS_CODE_ERROR) from ClickHouse
@@ -17,10 +23,24 @@ import (
 type ErrorTrackingHandler struct {
 	ch *clickHouseClient
 	db *sql.DB
+
+	// alerts is optional; when set, the regression worker pages via the logs
+	// topic (→ alert → correlation → notification), reusing the same pipeline an
+	// application ERROR uses. nil disables paging (results are still computed).
+	alerts LogPublisher
+	// alerted is edge-trigger state (tenant\x00fingerprint) so a new/regressed
+	// group pages once, not every scan. Only the worker goroutine touches it.
+	alerted map[string]bool
 }
 
 func NewErrorTrackingHandler(clickhouseURL string, db *sql.DB) *ErrorTrackingHandler {
-	return &ErrorTrackingHandler{ch: &clickHouseClient{URL: clickhouseURL}, db: db}
+	return &ErrorTrackingHandler{ch: &clickHouseClient{URL: clickhouseURL}, db: db, alerted: make(map[string]bool)}
+}
+
+// WithAlertPublisher wires the error-regression→alert path. Call before StartRegressionWorker.
+func (h *ErrorTrackingHandler) WithAlertPublisher(p LogPublisher) *ErrorTrackingHandler {
+	h.alerts = p
+	return h
 }
 
 // fingerprint derives a stable 16-char id for an error group from its identity
@@ -243,14 +263,14 @@ func (h *ErrorTrackingHandler) setStatus(w http.ResponseWriter, r *http.Request,
 	}
 
 	_, err := h.db.Exec(`
-		INSERT INTO error_groups (fingerprint, service, operation, message, status, resolved_by, resolved_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+		INSERT INTO error_groups (fingerprint, tenant_id, service, operation, message, status, resolved_by, resolved_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
 		ON CONFLICT (fingerprint) DO UPDATE SET
 			status = EXCLUDED.status,
 			resolved_by = EXCLUDED.resolved_by,
 			resolved_at = EXCLUDED.resolved_at,
 			updated_at = now()
-	`, fp, req.Service, req.Operation, req.Message, status, resolvedBy, resolvedAt)
+	`, fp, tenantFromRequest(r), req.Service, req.Operation, req.Message, status, resolvedBy, resolvedAt)
 	if err != nil {
 		log.Printf("[ErrorTrackingHandler] failed to update triage status: %v", err)
 		http.Error(w, "failed to update error group", http.StatusInternalServerError)
@@ -271,4 +291,327 @@ func (h *ErrorTrackingHandler) MuteErrorGroup(w http.ResponseWriter, r *http.Req
 
 func (h *ErrorTrackingHandler) ReopenErrorGroup(w http.ResponseWriter, r *http.Request) {
 	h.setStatus(w, r, "open")
+}
+
+// GetErrorGroupTimeline returns the time-bucketed occurrence count for one error
+// group, so the UI can render "when and how often" — is this issue spiking,
+// steady, or already tailing off? The group is identified by its service /
+// operation / normalized-message triple (passed as query params); the path
+// fingerprint must match that triple, which both scopes the query and prevents a
+// fabricated fingerprint from being paired with a mismatched identity.
+//
+//	GET /api/v1/errors/groups/{fingerprint}/timeline?service=&operation=&message=&interval=24h|7d
+func (h *ErrorTrackingHandler) GetErrorGroupTimeline(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	fp := r.PathValue("fingerprint")
+	service := r.URL.Query().Get("service")
+	operation := r.URL.Query().Get("operation")
+	message := r.URL.Query().Get("message")
+	if service == "" || operation == "" {
+		http.Error(w, "service and operation are required", http.StatusBadRequest)
+		return
+	}
+
+	tenant := tenantFromRequest(r)
+	if fp != fingerprint(tenant, service, operation, message) {
+		http.Error(w, "fingerprint does not match the supplied group identity", http.StatusBadRequest)
+		return
+	}
+
+	interval := r.URL.Query().Get("interval")
+	bucketExpr, ok := metricIntervalToBucket[interval]
+	if !ok {
+		interval = "24h"
+		bucketExpr = metricIntervalToBucket[interval]
+	}
+	sqlInterval := intervalToSQL[interval]
+
+	query := `
+		SELECT
+			` + strings.ReplaceAll(bucketExpr, "TimeUnix", "Timestamp") + ` as time_bucket,
+			count() as count
+		FROM pulsetrace.otel_traces
+		WHERE ` + tenantClause + ` AND StatusCode = 'STATUS_CODE_ERROR'
+			AND ServiceName = {service:String} AND SpanName = {operation:String}
+			AND ` + normalizedMessageExpr + ` = {message:String}
+			AND Timestamp >= now() - INTERVAL ` + sqlInterval + `
+		GROUP BY time_bucket
+		ORDER BY time_bucket ASC
+		FORMAT JSON
+	`
+
+	resp, err := h.ch.queryScoped(tenant, query, map[string]string{
+		"service":   stringParam(service),
+		"operation": stringParam(operation),
+		"message":   stringParam(message),
+	})
+	if err != nil {
+		log.Printf("[ErrorTrackingHandler] timeline query failed: %v", err)
+		http.Error(w, "failed to query analytics engine", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		_, _ = w.Write([]byte(`{"data": []}`))
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, "analytics engine returned error", http.StatusInternalServerError)
+		return
+	}
+	_, _ = io.Copy(w, resp.Body)
+}
+
+// classifyErrorGroup decides whether an observed error group warrants a page:
+//   - "regression": a group a human marked resolved is occurring again after the
+//     moment it was resolved — the single most important thing to be told about.
+//   - "new": a group with no triage history that first appeared within the scan
+//     window (so a long-standing group doesn't page the whole backlog on boot).
+//   - "": muted groups, healthy resolved groups, and already-known open groups.
+//
+// It is pure so the paging decision — the heart of "notifies on regression" — is
+// unit-tested without a live DB or ClickHouse.
+func classifyErrorGroup(status string, resolvedAt, firstSeen, lastSeen, now time.Time, scanWindow time.Duration) string {
+	switch status {
+	case "muted":
+		return ""
+	case "resolved":
+		if !resolvedAt.IsZero() && lastSeen.After(resolvedAt) {
+			return "regression"
+		}
+		return ""
+	case "": // no triage row yet
+		if firstSeen.After(now.Add(-scanWindow)) {
+			return "new"
+		}
+		return ""
+	default: // "open" or any human-acknowledged state — already known
+		return ""
+	}
+}
+
+const (
+	// regressionScanInterval is how often the worker looks for new/regressed
+	// groups; regressionWindow bounds both the "recent errors" query and the
+	// "first appeared recently" test for a new group.
+	regressionScanInterval = 60 * time.Second
+	regressionWindow       = 15 * time.Minute
+)
+
+// errGroupObservation is one error group seen in the recent-errors scan.
+type errGroupObservation struct {
+	service   string
+	operation string
+	message   string // normalized template
+	sample    string // latest raw message, for the alert text
+	firstSeen time.Time
+	lastSeen  time.Time
+	traceID   string
+}
+
+// StartRegressionWorker periodically scans each tenant's recent error groups and
+// pages (once, edge-triggered) when a new group appears or a resolved group
+// regresses. A regression additionally auto-reopens the group so it re-enters the
+// triage queue. Safe to start without an alert publisher (it just won't page).
+func (h *ErrorTrackingHandler) StartRegressionWorker() {
+	if h.db == nil {
+		log.Println("[ErrorRegressionWorker] no DB; regression detection disabled")
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(regressionScanInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			h.runRegressionScan()
+		}
+	}()
+}
+
+func (h *ErrorTrackingHandler) runRegressionScan() {
+	tenants, err := h.distinctTriageTenants()
+	if err != nil {
+		log.Printf("[ErrorRegressionWorker] failed to list tenants: %v", err)
+		return
+	}
+	now := time.Now().UTC()
+	for _, tenant := range tenants {
+		observations, err := h.recentErrorGroups(tenant)
+		if err != nil {
+			log.Printf("[ErrorRegressionWorker] recent-groups query failed for tenant %q: %v", tenant, err)
+			continue
+		}
+		triage := h.triageStates(tenant)
+		for _, o := range observations {
+			fp := fingerprint(tenant, o.service, o.operation, o.message)
+			st := triage[fp] // zero value (status "") when no triage row
+			kind := classifyErrorGroup(st.status, st.resolvedAt, o.firstSeen, o.lastSeen, now, regressionWindow)
+			key := tenant + "\x00" + fp
+			if kind == "" {
+				delete(h.alerted, key) // condition cleared → re-arm for the next time
+				continue
+			}
+			if h.alerted[key] {
+				continue
+			}
+			h.alerted[key] = true
+			h.pageErrorGroup(tenant, o, kind)
+			if kind == "regression" {
+				h.autoReopen(tenant, fp, o)
+			}
+		}
+	}
+}
+
+// distinctTriageTenants lists tenants that have any triage history — the set the
+// regression worker fans out over (a resolved group necessarily has a row here).
+func (h *ErrorTrackingHandler) distinctTriageTenants() ([]string, error) {
+	rows, err := h.db.Query("SELECT DISTINCT tenant_id FROM error_groups")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var tenant string
+		if err := rows.Scan(&tenant); err == nil && tenant != "" {
+			out = append(out, tenant)
+		}
+	}
+	return out, nil
+}
+
+// recentErrorGroups returns the error groups seen in the recent window for one
+// tenant, with their first/last-seen bounds — enough to classify new/regression.
+func (h *ErrorTrackingHandler) recentErrorGroups(tenant string) ([]errGroupObservation, error) {
+	query := `
+		SELECT
+			ServiceName as service,
+			SpanName as operation,
+			` + normalizedMessageExpr + ` as message,
+			argMax(StatusMessage, Timestamp) as sample_message,
+			min(Timestamp) as first_seen,
+			max(Timestamp) as last_seen,
+			argMax(TraceId, Timestamp) as sample_trace_id
+		FROM pulsetrace.otel_traces
+		WHERE ` + tenantClause + ` AND StatusCode = 'STATUS_CODE_ERROR' AND Timestamp >= now() - INTERVAL 7 DAY
+		GROUP BY service, operation, message
+		ORDER BY last_seen DESC
+		LIMIT 500
+		FORMAT JSON
+	`
+	resp, err := h.ch.queryScoped(tenant, query, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil
+	}
+
+	var result struct {
+		Data []struct {
+			Service       string `json:"service"`
+			Operation     string `json:"operation"`
+			Message       string `json:"message"`
+			SampleMessage string `json:"sample_message"`
+			FirstSeen     string `json:"first_seen"`
+			LastSeen      string `json:"last_seen"`
+			SampleTraceID string `json:"sample_trace_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	out := make([]errGroupObservation, 0, len(result.Data))
+	for _, d := range result.Data {
+		out = append(out, errGroupObservation{
+			service: d.Service, operation: d.Operation, message: d.Message, sample: d.SampleMessage,
+			firstSeen: parseCHTime(d.FirstSeen), lastSeen: parseCHTime(d.LastSeen), traceID: d.SampleTraceID,
+		})
+	}
+	return out, nil
+}
+
+// triageStates loads the typed triage state (status + resolved_at) for a tenant.
+func (h *ErrorTrackingHandler) triageStates(tenant string) map[string]struct {
+	status     string
+	resolvedAt time.Time
+} {
+	out := map[string]struct {
+		status     string
+		resolvedAt time.Time
+	}{}
+	rows, err := h.db.Query("SELECT fingerprint, status, resolved_at FROM error_groups WHERE tenant_id = $1", tenant)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var fp, status string
+		var resolvedAt sql.NullTime
+		if err := rows.Scan(&fp, &status, &resolvedAt); err != nil {
+			continue
+		}
+		out[fp] = struct {
+			status     string
+			resolvedAt time.Time
+		}{status: status, resolvedAt: resolvedAt.Time}
+	}
+	return out
+}
+
+// autoReopen flips a regressed group back to 'open' so it re-enters the triage
+// queue (a resolved issue that came back is, by definition, not resolved).
+func (h *ErrorTrackingHandler) autoReopen(tenant, fp string, o errGroupObservation) {
+	_, err := h.db.Exec(`
+		INSERT INTO error_groups (fingerprint, tenant_id, service, operation, message, status, resolved_by, resolved_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, 'open', NULL, NULL, now())
+		ON CONFLICT (fingerprint) DO UPDATE SET status = 'open', resolved_by = NULL, resolved_at = NULL, updated_at = now()
+	`, fp, tenant, o.service, o.operation, o.message)
+	if err != nil {
+		log.Printf("[ErrorRegressionWorker] auto-reopen failed for %s: %v", fp, err)
+	}
+}
+
+// pageErrorGroup emits an ERROR log for the group, routed through the standard
+// logs→alert→correlation→notification pipeline (same path an app error takes).
+func (h *ErrorTrackingHandler) pageErrorGroup(tenant string, o errGroupObservation, kind string) {
+	if h.alerts == nil {
+		return
+	}
+	headline := "New error group"
+	if kind == "regression" {
+		headline = "Error regression (resolved issue recurred)"
+	}
+	msg := o.sample
+	if msg == "" {
+		msg = o.message
+	}
+	entry := &models.LogEntry{
+		ID:          uuid.NewString(),
+		TenantID:    tenant,
+		ServiceName: o.service,
+		Level:       models.LogLevelError,
+		Message:     headline + ": " + o.operation + " — " + msg,
+		TraceID:     o.traceID,
+		Timestamp:   time.Now().UTC(),
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := h.alerts.PublishBatch(context.Background(), "logs", []*models.LogEntry{entry}); err != nil {
+		log.Printf("[ErrorRegressionWorker] failed to publish %s alert: %v", kind, err)
+	}
+}
+
+// parseCHTime parses ClickHouse's default datetime rendering ("2006-01-02
+// 15:04:05[.000]") as UTC. A parse failure yields the zero time, which
+// classifyErrorGroup treats conservatively (never a spurious page).
+func parseCHTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{"2006-01-02 15:04:05.000", "2006-01-02 15:04:05"} {
+		if ts, err := time.Parse(layout, s); err == nil {
+			return ts.UTC()
+		}
+	}
+	return time.Time{}
 }

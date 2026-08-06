@@ -18,4 +18,15 @@ test.describe('Error Tracking', () => {
     await page.getByRole('button', { name: 'All' }).click();
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
   });
+
+  test('expanding a group shows its occurrence timeline', async ({ page }) => {
+    await page.goto('/errors');
+    await page.getByRole('button', { name: 'All' }).click();
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: 'Timeline' }).first().click();
+    // The expanded panel renders and resolves to a real state (chart or explicit
+    // empty), never an infinite spinner.
+    await expect(page.getByText(/OCCURRENCES · LAST 7 DAYS/i)).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('Loading timeline…')).toHaveCount(0, { timeout: 10000 });
+  });
 });

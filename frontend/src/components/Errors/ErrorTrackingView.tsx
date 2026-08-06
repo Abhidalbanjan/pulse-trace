@@ -3,7 +3,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { fetchWithAuth } from '@/lib/api';
+import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { useTheme } from '@/context/ThemeContext';
+
+interface TimelineBucket { time_bucket: string; count: number }
 
 interface ErrorGroup {
   fingerprint: string;
@@ -35,6 +38,24 @@ export function ErrorTrackingView() {
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<'all' | 'open' | 'resolved' | 'muted'>('open');
   const [actioning, setActioning] = useState<string | null>(null);
+
+  // Occurrence timeline: which group is expanded, and its fetched buckets.
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [timeline, setTimeline] = useState<TimelineBucket[]>([]);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+
+  const toggleTimeline = (g: ErrorGroup) => {
+    if (expanded === g.fingerprint) { setExpanded(null); return; }
+    setExpanded(g.fingerprint);
+    setTimeline([]);
+    setTimelineLoading(true);
+    const params = new URLSearchParams({ service: g.service, operation: g.operation, message: g.message, interval: '7d' });
+    fetchWithAuth(`/api/v1/errors/groups/${g.fingerprint}/timeline?${params.toString()}`)
+      .then(res => res.json())
+      .then(data => setTimeline((data?.data || []).map((b: { time_bucket: string; count: string | number }) => ({ time_bucket: b.time_bucket, count: Number(b.count) }))))
+      .catch(() => setTimeline([]))
+      .finally(() => setTimelineLoading(false));
+  };
 
   const fetchGroups = useCallback(() => {
     fetchWithAuth('/api/v1/errors/groups')
@@ -152,7 +173,8 @@ export function ErrorTrackingView() {
             </thead>
             <tbody>
               {filtered.map(g => (
-                <tr key={g.fingerprint} style={{ borderBottom: '1px solid ' + t.panelBorder }}>
+                <React.Fragment key={g.fingerprint}>
+                <tr style={{ borderBottom: expanded === g.fingerprint ? 'none' : '1px solid ' + t.panelBorder }}>
                   <td style={{ padding: '16px' }}>
                     <span
                       style={{
@@ -178,6 +200,12 @@ export function ErrorTrackingView() {
                   <td style={{ padding: '16px', color: t.text2, fontSize: '13px' }}>{new Date(g.last_seen).toLocaleString()}</td>
                   <td style={{ padding: '16px' }}>
                     <div style={{ display: 'flex', gap: '7px', flexWrap: 'wrap' }}>
+                      <button
+                        onClick={() => toggleTimeline(g)}
+                        style={{ ...ghostButtonStyle, color: expanded === g.fingerprint ? t.accent : t.text2, borderColor: expanded === g.fingerprint ? t.accent : t.panelBorder }}
+                      >
+                        Timeline
+                      </button>
                       {g.sample_trace_id && (
                         <button
                           onClick={() => router.push(`/traces?trace=${g.sample_trace_id}`)}
@@ -224,6 +252,33 @@ export function ErrorTrackingView() {
                     </div>
                   </td>
                 </tr>
+                {expanded === g.fingerprint && (
+                  <tr style={{ borderBottom: '1px solid ' + t.panelBorder }}>
+                    <td colSpan={6} style={{ padding: '0 16px 20px' }}>
+                      <div style={{ fontSize: '11.5px', fontWeight: 700, letterSpacing: '0.04em', color: t.text2, margin: '4px 0 10px' }}>OCCURRENCES · LAST 7 DAYS</div>
+                      {timelineLoading ? (
+                        <div style={{ color: t.text2, fontSize: '13px', padding: '20px 0' }}>Loading timeline…</div>
+                      ) : timeline.length === 0 ? (
+                        <div style={{ color: t.text2, fontSize: '13px', padding: '20px 0' }}>No occurrences in the last 7 days.</div>
+                      ) : (
+                        <div style={{ height: '140px' }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={timeline}>
+                              <XAxis dataKey="time_bucket" tick={{ fontSize: 10, fill: t.text2 }} minTickGap={30} tickFormatter={(v) => new Date(String(v).replace(' ', 'T') + 'Z').toLocaleDateString([], { month: 'short', day: 'numeric' })} />
+                              <Tooltip
+                                contentStyle={{ background: t.panelBg, border: '1px solid ' + t.panelBorder, borderRadius: '8px', fontSize: '12px' }}
+                                labelFormatter={(v) => new Date(String(v).replace(' ', 'T') + 'Z').toLocaleString()}
+                                formatter={(value) => [`${value} occurrences`, '']}
+                              />
+                              <Bar dataKey="count" fill={t.red} radius={[3, 3, 0, 0]} />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>

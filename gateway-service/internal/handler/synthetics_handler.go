@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -13,27 +14,100 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+
+	"github.com/pulsetrace/shared/models"
 )
+
+// LogPublisher publishes log entries onto a topic. The synthetics worker uses it
+// to emit an ERROR log for a failing check, which flows through the existing
+// logs→alert→correlation→notification pipeline — i.e. a failed check pages
+// on-call exactly the way an application ERROR does, with no parallel alert path.
+type LogPublisher interface {
+	PublishBatch(ctx context.Context, topic string, entries []*models.LogEntry) error
+}
 
 type SyntheticsHandler struct {
 	ClickHouseURL string
 	DB            *sql.DB
+
+	// alerts is optional; when nil the worker still records results but does not
+	// page (backward-compatible with the pre-alerting behaviour).
+	alerts LogPublisher
+	// lastFailed is edge-trigger state (per check key) so a check that stays down
+	// pages once on the healthy→failing transition instead of every poll cycle.
+	// Only the single worker goroutine touches it, so it needs no lock.
+	lastFailed map[string]bool
+}
+
+// WithAlertPublisher wires the failure→alert path. Call before StartWorker.
+func (h *SyntheticsHandler) WithAlertPublisher(p LogPublisher) *SyntheticsHandler {
+	h.alerts = p
+	return h
 }
 
 type SyntheticResult struct {
-	Timestamp  time.Time `json:"timestamp"`
-	TenantID   string    `json:"tenant_id"`
-	URL        string    `json:"url"`
-	StatusCode int       `json:"status_code"`
-	LatencyMs  float64   `json:"latency_ms"`
-	Success    bool      `json:"success"`
+	Timestamp     time.Time `json:"timestamp"`
+	TenantID      string    `json:"tenant_id"`
+	CheckName     string    `json:"check_name"`
+	URL           string    `json:"url"`
+	StatusCode    int       `json:"status_code"`
+	LatencyMs     float64   `json:"latency_ms"`
+	Success       bool      `json:"success"`
+	FailureReason string    `json:"failure_reason"`
+}
+
+// Assertion is the pass/fail contract for a single step's response. A zero value
+// means "only require a 2xx status" — the historical behaviour.
+type Assertion struct {
+	Status       int    `json:"status,omitempty"`         // exact status code required; 0 → any 2xx
+	MaxLatencyMs int    `json:"max_latency_ms,omitempty"` // latency SLA in ms; 0 → no bound
+	BodyContains string `json:"body_contains,omitempty"`  // substring the body must contain; "" → no check
+}
+
+// CheckStep is one HTTP request in a (possibly multi-step) synthetic check.
+type CheckStep struct {
+	Name   string    `json:"name,omitempty"`
+	Method string    `json:"method,omitempty"` // default GET
+	URL    string    `json:"url"`
+	Assert Assertion `json:"assert"`
+}
+
+// CheckSpec is the persisted multi-step definition (JSONB `spec` column). A nil
+// spec denotes a legacy single-URL target, handled by falling back to one GET.
+type CheckSpec struct {
+	Steps []CheckStep `json:"steps"`
+}
+
+// evaluateAssertion reports whether a step's response satisfied its assertion,
+// and if not, a human-readable reason. It is pure (no I/O) so the pass/fail
+// contract — the heart of "richer assertions" — is unit-tested exhaustively.
+func evaluateAssertion(statusCode int, latencyMs float64, body string, a Assertion) (bool, string) {
+	if statusCode == 0 {
+		return false, "request failed (no response)"
+	}
+	if a.Status != 0 {
+		if statusCode != a.Status {
+			return false, fmt.Sprintf("expected status %d, got %d", a.Status, statusCode)
+		}
+	} else if statusCode < 200 || statusCode >= 300 {
+		return false, fmt.Sprintf("expected a 2xx status, got %d", statusCode)
+	}
+	if a.MaxLatencyMs > 0 && latencyMs > float64(a.MaxLatencyMs) {
+		return false, fmt.Sprintf("latency %.0fms exceeded %dms SLA", latencyMs, a.MaxLatencyMs)
+	}
+	if a.BodyContains != "" && !strings.Contains(body, a.BodyContains) {
+		return false, fmt.Sprintf("body did not contain %q", a.BodyContains)
+	}
+	return true, ""
 }
 
 func NewSyntheticsHandler(clickhouseURL string, db *sql.DB) *SyntheticsHandler {
 	handler := &SyntheticsHandler{
 		ClickHouseURL: clickhouseURL,
 		DB:            db,
+		lastFailed:    make(map[string]bool),
 	}
 	handler.initClickHouseTable()
 	handler.initPostgresTable()
@@ -60,8 +134,12 @@ func (h *SyntheticsHandler) initPostgresTable() {
 	} else {
 		log.Println("[SyntheticsHandler] Postgres synthetic_targets table initialized.")
 	}
-	// Backfill tenant_id on a pre-existing single-tenant table (best-effort).
+	// Backfill tenant_id on a pre-existing single-tenant table (best-effort), and
+	// add the multi-step columns (name + JSONB spec) for richer checks. Legacy
+	// rows keep a NULL spec and run as a single GET on their url.
 	_, _ = h.DB.Exec("ALTER TABLE synthetic_targets ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(50) NOT NULL DEFAULT 'default'")
+	_, _ = h.DB.Exec("ALTER TABLE synthetic_targets ADD COLUMN IF NOT EXISTS name VARCHAR(120) NOT NULL DEFAULT ''")
+	_, _ = h.DB.Exec("ALTER TABLE synthetic_targets ADD COLUMN IF NOT EXISTS spec JSONB")
 }
 
 func (h *SyntheticsHandler) initClickHouseTable() {
@@ -97,14 +175,34 @@ func (h *SyntheticsHandler) initClickHouseTable() {
 		log.Println("[SyntheticsHandler] ClickHouse synthetic_results table initialized.")
 	}
 
-	// Add TenantID to a pre-existing table (best-effort), backfilling old rows to 'default'.
-	alter, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(
-		"ALTER TABLE pulsetrace.synthetic_results ADD COLUMN IF NOT EXISTS TenantID String DEFAULT 'default'"))
-	alter.SetBasicAuth(clickhouseUser, clickhousePassword)
-	if aresp, aerr := client.Do(alter); aerr == nil {
-		aresp.Body.Close()
+	// Add columns to a pre-existing table (best-effort). TenantID backfills old
+	// rows to 'default'; CheckName/FailureReason carry the multi-step + assertion
+	// context so the results view can show which check failed and why.
+	for _, alterSQL := range []string{
+		"ALTER TABLE pulsetrace.synthetic_results ADD COLUMN IF NOT EXISTS TenantID String DEFAULT 'default'",
+		"ALTER TABLE pulsetrace.synthetic_results ADD COLUMN IF NOT EXISTS CheckName String DEFAULT ''",
+		"ALTER TABLE pulsetrace.synthetic_results ADD COLUMN IF NOT EXISTS FailureReason String DEFAULT ''",
+	} {
+		alter, _ := http.NewRequest("POST", h.ClickHouseURL, bytes.NewBufferString(alterSQL))
+		alter.SetBasicAuth(clickhouseUser, clickhousePassword)
+		if aresp, aerr := client.Do(alter); aerr == nil {
+			aresp.Body.Close()
+		}
 	}
 }
+
+// syntheticTarget is a monitored check loaded from Postgres: its owning tenant,
+// display name, legacy url, and (for multi-step checks) a parsed step list.
+type syntheticTarget struct {
+	tenantID string
+	name     string
+	url      string
+	steps    []CheckStep
+}
+
+// maxProbeBodyBytes caps how much of a response body we read for a
+// body_contains assertion, so a huge/streaming response can't exhaust memory.
+const maxProbeBodyBytes = 64 * 1024
 
 // StartWorker begins polling the endpoints in the background
 func (h *SyntheticsHandler) StartWorker() {
@@ -118,62 +216,163 @@ func (h *SyntheticsHandler) StartWorker() {
 				continue // Need DB for targets
 			}
 
-			// Fetch targets from postgres, carrying each target's owning tenant so
-			// its probe results are attributed back to that tenant.
-			rows, err := h.DB.Query("SELECT tenant_id, url FROM synthetic_targets")
+			targets, err := h.loadTargets()
 			if err != nil {
 				log.Printf("[SyntheticsWorker] Failed to query targets: %v", err)
 				continue
 			}
-
-			type target struct{ tenantID, url string }
-			var endpoints []target
-			for rows.Next() {
-				var t target
-				if err := rows.Scan(&t.tenantID, &t.url); err == nil {
-					endpoints = append(endpoints, t)
-				}
-			}
-			rows.Close()
-
-			if len(endpoints) == 0 {
+			if len(targets) == 0 {
 				continue
 			}
 
 			var results []SyntheticResult
-			now := time.Now()
-
-			for _, tgt := range endpoints {
-				// Belt-and-suspenders: skip any target that fails SSRF validation,
-				// in case a row predates validateProbeURL or was inserted out of band.
-				if err := validateProbeURL(tgt.url); err != nil {
-					log.Printf("[SyntheticsWorker] skipping disallowed target %q: %v", tgt.url, err)
-					continue
-				}
-				start := time.Now()
-				resp, err := client.Get(tgt.url)
-				latency := float64(time.Since(start).Milliseconds())
-
-				res := SyntheticResult{
-					Timestamp: now,
-					TenantID:  tgt.tenantID,
-					URL:       tgt.url,
-					LatencyMs: latency,
-				}
-
-				if err != nil {
-					res.Success = false
-					res.StatusCode = 0
-				} else {
-					res.StatusCode = resp.StatusCode
-					res.Success = (resp.StatusCode >= 200 && resp.StatusCode < 300)
-					resp.Body.Close()
-				}
-				results = append(results, res)
+			for _, tgt := range targets {
+				results = append(results, h.runCheck(client, tgt)...)
 			}
 			h.flushResults(results)
 		}
 	}()
+}
+
+// loadTargets reads every configured check, parsing the JSONB spec into steps.
+// A NULL/empty spec is a legacy single-URL target and yields no steps (runCheck
+// falls back to one GET on url).
+func (h *SyntheticsHandler) loadTargets() ([]syntheticTarget, error) {
+	rows, err := h.DB.Query("SELECT tenant_id, COALESCE(name,''), url, spec FROM synthetic_targets")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var targets []syntheticTarget
+	for rows.Next() {
+		var tgt syntheticTarget
+		var specJSON sql.NullString
+		if err := rows.Scan(&tgt.tenantID, &tgt.name, &tgt.url, &specJSON); err != nil {
+			continue
+		}
+		if specJSON.Valid && strings.TrimSpace(specJSON.String) != "" {
+			var spec CheckSpec
+			if err := json.Unmarshal([]byte(specJSON.String), &spec); err == nil {
+				tgt.steps = spec.Steps
+			}
+		}
+		targets = append(targets, tgt)
+	}
+	return targets, nil
+}
+
+// runCheck executes one check's steps in order, records a result per step, and
+// pages (once, edge-triggered) when the check transitions healthy→failing. A
+// multi-step check stops at its first failing step — later steps typically
+// depend on earlier ones (login → add-to-cart → checkout), so continuing past a
+// failure would report misleading downstream errors.
+func (h *SyntheticsHandler) runCheck(client *http.Client, tgt syntheticTarget) []SyntheticResult {
+	steps := tgt.steps
+	if len(steps) == 0 {
+		// Legacy / simple target: a single GET expecting any 2xx.
+		steps = []CheckStep{{Name: tgt.name, Method: http.MethodGet, URL: tgt.url}}
+	}
+
+	name := tgt.name
+	if name == "" {
+		name = tgt.url
+	}
+
+	now := time.Now()
+	var results []SyntheticResult
+	var failure string
+
+	for _, step := range steps {
+		// Belt-and-suspenders SSRF check: a row could predate validateProbeURL or
+		// have been inserted out of band.
+		if err := validateProbeURL(step.URL); err != nil {
+			failure = fmt.Sprintf("step %q disallowed: %v", stepLabel(step), err)
+			results = append(results, SyntheticResult{Timestamp: now, TenantID: tgt.tenantID, CheckName: name, URL: step.URL, StatusCode: 0, Success: false, FailureReason: failure})
+			break
+		}
+
+		status, latency, body := h.probe(client, step)
+		ok, reason := evaluateAssertion(status, latency, body, step.Assert)
+		results = append(results, SyntheticResult{
+			Timestamp: now, TenantID: tgt.tenantID, CheckName: name, URL: step.URL,
+			StatusCode: status, LatencyMs: latency, Success: ok, FailureReason: reason,
+		})
+		if !ok {
+			failure = fmt.Sprintf("step %q: %s", stepLabel(step), reason)
+			break
+		}
+	}
+
+	h.pageOnTransition(tgt.tenantID, name, failure)
+	return results
+}
+
+// probe issues one step's request and returns its status, latency (ms), and a
+// bounded slice of the response body (only read when a body assertion needs it).
+func (h *SyntheticsHandler) probe(client *http.Client, step CheckStep) (status int, latencyMs float64, body string) {
+	method := strings.ToUpper(strings.TrimSpace(step.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	req, err := http.NewRequest(method, step.URL, nil)
+	if err != nil {
+		return 0, 0, ""
+	}
+	start := time.Now()
+	resp, err := client.Do(req)
+	latencyMs = float64(time.Since(start).Milliseconds())
+	if err != nil {
+		return 0, latencyMs, ""
+	}
+	defer resp.Body.Close()
+	if step.Assert.BodyContains != "" {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxProbeBodyBytes))
+		body = string(b)
+	} else {
+		// Drain a little so the connection can be reused, without buffering it all.
+		io.Copy(io.Discard, io.LimitReader(resp.Body, maxProbeBodyBytes))
+	}
+	return resp.StatusCode, latencyMs, body
+}
+
+// pageOnTransition emits an ERROR log (→ alert → incident → notification) only
+// when a check flips from healthy to failing, so a persistently-down check pages
+// once rather than every 10s poll. A recovery clears the remembered state.
+func (h *SyntheticsHandler) pageOnTransition(tenantID, checkName, failure string) {
+	key := tenantID + "\x00" + checkName
+	if failure == "" {
+		delete(h.lastFailed, key) // recovered (or healthy) — reset the edge
+		return
+	}
+	if h.lastFailed[key] {
+		return // already paged for this outage
+	}
+	h.lastFailed[key] = true
+
+	if h.alerts == nil {
+		return
+	}
+	entry := &models.LogEntry{
+		ID:          uuid.NewString(),
+		TenantID:    tenantID,
+		ServiceName: "synthetic:" + checkName,
+		Level:       models.LogLevelError,
+		Message:     fmt.Sprintf("Synthetic check %q failed: %s", checkName, failure),
+		Timestamp:   time.Now().UTC(),
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := h.alerts.PublishBatch(context.Background(), "logs", []*models.LogEntry{entry}); err != nil {
+		log.Printf("[SyntheticsWorker] failed to publish failure alert for %q: %v", checkName, err)
+	}
+}
+
+// stepLabel is the step's name, falling back to its URL.
+func stepLabel(s CheckStep) string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return s.URL
 }
 
 func (h *SyntheticsHandler) flushResults(results []SyntheticResult) {
@@ -182,17 +381,19 @@ func (h *SyntheticsHandler) flushResults(results []SyntheticResult) {
 	}
 
 	var insertQuery bytes.Buffer
-	insertQuery.WriteString("INSERT INTO pulsetrace.synthetic_results (Timestamp, TenantID, URL, StatusCode, LatencyMs, Success) FORMAT JSONEachRow\n")
+	insertQuery.WriteString("INSERT INTO pulsetrace.synthetic_results (Timestamp, TenantID, CheckName, URL, StatusCode, LatencyMs, Success, FailureReason) FORMAT JSONEachRow\n")
 
 	for _, res := range results {
 		// Convert time to string for CH JSONEachRow
 		type chResult struct {
-			Timestamp  string  `json:"Timestamp"`
-			TenantID   string  `json:"TenantID"`
-			URL        string  `json:"URL"`
-			StatusCode int     `json:"StatusCode"`
-			LatencyMs  float64 `json:"LatencyMs"`
-			Success    uint8   `json:"Success"`
+			Timestamp     string  `json:"Timestamp"`
+			TenantID      string  `json:"TenantID"`
+			CheckName     string  `json:"CheckName"`
+			URL           string  `json:"URL"`
+			StatusCode    int     `json:"StatusCode"`
+			LatencyMs     float64 `json:"LatencyMs"`
+			Success       uint8   `json:"Success"`
+			FailureReason string  `json:"FailureReason"`
 		}
 
 		succ := uint8(0)
@@ -206,12 +407,14 @@ func (h *SyntheticsHandler) flushResults(results []SyntheticResult) {
 		}
 
 		ch := chResult{
-			Timestamp:  res.Timestamp.Format("2006-01-02 15:04:05.000"),
-			TenantID:   tenantID,
-			URL:        res.URL,
-			StatusCode: res.StatusCode,
-			LatencyMs:  res.LatencyMs,
-			Success:    succ,
+			Timestamp:     res.Timestamp.Format("2006-01-02 15:04:05.000"),
+			TenantID:      tenantID,
+			CheckName:     res.CheckName,
+			URL:           res.URL,
+			StatusCode:    res.StatusCode,
+			LatencyMs:     res.LatencyMs,
+			Success:       succ,
+			FailureReason: res.FailureReason,
 		}
 
 		b, _ := json.Marshal(ch)
@@ -250,9 +453,11 @@ func (h *SyntheticsHandler) GetResults(w http.ResponseWriter, r *http.Request) {
 	query := `
 		SELECT
 			URL,
+			any(CheckName) as check_name,
 			avg(LatencyMs) as avg_latency_ms,
 			avg(Success) * 100 as uptime_percent,
-			groupArray(LatencyMs) as latency_history
+			groupArray(LatencyMs) as latency_history,
+			argMax(FailureReason, Timestamp) as last_failure
 		FROM pulsetrace.synthetic_results
 		WHERE TenantID = {tenant:String} AND Timestamp >= now() - INTERVAL 1 HOUR
 		GROUP BY URL
@@ -341,23 +546,44 @@ func resolvesToPrivate(host string) bool {
 	return false
 }
 
-// CreateTarget registers a new synthetic endpoint
+// CreateTarget registers a synthetic check. It accepts either the legacy shape
+// (`{"url": "..."}` — a single GET expecting 2xx) or a multi-step check
+// (`{"name": "...", "steps": [{method,url,assert},...]}`). Both persist into
+// synthetic_targets; a multi-step check stores its JSONB spec and uses the first
+// step's URL as the row's url (satisfying the UNIQUE(tenant,url) key and keeping
+// delete-by-url working).
 func (h *SyntheticsHandler) CreateTarget(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		URL string `json:"url"`
+		URL   string      `json:"url"`
+		Name  string      `json:"name"`
+		Steps []CheckStep `json:"steps"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.URL == "" {
-		http.Error(w, "invalid JSON or missing url", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	if err := validateProbeURL(payload.URL); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	// Normalise into steps. Legacy single-url payloads become a one-step check.
+	steps := payload.Steps
+	if len(steps) == 0 {
+		if payload.URL == "" {
+			http.Error(w, "provide either a url or a non-empty steps array", http.StatusBadRequest)
+			return
+		}
+		steps = []CheckStep{{Method: http.MethodGet, URL: payload.URL}}
 	}
-	if u, _ := url.Parse(strings.TrimSpace(payload.URL)); u != nil && resolvesToPrivate(u.Hostname()) {
-		http.Error(w, "host resolves to a private or loopback address", http.StatusBadRequest)
-		return
+
+	// Validate every step URL against SSRF before persisting.
+	for i := range steps {
+		steps[i].URL = strings.TrimSpace(steps[i].URL)
+		if err := validateProbeURL(steps[i].URL); err != nil {
+			http.Error(w, fmt.Sprintf("step %d: %v", i+1, err), http.StatusBadRequest)
+			return
+		}
+		if u, _ := url.Parse(steps[i].URL); u != nil && resolvesToPrivate(u.Hostname()) {
+			http.Error(w, fmt.Sprintf("step %d host resolves to a private or loopback address", i+1), http.StatusBadRequest)
+			return
+		}
 	}
 
 	if h.DB == nil {
@@ -370,7 +596,26 @@ func (h *SyntheticsHandler) CreateTarget(w http.ResponseWriter, r *http.Request)
 		tenantID = "default"
 	}
 
-	_, err := h.DB.Exec("INSERT INTO synthetic_targets (tenant_id, url) VALUES ($1, $2) ON CONFLICT (tenant_id, url) DO NOTHING", tenantID, payload.URL)
+	name := strings.TrimSpace(payload.Name)
+	rowURL := steps[0].URL
+
+	// A single default GET step is stored spec-less (legacy row); anything richer
+	// (multiple steps or any assertion) persists its spec.
+	var specJSON interface{}
+	if len(steps) > 1 || steps[0].Assert != (Assertion{}) || steps[0].Method != http.MethodGet || name != "" {
+		b, err := json.Marshal(CheckSpec{Steps: steps})
+		if err != nil {
+			http.Error(w, "failed to encode check spec", http.StatusInternalServerError)
+			return
+		}
+		specJSON = string(b)
+	}
+
+	_, err := h.DB.Exec(
+		`INSERT INTO synthetic_targets (tenant_id, url, name, spec) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (tenant_id, url) DO UPDATE SET name = EXCLUDED.name, spec = EXCLUDED.spec`,
+		tenantID, rowURL, name, specJSON,
+	)
 	if err != nil {
 		log.Printf("[SyntheticsHandler] Failed to insert target: %v", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -379,6 +624,54 @@ func (h *SyntheticsHandler) CreateTarget(w http.ResponseWriter, r *http.Request)
 
 	w.WriteHeader(http.StatusCreated)
 	io.WriteString(w, `{"status":"ok"}`)
+}
+
+// ListTargets returns the configured checks for the caller's tenant so the UI
+// can render the check list and step editor. Scoped to the tenant.
+//
+//	GET /api/v1/synthetics/tests
+func (h *SyntheticsHandler) ListTargets(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if h.DB == nil {
+		io.WriteString(w, `{"data": []}`)
+		return
+	}
+	tenantID := r.Header.Get("X-Tenant-ID")
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	rows, err := h.DB.Query("SELECT COALESCE(name,''), url, spec FROM synthetic_targets WHERE tenant_id = $1 ORDER BY url", tenantID)
+	if err != nil {
+		http.Error(w, "failed to list checks", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type checkOut struct {
+		Name  string      `json:"name"`
+		URL   string      `json:"url"`
+		Steps []CheckStep `json:"steps"`
+	}
+	out := []checkOut{}
+	for rows.Next() {
+		var c checkOut
+		var specJSON sql.NullString
+		if err := rows.Scan(&c.Name, &c.URL, &specJSON); err != nil {
+			continue
+		}
+		if specJSON.Valid && strings.TrimSpace(specJSON.String) != "" {
+			var spec CheckSpec
+			if err := json.Unmarshal([]byte(specJSON.String), &spec); err == nil {
+				c.Steps = spec.Steps
+			}
+		}
+		if len(c.Steps) == 0 {
+			c.Steps = []CheckStep{{Method: http.MethodGet, URL: c.URL}}
+		}
+		out = append(out, c)
+	}
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": out})
 }
 
 // DeleteTarget removes a synthetic endpoint for the caller's tenant.

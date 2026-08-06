@@ -220,7 +220,16 @@ async function seedSynthetics(token) {
   for (const url of ['https://api.acme.io/health', 'https://api.acme.io/v1/checkout', 'https://gateway.acme.io/status', 'https://api.acme.io/v1/catalog']) {
     if (await authed(token, '/api/v1/synthetics/tests', { url }) < 300) ok++;
   }
-  console.log(`  synthetics: ${ok} targets registered`);
+  // A multi-step check with assertions (status / latency SLA / body-contains)
+  // that pages on failure — exercises the full F10 capability.
+  if (await authed(token, '/api/v1/synthetics/tests', {
+    name: 'Checkout journey',
+    steps: [
+      { method: 'GET', url: 'https://api.acme.io/health', assert: { status: 200, max_latency_ms: 2000 } },
+      { method: 'GET', url: 'https://api.acme.io/v1/catalog', assert: { max_latency_ms: 3000, body_contains: 'products' } },
+    ],
+  }) < 300) ok++;
+  console.log(`  synthetics: ${ok} checks registered (incl. 1 multi-step)`);
 }
 
 async function seedCatalog(token) {

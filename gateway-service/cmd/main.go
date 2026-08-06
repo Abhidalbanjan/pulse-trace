@@ -118,7 +118,8 @@ func main() {
 	rateLimitRuleHandler.StartPolling(ctx, 5*time.Second)
 	rumHandler := handler.NewRUMHandler(clickhouseURL, usageMeter)
 	syntheticsHandler := handler.NewSyntheticsHandler(clickhouseURL, authHandler.GetDB())
-	syntheticsHandler.StartWorker()
+	// StartWorker is deferred until after the Kafka log producer is available, so
+	// the worker can be wired with the failure→alert publisher (see below).
 
 	// ── Routes ────────────────────────────────────────────────────────────────
 	logServiceURL := getEnv("LOG_SERVICE_URL", "http://localhost:8081")
@@ -307,6 +308,7 @@ func main() {
 
 	// Synthetics API
 	mux.HandleFunc("GET /api/v1/synthetics/results", syntheticsHandler.GetResults)
+	mux.HandleFunc("GET /api/v1/synthetics/tests", syntheticsHandler.ListTargets)
 	mux.HandleFunc("POST /api/v1/synthetics/tests", syntheticsHandler.CreateTarget)
 	mux.HandleFunc("DELETE /api/v1/synthetics/tests", syntheticsHandler.DeleteTarget)
 
@@ -381,6 +383,9 @@ func main() {
 	// rather than blocking gateway boot on the optional migration feature.
 	if logProducer, err := kafka.NewProducer(); err != nil {
 		log.Printf("WARNING: log publishing to Quickwit disabled (kafka unavailable); migration + OTLP logs fall back to ClickHouse otel_logs: %v", err)
+		// No Kafka: the synthetics worker still probes and records results, it just
+		// can't page on failure.
+		syntheticsHandler.StartWorker()
 	} else {
 		defer logProducer.Close()
 		migrationProxy.SetLogSink(logProducer, usageMeter.Record, quotaEnforcer.Allow)
@@ -392,6 +397,9 @@ func main() {
 		otlpReceiver.SetLogSink(logBridge.Publish)
 		otlpHTTP.SetLogSink(logBridge.Publish)
 		log.Printf("logs (migration + OTLP-native) → Kafka topic 'logs' → Quickwit (log explorer)")
+		// Wire the synthetics failure→alert path onto the same logs topic, then
+		// start the worker (wiring before start avoids racing the first poll).
+		syntheticsHandler.WithAlertPublisher(logProducer).StartWorker()
 	}
 	migrationProxy.RegisterRoutes(mux)
 	// Optional TLS/mTLS for the OTLP/gRPC listener, so the per-tenant ingestion

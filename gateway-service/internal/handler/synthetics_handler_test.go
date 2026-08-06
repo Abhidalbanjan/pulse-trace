@@ -1,6 +1,62 @@
 package handler
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestEvaluateAssertion_DefaultRequires2xx(t *testing.T) {
+	// Zero-value assertion = "any 2xx".
+	if ok, _ := evaluateAssertion(200, 10, "", Assertion{}); !ok {
+		t.Error("200 should pass the default 2xx assertion")
+	}
+	if ok, reason := evaluateAssertion(500, 10, "", Assertion{}); ok || !strings.Contains(reason, "2xx") {
+		t.Errorf("500 should fail the default assertion, got ok=%v reason=%q", ok, reason)
+	}
+	if ok, reason := evaluateAssertion(0, 0, "", Assertion{}); ok || !strings.Contains(reason, "no response") {
+		t.Errorf("a network failure (status 0) must fail, got ok=%v reason=%q", ok, reason)
+	}
+}
+
+func TestEvaluateAssertion_ExactStatus(t *testing.T) {
+	a := Assertion{Status: 404}
+	if ok, _ := evaluateAssertion(404, 10, "", a); !ok {
+		t.Error("an explicit 404 expectation should pass on a 404 (e.g. a delete-then-verify check)")
+	}
+	if ok, reason := evaluateAssertion(200, 10, "", a); ok || !strings.Contains(reason, "expected status 404") {
+		t.Errorf("200 should fail a status=404 assertion, got ok=%v reason=%q", ok, reason)
+	}
+}
+
+func TestEvaluateAssertion_MaxLatency(t *testing.T) {
+	a := Assertion{MaxLatencyMs: 500}
+	if ok, _ := evaluateAssertion(200, 499, "", a); !ok {
+		t.Error("latency under the SLA should pass")
+	}
+	if ok, reason := evaluateAssertion(200, 501, "", a); ok || !strings.Contains(reason, "SLA") {
+		t.Errorf("latency over the SLA should fail, got ok=%v reason=%q", ok, reason)
+	}
+}
+
+func TestEvaluateAssertion_BodyContains(t *testing.T) {
+	a := Assertion{BodyContains: `"status":"ok"`}
+	if ok, _ := evaluateAssertion(200, 10, `{"status":"ok"}`, a); !ok {
+		t.Error("a body containing the substring should pass")
+	}
+	if ok, reason := evaluateAssertion(200, 10, `{"status":"degraded"}`, a); ok || !strings.Contains(reason, "did not contain") {
+		t.Errorf("a body missing the substring should fail, got ok=%v reason=%q", ok, reason)
+	}
+}
+
+func TestEvaluateAssertion_StatusCheckedBeforeLatency(t *testing.T) {
+	// A 500 that is also slow should report the status problem (the root cause),
+	// not the latency — status is checked first.
+	a := Assertion{MaxLatencyMs: 10}
+	ok, reason := evaluateAssertion(500, 9999, "", a)
+	if ok || !strings.Contains(reason, "2xx") {
+		t.Errorf("expected the status failure to be reported first, got ok=%v reason=%q", ok, reason)
+	}
+}
 
 func TestValidateProbeURL(t *testing.T) {
 	cases := []struct {

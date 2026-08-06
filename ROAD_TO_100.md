@@ -176,10 +176,14 @@ RUM had point-in-time web-vitals cards + a recent-errors table (error→trace al
 - ↪ Deferred (depth): **geo** enrichment (needs client-IP capture + a geo DB — honest limitation, not shipped as an empty control), sampling controls, a versioned browser SDK, and per-session event-timeline drill-in.
 - **DoD:** RUM tells a time-series + session story from the UI; R1–R3/R5/R7 met.
 
-### F10 — Synthetics · 68→**100** BE, 66→**100** UI · effort M
-- **Backend:** multi-step/browser checks, richer assertions, multi-region probing, failure→alert wiring.
-- **Frontend:** step editor, assertion builder, latency-trend charts, per-test alert config.
-- **DoD:** a user builds a multi-step check that pages on failure.
+### F10 — Synthetics · 68→**100** BE, 66→**100** UI · effort M · ✅ multi-step + assertions + paging delivered
+The prober was single-URL / 2xx-only with no alerting. This slice makes it a real synthetic-check product.
+- ✅ **Multi-step checks + assertions** ([`synthetics_handler.go`](gateway-service/internal/handler/synthetics_handler.go)): a check is now an ordered list of steps (method + URL), each with an **assertion** — expected status, max-latency SLA, and body-contains. The worker runs steps sequentially and **stops at the first failing step** (later steps depend on earlier ones). Assertions are evaluated by a pure `evaluateAssertion` (status-before-latency-before-body). Persisted as a JSONB `spec` on `synthetic_targets`; legacy single-URL rows still run as a one-step 2xx GET (fully backward-compatible). Every step URL is SSRF-validated before persistence and again before probing.
+- ✅ **failure→alert wiring** ([`main.go`](gateway-service/cmd/main.go)): on a healthy→failing transition the worker emits an **ERROR log onto the `logs` Kafka topic**, which flows through the existing logs→alert→correlation→notification pipeline — a failed check pages on-call exactly like an application error, with **no parallel alert path**. Paging is **edge-triggered** (once per outage, not every 10s poll), and recovery re-arms it.
+- ✅ **Frontend** ([`SyntheticsView.tsx`](frontend/src/components/Synthetics/SyntheticsView.tsx)): a **step editor + assertion builder** (add/remove steps, per-step method/URL/status/latency/body-contains), a **latency-trend sparkline** and **last-failure reason** per endpoint, and a new `GET /api/v1/synthetics/tests` listing so a just-created check shows before its first probe.
+- ✅ **Tests:** Go unit ([`synthetics_handler_test.go`](gateway-service/internal/handler/synthetics_handler_test.go)) — `evaluateAssertion` across default-2xx/exact-status/latency-SLA/body-contains + the status-before-latency ordering, alongside the existing exhaustive SSRF suite. Playwright (`synthetics.spec`) — the seeded multi-step check lists, and the builder assembles a 2-step check with assertions. The **seed now creates a multi-step "Checkout journey" check** with assertions.
+- ↪ Deferred (honest depth): multi-region probing (needs probe infra in multiple regions) and browser-based/scripted checks (needs a headless-browser runner) — the step+assertion+paging substrate is in place for both.
+- **DoD:** a user builds a multi-step check with assertions that pages on failure; R1–R3/R5/R7 met.
 
 ### F11 — Error tracking · 62→**100** BE, 64→**100** UI · effort M
 - **Backend:** source-map de-minification, release/regression tracking, alert-on-new-group.
@@ -250,7 +254,7 @@ Ordered for maximum leverage and to keep BE/UI in lockstep.
 | --- | --- | --- | --- |
 | **1** ✅ | Foundations | F0.1 parity gate, F0.4 FE platform, F0.2 load harness, F0.3 isolation, F0.5 eval harness | ✅ **All five delivered.** Parity CI green; perf harness + baseline; structural tenant isolation (+2 live leaks fixed); typed FE platform; causal-AI eval gate at 90.9%. |
 | **2** ✅ | **Close the parity orphans** | ✅ F4 keys, F1 remediation UI, F2 SLO screen, F19 deletion UI, F17 plan, F18 role edit, Alerts screen, F13 downstream, F6 log permalink | ✅ **Parity gate at 100% — 0 registry orphans; every backend route has a UI (R2 = 100%).** Note: F3 channels & F14 anomaly config have **no backend endpoints** (env/engine-only) so they are not parity orphans — reclassified to Wave 3 (need backend built first). F16 usage already consumed. F5 deploy-gates: **wired** (real feed + persistence + HMAC webhook). |
-| **3** 🔄 | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. **In progress:** ✅ F6 logs (context view + shareable searches), ✅ F7 traces (bidirectional trace↔logs pivot), ✅ F8 metrics (query functions + unit-aware charts), ✅ F9 RUM (web-vitals trends + sessions + device breakdown). |
+| **3** 🔄 | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. **In progress:** ✅ F6 logs (context view + shareable searches), ✅ F7 traces (bidirectional trace↔logs pivot), ✅ F8 metrics (query functions + unit-aware charts), ✅ F9 RUM (web-vitals trends + sessions + device breakdown), ✅ F10 synthetics (multi-step checks + assertions + failure paging). |
 | **4** | Revenue & enterprise | F17 billing, F18 SSO/MFA/policy UX, F20 audit, F21 infra/DR | Self-serve money path + enterprise procurement bar met. |
 
 **Guiding gate between waves:** Wave 2 cannot be declared done while any row in the

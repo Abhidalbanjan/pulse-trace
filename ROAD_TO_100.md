@@ -168,10 +168,13 @@ The native OTLP metrics pillar (ClickHouse-backed catalog + per-service multi-se
 - ↪ Deferred (depth): saveable dashboards, alert-from-chart, and histogram/summary percentile math (bucket-aware, its own endpoint).
 - **DoD:** metrics is a first-class explorable pillar with real aggregation functions and unit-aware charts, not single-series avg; R1–R3/R5/R7 met.
 
-### F9 — RUM · 70→**100** BE, 62→**100** UI · effort M
-- **Backend:** sampling controls, session stitching, geo/device enrichment; versioned browser SDK.
-- **Frontend:** **trend charts** (not point-in-time cards), session detail, geo/device breakdowns, error→trace correlation.
-- **DoD:** RUM tells a time-series + session story; public-token rotation (F4) surfaced.
+### F9 — RUM · 70→**100** BE, 62→**100** UI · effort M · ✅ time-series + session story delivered
+RUM had point-in-time web-vitals cards + a recent-errors table (error→trace already wired) but no time-series and no session story. This slice adds both.
+- ✅ **Backend** ([`rum_handler.go`](gateway-service/internal/handler/rum_handler.go)): three tenant-scoped read endpoints — `GET /api/v1/rum/trends` (time-bucketed **p75 web-vital trends**, reusing the metric pillar's shared bucketing), `GET /api/v1/rum/sessions` (**session stitching**: one row per visit with entry path, page-view/error counts, duration, and a parsed device label), `GET /api/v1/rum/devices` (**device/browser/OS breakdown**). User-Agent parsing is a single pure `classifyUserAgent` used by both sessions and the breakdown. Ingest now honours a client-supplied event `timestamp` (RUM is inherently client-timed), enabling real trends.
+- ✅ **Frontend** ([`RUMView.tsx`](frontend/src/components/RUM/RUMView.tsx)): a **Web Vitals Trend** line chart (per-vital p75 over time, not a single card), a **device/browser/OS breakdown** with share bars, a **User Sessions** table, and the previously-dead time-range selector now re-scopes the windowed panels. error→trace correlation and ingestion-key rotation (F4) were already surfaced.
+- ✅ **Tests:** Go unit ([`rum_handler_test.go`](gateway-service/internal/handler/rum_handler_test.go)) — `classifyUserAgent` across Chrome/Safari/Edge/Firefox × Windows/iOS/Android/macOS × desktop/mobile/tablet (incl. the Edge-embeds-Chrome and iPad-is-tablet traps) + deterministic `sortedBreakdown` ordering. Playwright (`rum.spec`) — trend/breakdown/session sections render, time-range switch re-scopes. The **seed now emits RUM** (10 sessions of page-views/vitals/errors across 6 UAs, timestamped over ~6h) so the pillar renders end-to-end.
+- ↪ Deferred (depth): **geo** enrichment (needs client-IP capture + a geo DB — honest limitation, not shipped as an empty control), sampling controls, a versioned browser SDK, and per-session event-timeline drill-in.
+- **DoD:** RUM tells a time-series + session story from the UI; R1–R3/R5/R7 met.
 
 ### F10 — Synthetics · 68→**100** BE, 66→**100** UI · effort M
 - **Backend:** multi-step/browser checks, richer assertions, multi-region probing, failure→alert wiring.
@@ -247,7 +250,7 @@ Ordered for maximum leverage and to keep BE/UI in lockstep.
 | --- | --- | --- | --- |
 | **1** ✅ | Foundations | F0.1 parity gate, F0.4 FE platform, F0.2 load harness, F0.3 isolation, F0.5 eval harness | ✅ **All five delivered.** Parity CI green; perf harness + baseline; structural tenant isolation (+2 live leaks fixed); typed FE platform; causal-AI eval gate at 90.9%. |
 | **2** ✅ | **Close the parity orphans** | ✅ F4 keys, F1 remediation UI, F2 SLO screen, F19 deletion UI, F17 plan, F18 role edit, Alerts screen, F13 downstream, F6 log permalink | ✅ **Parity gate at 100% — 0 registry orphans; every backend route has a UI (R2 = 100%).** Note: F3 channels & F14 anomaly config have **no backend endpoints** (env/engine-only) so they are not parity orphans — reclassified to Wave 3 (need backend built first). F16 usage already consumed. F5 deploy-gates: **wired** (real feed + persistence + HMAC webhook). |
-| **3** 🔄 | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. **In progress:** ✅ F6 logs (context view + shareable searches), ✅ F7 traces (bidirectional trace↔logs pivot), ✅ F8 metrics (query functions + unit-aware charts). |
+| **3** 🔄 | Pillar depth | F6–F13 (logs/traces/metrics/RUM/synthetics/errors/profiling/topology), F15 causal narrative | Pillars competitive; scale-validated. **In progress:** ✅ F6 logs (context view + shareable searches), ✅ F7 traces (bidirectional trace↔logs pivot), ✅ F8 metrics (query functions + unit-aware charts), ✅ F9 RUM (web-vitals trends + sessions + device breakdown). |
 | **4** | Revenue & enterprise | F17 billing, F18 SSO/MFA/policy UX, F20 audit, F21 infra/DR | Self-serve money path + enterprise procurement bar met. |
 
 **Guiding gate between waves:** Wave 2 cannot be declared done while any row in the

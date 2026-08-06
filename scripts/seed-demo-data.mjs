@@ -159,6 +159,52 @@ async function seedMetrics() {
   console.log(`  metrics: sent ${n} services via OTLP (gauge + counter + bytes)`);
 }
 
+// A spread of real-world User-Agents so the device/browser/OS breakdown and
+// per-session device labels have variety to classify.
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0',
+  'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36 Edg/120.0',
+  'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/604.1',
+];
+const RUM_PATHS = ['/', '/checkout', '/catalog', '/cart', '/account'];
+
+// seedRUM emits browser telemetry (page views, Core Web Vitals, occasional JS
+// errors) across several sessions, timestamped over the last ~6h so the Web
+// Vitals trend renders a real slope rather than a single spike.
+async function seedRUM(token) {
+  const now = Date.now();
+  let sessions = 0, events = 0;
+  for (let s = 0; s < 10; s++) {
+    const sessionId = randHex(16);
+    const ua = pick(USER_AGENTS);
+    const entry = pick(RUM_PATHS);
+    // Spread this session's events across a random recent point in the window.
+    const base = now - Math.floor(Math.random() * 6 * 3600 * 1000);
+    const batch = [];
+    const ev = (type, extra) => ({ session_id: sessionId, type, path: extra.path || entry, user_agent: ua, timestamp: base + (batch.length * 1500), ...extra });
+    batch.push(ev('page_view', {}));
+    batch.push(ev('web_vitals', { metric_name: 'LCP', metric_value: 1600 + Math.random() * 2200 }));
+    batch.push(ev('web_vitals', { metric_name: 'CLS', metric_value: +(0.02 + Math.random() * 0.18).toFixed(3) }));
+    batch.push(ev('web_vitals', { metric_name: 'FID', metric_value: 15 + Math.random() * 140 }));
+    // ~1 in 3 sessions also visits a second page.
+    if (Math.random() < 0.34) {
+      const p2 = pick(RUM_PATHS);
+      batch.push(ev('page_view', { path: p2 }));
+      batch.push(ev('web_vitals', { metric_name: 'LCP', metric_value: 1600 + Math.random() * 2600, path: p2 }));
+    }
+    // ~1 in 4 sessions hits a JS error, correlatable to a backend trace.
+    if (Math.random() < 0.25) {
+      batch.push(ev('error', { error_msg: pick(['TypeError: cannot read properties of undefined', 'NetworkError: failed to fetch', 'Unhandled promise rejection']), error_stack: 'at checkout (app.js:214)', trace_id: randHex(32) }));
+    }
+    await authed(token, '/api/v1/rum/ingest', batch);
+    sessions++; events += batch.length;
+  }
+  console.log(`  rum: sent ${events} events across ${sessions} sessions`);
+}
+
 async function seedDeployments(token) {
   let ok = 0;
   for (const svc of ['cart-service', 'payment-service', 'gateway-service']) {
@@ -220,6 +266,7 @@ async function main() {
   await seedLogs();
   await seedTraces();
   await seedMetrics();
+  await seedRUM(token);
   await seedDeployments(token);
   await seedSynthetics(token);
   await seedCatalog(token);

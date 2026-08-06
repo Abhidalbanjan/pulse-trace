@@ -3,10 +3,14 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pulsetrace/shared/metering"
@@ -28,6 +32,11 @@ type RUMEvent struct {
 	ErrorStack  string  `json:"error_stack,omitempty"`
 	TraceID     string  `json:"trace_id,omitempty"` // W3C trace id shared with backend API calls made during this page view
 	SpanID      string  `json:"span_id,omitempty"`
+	// Timestamp is the client-side event time in epoch milliseconds. RUM is
+	// inherently client-timed (the user's browser is the source of truth for when
+	// a page view / vital / error happened), so when the SDK supplies it we honour
+	// it; when absent the row falls back to the table's server-side now() default.
+	Timestamp int64 `json:"timestamp,omitempty"`
 }
 
 func NewRUMHandler(clickhouseURL string, meter *metering.Meter) *RUMHandler {
@@ -122,10 +131,10 @@ func (h *RUMHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 	// column names so JSONEachRow maps them correctly (and the tenant is stamped
 	// onto every row).
 	var insertQuery bytes.Buffer
-	insertQuery.WriteString("INSERT INTO pulsetrace.rum_events (TenantID, SessionID, Type, Path, UserAgent, MetricName, MetricValue, ErrorMsg, ErrorStack, TraceID, SpanID) FORMAT JSONEachRow\n")
+	insertQuery.WriteString("INSERT INTO pulsetrace.rum_events (TenantID, SessionID, Type, Path, UserAgent, MetricName, MetricValue, ErrorMsg, ErrorStack, TraceID, SpanID, Timestamp) FORMAT JSONEachRow\n")
 
 	for _, ev := range events {
-		b, _ := json.Marshal(map[string]interface{}{
+		row := map[string]interface{}{
 			"TenantID":    tenantID,
 			"SessionID":   ev.SessionID,
 			"Type":        ev.Type,
@@ -137,7 +146,14 @@ func (h *RUMHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 			"ErrorStack":  ev.ErrorStack,
 			"TraceID":     ev.TraceID,
 			"SpanID":      ev.SpanID,
-		})
+		}
+		// Honour a client-supplied event time; otherwise omit the column so the
+		// table's now() DEFAULT applies. ClickHouse DateTime64(3) parses this
+		// "YYYY-MM-DD hh:mm:ss.mmm" UTC form directly via JSONEachRow.
+		if ev.Timestamp > 0 {
+			row["Timestamp"] = time.UnixMilli(ev.Timestamp).UTC().Format("2006-01-02 15:04:05.000")
+		}
+		b, _ := json.Marshal(row)
 		insertQuery.Write(b)
 		insertQuery.WriteString("\n")
 	}
@@ -217,6 +233,239 @@ func (h *RUMHandler) GetAnalytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	io.Copy(w, resp.Body)
+}
+
+// rumInterval resolves the interval query param to a (SQL interval, bucket
+// expression) pair, defaulting to 24h. It reuses the metric pillar's shared
+// bucketing so RUM trends bucket exactly like every other time series.
+func rumInterval(r *http.Request) (sqlInterval, bucketExpr string) {
+	interval := r.URL.Query().Get("interval")
+	if _, ok := intervalToSQL[interval]; !ok {
+		interval = "24h"
+	}
+	return intervalToSQL[interval], metricIntervalToBucket[interval]
+}
+
+// GetTrends returns time-bucketed p75 web-vital values so the UI can render
+// trend lines instead of a single point-in-time number — the difference between
+// "LCP is 2.4s" and "LCP has been climbing all afternoon". Scoped to the tenant.
+//
+//	GET /api/v1/rum/trends?interval=24h|7d
+func (h *RUMHandler) GetTrends(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	sqlInterval, bucketExpr := rumInterval(r)
+
+	query := fmt.Sprintf(`
+		SELECT
+			%s as time_bucket,
+			MetricName as metric,
+			quantile(0.75)(MetricValue) as p75,
+			count() as count
+		FROM pulsetrace.rum_events
+		WHERE TenantID = {tenant:String} AND Type = 'web_vitals' AND Timestamp >= now() - INTERVAL %s
+		GROUP BY time_bucket, metric
+		ORDER BY time_bucket ASC
+		FORMAT JSON
+	`, bucketExpr, sqlInterval)
+
+	resp, err := h.tenantQuery(r, query)
+	if err != nil {
+		http.Error(w, "failed to query trends", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		io.WriteString(w, `{"data": []}`)
+		return
+	}
+	io.Copy(w, resp.Body)
+}
+
+// GetSessions returns recent user sessions stitched from their events: entry
+// path, page-view and error counts, duration, and device. This is the "session
+// story" — one row per real user visit rather than a firehose of events.
+//
+//	GET /api/v1/rum/sessions
+func (h *RUMHandler) GetSessions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	query := `
+		SELECT
+			SessionID as session_id,
+			min(Timestamp) as started_at,
+			max(Timestamp) as last_seen,
+			dateDiff('second', min(Timestamp), max(Timestamp)) as duration_seconds,
+			countIf(Type = 'page_view') as page_views,
+			countIf(Type = 'error') as errors,
+			any(Path) as entry_path,
+			any(UserAgent) as user_agent
+		FROM pulsetrace.rum_events
+		WHERE TenantID = {tenant:String} AND SessionID != '' AND Timestamp >= now() - INTERVAL 24 HOUR
+		GROUP BY session_id
+		ORDER BY last_seen DESC
+		LIMIT 50
+		FORMAT JSON
+	`
+
+	resp, err := h.tenantQuery(r, query)
+	if err != nil {
+		http.Error(w, "failed to query sessions", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		io.WriteString(w, `{"data": []}`)
+		return
+	}
+
+	// Enrich each session with a parsed device/browser label server-side, so the
+	// UA-parsing logic lives in exactly one place (and is unit-tested).
+	var chResult struct {
+		Data []map[string]interface{} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&chResult); err != nil {
+		http.Error(w, "failed to decode sessions", http.StatusInternalServerError)
+		return
+	}
+	for _, row := range chResult.Data {
+		browser, os, device := classifyUserAgent(toStr(row["user_agent"]))
+		row["browser"] = browser
+		row["os"] = os
+		row["device"] = device
+	}
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": chResult.Data})
+}
+
+// GetDevices returns the device / browser / OS breakdown over the window. The
+// User-Agent classification runs server-side (classifyUserAgent) so the same
+// rules produce the sessions' device labels and this breakdown. Scoped to tenant.
+//
+//	GET /api/v1/rum/devices?interval=24h|7d
+func (h *RUMHandler) GetDevices(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	sqlInterval, _ := rumInterval(r)
+
+	query := fmt.Sprintf(`
+		SELECT UserAgent as user_agent, count() as count
+		FROM pulsetrace.rum_events
+		WHERE TenantID = {tenant:String} AND Timestamp >= now() - INTERVAL %s
+		GROUP BY user_agent
+		FORMAT JSON
+	`, sqlInterval)
+
+	resp, err := h.tenantQuery(r, query)
+	if err != nil {
+		http.Error(w, "failed to query devices", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		io.WriteString(w, `{"browsers":[],"os":[],"devices":[]}`)
+		return
+	}
+
+	var chResult struct {
+		Data []struct {
+			UserAgent string `json:"user_agent"`
+			Count     string `json:"count"` // ClickHouse renders UInt64 as a string in FORMAT JSON
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&chResult); err != nil {
+		http.Error(w, "failed to decode devices", http.StatusInternalServerError)
+		return
+	}
+
+	browsers, oses, devices := map[string]int64{}, map[string]int64{}, map[string]int64{}
+	for _, row := range chResult.Data {
+		n, _ := strconv.ParseInt(row.Count, 10, 64)
+		b, o, d := classifyUserAgent(row.UserAgent)
+		browsers[b] += n
+		oses[o] += n
+		devices[d] += n
+	}
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"browsers": sortedBreakdown(browsers),
+		"os":       sortedBreakdown(oses),
+		"devices":  sortedBreakdown(devices),
+	})
+}
+
+// breakdownEntry is one row of a categorical breakdown (e.g. {"Chrome", 128}).
+type breakdownEntry struct {
+	Name  string `json:"name"`
+	Count int64  `json:"count"`
+}
+
+// sortedBreakdown turns a category→count map into a slice ordered by count
+// descending (ties broken by name, so the output is deterministic for tests).
+func sortedBreakdown(m map[string]int64) []breakdownEntry {
+	out := make([]breakdownEntry, 0, len(m))
+	for name, count := range m {
+		out = append(out, breakdownEntry{Name: name, Count: count})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+// classifyUserAgent derives a coarse (browser, os, deviceType) triple from a raw
+// User-Agent string. It intentionally covers the mainstream browsers/OSes that
+// dominate real traffic and buckets everything else as "Other" rather than
+// pretending to a full UA-database's precision — an honest, dependency-free
+// classification good enough to answer "is our tail latency a mobile-Safari
+// problem?". Order matters: Edge/Chrome both contain "Safari"; iPadOS reports as
+// desktop Safari, etc., so the more specific token is checked first.
+func classifyUserAgent(ua string) (browser, os, device string) {
+	if ua == "" {
+		return "Other", "Other", "Other"
+	}
+
+	// Browser — check the more specific tokens before the ones they embed.
+	switch {
+	case strings.Contains(ua, "Edg/") || strings.Contains(ua, "Edge/"):
+		browser = "Edge"
+	case strings.Contains(ua, "OPR/") || strings.Contains(ua, "Opera"):
+		browser = "Opera"
+	case strings.Contains(ua, "Firefox/"):
+		browser = "Firefox"
+	case strings.Contains(ua, "Chrome/") || strings.Contains(ua, "CriOS/"):
+		browser = "Chrome"
+	case strings.Contains(ua, "Safari/"):
+		browser = "Safari"
+	default:
+		browser = "Other"
+	}
+
+	// OS.
+	switch {
+	case strings.Contains(ua, "iPhone") || strings.Contains(ua, "iPad") || strings.Contains(ua, "iPod"):
+		os = "iOS"
+	case strings.Contains(ua, "Android"):
+		os = "Android"
+	case strings.Contains(ua, "Windows"):
+		os = "Windows"
+	case strings.Contains(ua, "Mac OS X") || strings.Contains(ua, "Macintosh"):
+		os = "macOS"
+	case strings.Contains(ua, "Linux"):
+		os = "Linux"
+	default:
+		os = "Other"
+	}
+
+	// Device type.
+	switch {
+	case strings.Contains(ua, "iPad") || strings.Contains(ua, "Tablet"):
+		device = "Tablet"
+	case strings.Contains(ua, "Mobi") || strings.Contains(ua, "iPhone") || strings.Contains(ua, "Android"):
+		device = "Mobile"
+	default:
+		device = "Desktop"
+	}
+	return browser, os, device
 }
 
 // GetErrors queries recent frontend errors, scoped to the caller's tenant.

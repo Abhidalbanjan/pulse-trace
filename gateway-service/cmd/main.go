@@ -301,6 +301,9 @@ func main() {
 	mux.HandleFunc("POST /api/v1/rum/ingest", rumHandler.Ingest)
 	mux.HandleFunc("GET /api/v1/rum/analytics", rumHandler.GetAnalytics)
 	mux.HandleFunc("GET /api/v1/rum/errors", rumHandler.GetErrors)
+	mux.HandleFunc("GET /api/v1/rum/trends", rumHandler.GetTrends)
+	mux.HandleFunc("GET /api/v1/rum/sessions", rumHandler.GetSessions)
+	mux.HandleFunc("GET /api/v1/rum/devices", rumHandler.GetDevices)
 
 	// Synthetics API
 	mux.HandleFunc("GET /api/v1/synthetics/results", syntheticsHandler.GetResults)

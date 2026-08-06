@@ -1,18 +1,33 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { fetchWithAuth } from '@/lib/api';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { useTheme } from '@/context/ThemeContext';
 
 interface RUMMetric { MetricName?: string; Type?: string; p75_value?: number; avg_value?: number; count?: number | string; }
 interface RUMError { timestamp?: string | number; path?: string; error_msg?: string; user_agent?: string; trace_id?: string; }
+interface RUMTrendRow { time_bucket?: string; metric?: string; p75?: number; }
+interface RUMSession { session_id?: string; entry_path?: string; page_views?: number | string; errors?: number | string; duration_seconds?: number | string; last_seen?: string; browser?: string; os?: string; device?: string; }
+interface Breakdown { name: string; count: number }
+interface RUMDevices { browsers: Breakdown[]; os: Breakdown[]; devices: Breakdown[] }
+
+const RANGE_OPTIONS = [
+  { value: '24h', label: 'Last 24 Hours' },
+  { value: '7d', label: 'Last 7 Days' },
+];
+const TREND_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4', '#a855f7'];
 
 export function RUMView() {
   const router = useRouter();
   const { tokens: t } = useTheme();
   const [metrics, setMetrics] = useState<RUMMetric[]>([]);
   const [errors, setErrors] = useState<RUMError[]>([]);
+  const [trends, setTrends] = useState<RUMTrendRow[]>([]);
+  const [sessions, setSessions] = useState<RUMSession[]>([]);
+  const [devices, setDevices] = useState<RUMDevices>({ browsers: [], os: [], devices: [] });
+  const [range, setRange] = useState('24h');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -36,7 +51,40 @@ export function RUMView() {
       })
       .catch(console.error)
       .finally(() => setLoading(false));
+
+    // Sessions are window-independent (last 24h of visits).
+    fetchWithAuth('/api/v1/rum/sessions')
+      .then(res => res.json())
+      .then(data => setSessions(data?.data || []))
+      .catch(console.error);
   }, []);
+
+  // Trends and the device breakdown follow the selected time window.
+  const fetchWindowed = useCallback(() => {
+    fetchWithAuth(`/api/v1/rum/trends?interval=${range}`)
+      .then(res => res.json())
+      .then(data => setTrends(data?.data || []))
+      .catch(console.error);
+    fetchWithAuth(`/api/v1/rum/devices?interval=${range}`)
+      .then(res => res.json())
+      .then(data => setDevices({ browsers: data?.browsers || [], os: data?.os || [], devices: data?.devices || [] }))
+      .catch(console.error);
+  }, [range]);
+
+  useEffect(() => { fetchWindowed(); }, [fetchWindowed]);
+
+  // Reshape flat trend rows ({time_bucket, metric, p75}) into one row per bucket
+  // with a column per metric, which is what recharts' per-<Line> dataKey wants.
+  const trendData = React.useMemo(() => {
+    const byTime = new Map<string, Record<string, string | number>>();
+    for (const r of trends) {
+      const key = r.time_bucket || '';
+      if (!byTime.has(key)) byTime.set(key, { time_bucket: key });
+      if (r.metric) byTime.get(key)![r.metric] = Number(r.p75 ?? 0);
+    }
+    return Array.from(byTime.values()).sort((a, b) => String(a.time_bucket).localeCompare(String(b.time_bucket)));
+  }, [trends]);
+  const trendMetrics = React.useMemo(() => Array.from(new Set(trends.map(r => r.metric).filter(Boolean))) as string[], [trends]);
 
   // Core Web Vitals are rated at the 75th percentile (Google's methodology), so
   // read p75_value — the number the good/needs-improvement/poor thresholds below
@@ -72,6 +120,9 @@ export function RUMView() {
         </div>
         <div style={{ display: 'flex', gap: '12px' }}>
           <select
+            value={range}
+            onChange={(e) => setRange(e.target.value)}
+            aria-label="Time range"
             style={{
               background: t.panelBg,
               border: '1px solid ' + t.panelBorder,
@@ -81,8 +132,7 @@ export function RUMView() {
               fontSize: '13px',
             }}
           >
-            <option>Last 24 Hours</option>
-            <option>Last 7 Days</option>
+            {RANGE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
       </div>
@@ -137,7 +187,7 @@ export function RUMView() {
                 boxShadow: t.shadow,
               }}
             >
-              <h3 style={{ fontSize: '16px', fontWeight: 700, margin: '0 0 20px' }}>User Sessions</h3>
+              <h3 style={{ fontSize: '16px', fontWeight: 700, margin: '0 0 20px' }}>Session Summary</h3>
 
               <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '16px', borderBottom: '1px solid ' + t.panelBorder, marginBottom: '16px' }}>
                 <span style={{ color: t.text2, fontSize: '13.5px' }}>Total Page Views</span>
@@ -149,6 +199,91 @@ export function RUMView() {
                   {errors.length > 0 ? errors.length : 0}
                 </span>
               </div>
+            </div>
+          </div>
+
+          {/* Web Vitals Trend — time series, not a single point-in-time card */}
+          <div style={{ padding: '22px 24px', borderRadius: '20px', background: t.panelBg, border: '1px solid ' + t.panelBorder, backdropFilter: 'blur(30px) saturate(180%)', boxShadow: t.shadow }}>
+            <h3 style={{ fontSize: '16px', fontWeight: 700, margin: '0 0 16px' }}>Web Vitals Trend (p75)</h3>
+            {trendData.length === 0 ? (
+              <div style={{ padding: '32px', textAlign: 'center', color: t.text2, fontSize: '13px' }}>No web-vitals datapoints in this window yet.</div>
+            ) : (
+              <div style={{ height: '260px' }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={trendData} margin={{ top: 5, right: 20, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={t.panelBorder} />
+                    <XAxis dataKey="time_bucket" tick={{ fontSize: 11, fill: t.text2 }} minTickGap={40} />
+                    <YAxis tick={{ fontSize: 11, fill: t.text2 }} width={54} />
+                    <Tooltip contentStyle={{ background: t.panelBg, border: '1px solid ' + t.panelBorder, borderRadius: '8px', fontSize: '12px' }} />
+                    <Legend wrapperStyle={{ fontSize: '12px' }} />
+                    {trendMetrics.map((m, i) => (
+                      <Line key={m} type="monotone" dataKey={m} name={m} stroke={TREND_COLORS[i % TREND_COLORS.length]} strokeWidth={2} dot={false} />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+
+          {/* Device / browser / OS breakdown */}
+          <div style={{ display: 'flex', gap: '18px', flexWrap: 'wrap' }}>
+            {([['Devices', devices.devices], ['Browsers', devices.browsers], ['Operating Systems', devices.os]] as const).map(([title, rows]) => {
+              const total = rows.reduce((a, b) => a + b.count, 0);
+              return (
+                <div key={title} style={{ flex: '1 1 240px', padding: '20px 22px', borderRadius: '20px', background: t.panelBg, border: '1px solid ' + t.panelBorder, backdropFilter: 'blur(30px) saturate(180%)', boxShadow: t.shadow }}>
+                  <h3 style={{ fontSize: '15px', fontWeight: 700, margin: '0 0 14px' }}>{title}</h3>
+                  {rows.length === 0 ? (
+                    <div style={{ color: t.text2, fontSize: '13px' }}>No data yet.</div>
+                  ) : rows.map(row => {
+                    const pct = total > 0 ? Math.round((row.count / total) * 100) : 0;
+                    return (
+                      <div key={row.name} style={{ marginBottom: '10px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12.5px', marginBottom: '4px' }}>
+                          <span style={{ color: t.text1 }}>{row.name}</span>
+                          <span style={{ color: t.text2 }}>{row.count} · {pct}%</span>
+                        </div>
+                        <div style={{ height: '6px', borderRadius: '100px', background: t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)' }}>
+                          <div style={{ width: `${pct}%`, height: '100%', borderRadius: '100px', background: `linear-gradient(90deg, ${t.accent}, ${t.accent2})` }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* User sessions — the session story, one row per real visit */}
+          <div style={{ borderRadius: '20px', overflow: 'hidden', background: t.panelBg, border: '1px solid ' + t.panelBorder, backdropFilter: 'blur(30px) saturate(180%)', boxShadow: t.shadow }}>
+            <div style={{ padding: '22px 24px 6px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 700, margin: 0 }}>User Sessions</h3>
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              {sessions.length === 0 ? (
+                <div style={{ padding: '40px', textAlign: 'center', color: t.text2, fontSize: '13px' }}>No sessions recorded in the last 24h.</div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                  <thead>
+                    <tr>
+                      {['Entry Path', 'Device', 'Page Views', 'Errors', 'Duration', 'Last Seen'].map(h => (
+                        <th key={h} style={{ padding: '14px 24px', fontWeight: 500, color: t.text2, fontSize: '13px', whiteSpace: 'nowrap' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sessions.map((s, i) => (
+                      <tr key={s.session_id || i} style={{ borderTop: '1px solid ' + t.panelBorder }}>
+                        <td style={{ padding: '13px 24px', fontSize: '13px', fontFamily: 'monospace' }}>{s.entry_path || '—'}</td>
+                        <td style={{ padding: '13px 24px', fontSize: '12.5px', color: t.text2 }}>{[s.browser, s.os, s.device].filter(Boolean).join(' · ') || '—'}</td>
+                        <td style={{ padding: '13px 24px', fontSize: '13px' }}>{Number(s.page_views ?? 0)}</td>
+                        <td style={{ padding: '13px 24px', fontSize: '13px', color: Number(s.errors ?? 0) > 0 ? t.red : t.text1, fontWeight: Number(s.errors ?? 0) > 0 ? 600 : 400 }}>{Number(s.errors ?? 0)}</td>
+                        <td style={{ padding: '13px 24px', fontSize: '13px', color: t.text2 }}>{Number(s.duration_seconds ?? 0)}s</td>
+                        <td style={{ padding: '13px 24px', fontSize: '13px', color: t.text2, whiteSpace: 'nowrap' }}>{s.last_seen ? new Date(String(s.last_seen).replace(' ', 'T') + 'Z').toLocaleString() : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
 

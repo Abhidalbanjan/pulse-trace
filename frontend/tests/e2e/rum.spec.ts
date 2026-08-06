@@ -12,4 +12,24 @@ test.describe('Real User Monitoring', () => {
     await page.goto('/rum');
     await expect(page.getByText('Recent JavaScript Errors')).toBeVisible();
   });
+
+  test('renders the web-vitals trend, device breakdown, and session table', async ({ page }) => {
+    await page.goto('/rum');
+    await expect(page.getByRole('heading', { name: 'Web Vitals Trend (p75)' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Browsers' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Operating Systems' })).toBeVisible();
+    // Seeded sessions populate the stitched session table.
+    await expect(page.getByRole('heading', { name: 'User Sessions' })).toBeVisible();
+    await expect(page.getByText('Entry Path')).toBeVisible({ timeout: 10000 });
+  });
+
+  test('time-range selector re-scopes the windowed panels', async ({ page }) => {
+    await page.goto('/rum');
+    const rangeSelect = page.getByLabel('Time range');
+    await expect(rangeSelect).toBeVisible();
+    await rangeSelect.selectOption('7d');
+    await expect(rangeSelect).toHaveValue('7d');
+    // Switching the window must not blank the trend panel heading.
+    await expect(page.getByRole('heading', { name: 'Web Vitals Trend (p75)' })).toBeVisible();
+  });
 });

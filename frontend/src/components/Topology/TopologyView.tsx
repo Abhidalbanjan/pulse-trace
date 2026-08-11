@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { errMessage } from '@/lib/errMessage';
 import dagre from 'dagre';
 import ReactFlow, {
@@ -131,6 +131,11 @@ export function TopologyView() {
   const { tokens: t } = useTheme();
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  // The laid-out graph as loaded, kept separate from the displayed nodes/edges so
+  // filter/focus/search can re-derive the view (opacity, highlight) without
+  // re-fetching or re-running dagre — the key to staying responsive at 100s of nodes.
+  const [baseNodes, setBaseNodes] = useState<Node[]>([]);
+  const [baseEdges, setBaseEdges] = useState<Edge[]>([]);
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
   const [rootCauseResults, setRootCauseResults] = useState<RootCauseResult[] | null>(null);
@@ -138,6 +143,27 @@ export function TopologyView() {
   // Downstream "blast radius": what depends on a clicked service.
   const [impact, setImpact] = useState<{ service: string; downstream: string[] } | null>(null);
   const [impactLoading, setImpactLoading] = useState(false);
+
+  // Large-graph controls (F13): search, single-node focus (dim all but its 1-hop
+  // neighbours), an unhealthy-only filter, and the AI root-cause highlight set.
+  const [search, setSearch] = useState('');
+  const [focusNode, setFocusNode] = useState<string | null>(null);
+  const [onlyUnhealthy, setOnlyUnhealthy] = useState(false);
+  const [highlightIds, setHighlightIds] = useState<Set<string>>(new Set());
+
+  const UNHEALTHY = useMemo(() => new Set(['UNHEALTHY', 'DEGRADED', 'PREDICTIVE_WARNING']), []);
+
+  // Adjacency (both directions) so "focus" and unhealthy-context can include a
+  // node's immediate neighbours.
+  const neighbours = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    const add = (a: string, b: string) => {
+      if (!m.has(a)) m.set(a, new Set());
+      m.get(a)!.add(b);
+    };
+    for (const e of baseEdges) { add(e.source, e.target); add(e.target, e.source); }
+    return m;
+  }, [baseEdges]);
 
   const showDownstreamImpact = useCallback(async (service: string) => {
     setImpact({ service, downstream: [] });
@@ -191,7 +217,10 @@ export function TopologyView() {
             };
           }) : [];
 
-          setNodes(layoutWithDagre(rfNodes, rfEdges));
+          const laidOut = layoutWithDagre(rfNodes, rfEdges);
+          setBaseNodes(laidOut);
+          setBaseEdges(rfEdges);
+          setNodes(laidOut);
           setEdges(rfEdges);
         }
         setLoading(false);
@@ -207,6 +236,51 @@ export function TopologyView() {
     loadTopology();
   }, [loadTopology]);
 
+  // Derive the visible graph from the base graph + the active filters. A node is
+  // "shown" when it clears the unhealthy filter and the focus scope; search dims
+  // (not hides) non-matches so you keep spatial context. Edges fade unless both
+  // endpoints are shown. Positions come from the base layout, so filtering never
+  // re-runs dagre.
+  useEffect(() => {
+    if (baseNodes.length === 0) return;
+    const q = search.trim().toLowerCase();
+
+    const focusScope = (id: string) => !focusNode || id === focusNode || neighbours.get(focusNode)?.has(id);
+    const healthScope = (n: Node) => {
+      if (!onlyUnhealthy) return true;
+      if (UNHEALTHY.has(n.data.state)) return true;
+      // keep a healthy node only if it neighbours an unhealthy one (context).
+      for (const nb of neighbours.get(n.id) || []) {
+        const nbState = baseNodes.find(x => x.id === nb)?.data.state;
+        if (nbState && UNHEALTHY.has(nbState)) return true;
+      }
+      return false;
+    };
+
+    const shown = new Set<string>();
+    const displayNodes = baseNodes.map(n => {
+      const isShown = !!focusScope(n.id) && healthScope(n);
+      const matches = q === '' || n.id.toLowerCase().includes(q);
+      if (isShown) shown.add(n.id);
+      const opacity = !isShown ? 0.1 : (q && !matches ? 0.28 : 1);
+      return {
+        ...n,
+        data: { ...n.data, highlighted: highlightIds.has(n.id) },
+        style: { ...n.style, opacity },
+      };
+    });
+
+    const displayEdges = baseEdges.map(e => {
+      const visible = shown.has(e.source) && shown.has(e.target);
+      const touchesFocus = !focusNode || e.source === focusNode || e.target === focusNode;
+      return { ...e, style: { ...e.style, opacity: visible && touchesFocus ? 1 : 0.08 } };
+    });
+
+    setNodes(displayNodes);
+    setEdges(displayEdges);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, focusNode, onlyUnhealthy, highlightIds, baseNodes, baseEdges, neighbours]);
+
   // Root-cause analysis for every unhealthy/degraded service. Prefers the real
   // causal AI engine (correlation-service's LLM/rule-based analyzer, which already
   // runs asynchronously per-incident with a confidence score and narrative) and
@@ -217,8 +291,8 @@ export function TopologyView() {
     setRootCauseError(null);
     setRootCauseResults(null);
     try {
-      const stateById = new Map(nodes.map(n => [n.id, n.data.state]));
-      const unhealthy = nodes.filter(n => n.data.state === 'UNHEALTHY' || n.data.state === 'DEGRADED');
+      const stateById = new Map(baseNodes.map(n => [n.id, n.data.state]));
+      const unhealthy = baseNodes.filter(n => n.data.state === 'UNHEALTHY' || n.data.state === 'DEGRADED');
 
       if (unhealthy.length === 0) {
         setRootCauseResults([]);
@@ -287,7 +361,7 @@ export function TopologyView() {
       }
 
       setRootCauseResults(results);
-      setNodes(prev => prev.map(n => ({ ...n, data: { ...n.data, highlighted: highlightSet.has(n.id) } })));
+      setHighlightIds(highlightSet);
     } catch (err) {
       setRootCauseError(errMessage(err, 'Root cause analysis failed'));
     } finally {
@@ -317,6 +391,53 @@ export function TopologyView() {
           <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>bolt</span>
           {analyzing ? 'Analyzing…' : 'AI Root Cause'}
         </button>
+      </div>
+
+      {/* Large-graph controls: search, focus reset, unhealthy filter, legend */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: t.panelBg, border: `1px solid ${t.panelBorder}`, borderRadius: '12px', padding: '8px 12px', minWidth: '240px' }}>
+          <span className="material-symbols-outlined" style={{ fontSize: '17px', color: t.text2 }}>search</span>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search services…"
+            aria-label="Search services"
+            style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: t.text1, fontSize: '13px' }}
+          />
+        </div>
+
+        <button
+          onClick={() => setOnlyUnhealthy(v => !v)}
+          style={{
+            padding: '9px 15px', borderRadius: '12px', cursor: 'pointer', fontSize: '13px', fontWeight: 600,
+            border: `1px solid ${onlyUnhealthy ? t.red : t.panelBorder}`,
+            background: onlyUnhealthy ? (t.dark ? 'rgba(241,107,99,0.14)' : 'rgba(224,82,75,0.1)') : 'transparent',
+            color: onlyUnhealthy ? t.red : t.text2,
+          }}
+        >
+          Only unhealthy
+        </button>
+
+        {(focusNode || search || onlyUnhealthy) && (
+          <button
+            onClick={() => { setFocusNode(null); setSearch(''); setOnlyUnhealthy(false); }}
+            style={{ padding: '9px 15px', borderRadius: '12px', cursor: 'pointer', fontSize: '13px', fontWeight: 600, border: `1px solid ${t.panelBorder}`, background: 'transparent', color: t.text2 }}
+          >
+            Reset view{focusNode ? ` · focused on ${focusNode}` : ''}
+          </button>
+        )}
+
+        <div style={{ flex: 1 }} />
+
+        {/* Health overlay legend */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px', fontSize: '12px', color: t.text2 }}>
+          {[['Healthy', t.green], ['Degraded', t.amber], ['Unhealthy', t.red]].map(([label, color]) => (
+            <span key={label as string} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: color as string }} />
+              {label}
+            </span>
+          ))}
+        </div>
       </div>
 
       {rootCauseError && (
@@ -382,7 +503,7 @@ export function TopologyView() {
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
-            onNodeClick={(_, node) => showDownstreamImpact(node.id)}
+            onNodeClick={(_, node) => { setFocusNode(node.id); showDownstreamImpact(node.id); }}
             nodeTypes={nodeTypes}
             fitView
             style={{ background: 'transparent' }}

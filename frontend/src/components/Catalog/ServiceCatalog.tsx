@@ -6,10 +6,13 @@ import { fetchWithAuth } from '@/lib/api';
 import { useTheme } from '@/context/ThemeContext';
 
 interface CatalogNode { id: string; state: string; team?: string; repo?: string; slack?: string; }
+interface SLOInfo { budgetRemainingPct: number; status: string }
 
 export function ServiceCatalog() {
   const { tokens: t } = useTheme();
   const [nodes, setNodes] = useState<CatalogNode[]>([]);
+  const [slos, setSlos] = useState<Map<string, SLOInfo>>(new Map());
+  const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({ service_name: '', team: '', repo: '', slack: '' });
@@ -29,6 +32,21 @@ export function ServiceCatalog() {
         console.error("Failed to fetch topology graph:", err);
         setLoading(false);
       });
+
+    // Enrich the catalog with each service's SLO posture so a scorecard carries
+    // ownership AND reliability, not just metadata.
+    fetchWithAuth('/api/v1/slo/dashboard')
+      .then(res => (res.ok ? res.json() : null))
+      .then(json => {
+        const items = json?.data || [];
+        const m = new Map<string, SLOInfo>();
+        for (const it of items) {
+          const svc = it?.definition?.service_name;
+          if (svc) m.set(svc, { budgetRemainingPct: it.budget_remaining_pct ?? 0, status: it.status || 'unknown' });
+        }
+        setSlos(m);
+      })
+      .catch(() => { /* SLOs are supplementary; a failure leaves the column as “No SLO”. */ });
   };
 
   useEffect(() => {
@@ -57,6 +75,19 @@ export function ServiceCatalog() {
     if (state === 'HEALTHY') return t.green;
     if (state === 'PREDICTIVE_WARNING' || state?.toLowerCase().includes('degrad') || state?.toLowerCase().includes('warn')) return t.amber;
     return t.red;
+  };
+
+  const filtered = nodes.filter(n =>
+    n.id.toLowerCase().includes(search.toLowerCase()) ||
+    (n.team || '').toLowerCase().includes(search.toLowerCase())
+  );
+
+  // SLO scorecard cell: budget-remaining % coloured by objective status.
+  const sloColor = (status: string) => {
+    if (status === 'healthy') return t.green;
+    if (status === 'warning') return t.amber;
+    if (status === 'critical' || status === 'breached') return t.red;
+    return t.text2;
   };
 
   const inputStyle: React.CSSProperties = {
@@ -161,7 +192,10 @@ export function ServiceCatalog() {
         <div style={{ display: 'flex', gap: '12px' }}>
           <input
             type="text"
-            placeholder="Search services..."
+            placeholder="Search services or teams..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search services"
             style={{
               padding: '10px 16px',
               borderRadius: '10px',
@@ -202,6 +236,7 @@ export function ServiceCatalog() {
             <tr style={{ background: t.panelTop, borderBottom: '1px solid ' + t.panelBorder, color: t.text2, fontSize: '13px', textAlign: 'left' }}>
               <th style={{ padding: '16px 24px', fontWeight: 500 }}>Service Name</th>
               <th style={{ padding: '16px 24px', fontWeight: 500 }}>Health</th>
+              <th style={{ padding: '16px 24px', fontWeight: 500 }}>SLO Budget</th>
               <th style={{ padding: '16px 24px', fontWeight: 500 }}>Owning Team</th>
               <th style={{ padding: '16px 24px', fontWeight: 500 }}>Repository</th>
               <th style={{ padding: '16px 24px', fontWeight: 500 }}>Slack Channel</th>
@@ -210,15 +245,16 @@ export function ServiceCatalog() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={5} style={{ padding: '40px', textAlign: 'center', color: t.text2 }}>Loading catalog...</td>
+                <td colSpan={6} style={{ padding: '40px', textAlign: 'center', color: t.text2 }}>Loading catalog...</td>
               </tr>
-            ) : nodes.length === 0 ? (
+            ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={5} style={{ padding: '40px', textAlign: 'center', color: t.text2 }}>No services discovered yet.</td>
+                <td colSpan={6} style={{ padding: '40px', textAlign: 'center', color: t.text2 }}>{nodes.length === 0 ? 'No services discovered yet.' : 'No services match your search.'}</td>
               </tr>
             ) : (
-              nodes.map(node => {
+              filtered.map(node => {
                 const color = stateColor(node.state);
+                const slo = slos.get(node.id);
                 return (
                   <tr
                     key={node.id}
@@ -240,6 +276,18 @@ export function ServiceCatalog() {
                       }}>
                         {node.state.replace('_', ' ')}
                       </span>
+                    </td>
+                    <td style={{ padding: '16px 24px', fontSize: '13px' }}>
+                      {slo ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{ width: '54px', height: '6px', borderRadius: '100px', background: t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', overflow: 'hidden' }}>
+                            <span style={{ display: 'block', width: `${Math.max(0, Math.min(100, slo.budgetRemainingPct))}%`, height: '100%', background: sloColor(slo.status) }} />
+                          </span>
+                          <span style={{ color: sloColor(slo.status), fontWeight: 600 }}>{Math.round(slo.budgetRemainingPct)}%</span>
+                        </span>
+                      ) : (
+                        <span style={{ color: t.text2 }}>No SLO</span>
+                      )}
                     </td>
                     <td style={{ padding: '16px 24px', color: t.text2, fontSize: '13.5px' }}>{node.team || 'Unassigned'}</td>
                     <td style={{ padding: '16px 24px', color: t.accent, fontSize: '13px', cursor: 'pointer' }}>{node.repo || 'github.com/pulsetrace/' + node.id}</td>

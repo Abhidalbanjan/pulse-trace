@@ -132,13 +132,31 @@ export function BillingPanel() {
       {error && <div style={{ padding: 12, background: t.redSoft, color: t.red, borderRadius: 8, marginBottom: 16 }}>{error}</div>}
       {notice && <div style={{ padding: 12, background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', color: t.text1, borderRadius: 8, marginBottom: 16 }}>{notice}</div>}
 
+      {/* Dunning banner (F17): surface a failed payment with a recovery CTA. */}
+      {tenant && (tenant.status === 'past_due' || tenant.status === 'suspended') && (
+        <div role="alert" style={{
+          padding: '14px 16px', borderRadius: 10, marginBottom: 20,
+          background: tenant.status === 'suspended' ? t.redSoft : `${t.amber}18`,
+          border: `1px solid ${tenant.status === 'suspended' ? t.red : t.amber}55`,
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, flexWrap: 'wrap',
+        }}>
+          <div style={{ fontSize: 13.5, color: tenant.status === 'suspended' ? t.red : t.text1, lineHeight: 1.5 }}>
+            <strong>{tenant.status === 'suspended' ? 'Your subscription is suspended.' : 'Your last payment failed.'}</strong>{' '}
+            {tenant.status === 'suspended'
+              ? 'Ingestion may be limited. Update your payment method to restore full service.'
+              : 'Please update your payment method before your next retry to avoid interruption.'}
+          </div>
+          <button style={btn(true)} disabled={busy} onClick={portal}>Update payment method</button>
+        </div>
+      )}
+
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
         <div style={card}>
           <div style={{ fontSize: 12, color: t.text2, marginBottom: 6 }}>Current plan</div>
           <div style={{ fontSize: 24, fontWeight: 700, color: t.text1 }}>
             {tenant ? (PLAN_LABEL[tenant.plan] || tenant.plan) : '—'}
           </div>
-          {tenant && <div style={{ fontSize: 12, color: tenant.status === 'active' ? t.green : t.red, marginTop: 6 }}>{tenant.status}</div>}
+          {tenant && <div style={{ fontSize: 12, color: tenant.status === 'active' ? t.green : tenant.status === 'past_due' ? t.amber : t.red, marginTop: 6 }}>{tenant.status.replace('_', ' ')}</div>}
         </div>
         <div style={card}>
           <div style={{ fontSize: 12, color: t.text2, marginBottom: 10 }}>This month&apos;s usage</div>

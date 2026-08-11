@@ -77,3 +77,20 @@ func TestPriceOverrideFromEnv(t *testing.T) {
 		t.Fatalf("free price should be $0, got %s", got)
 	}
 }
+
+func TestStatusForSubscription(t *testing.T) {
+	cases := map[string]string{
+		"past_due":           "past_due",  // recoverable, Stripe still retrying
+		"unpaid":             "suspended", // retries exhausted
+		"incomplete_expired": "suspended",
+		"canceled":           "suspended",
+		"active":             "active",
+		"trialing":           "active",
+		"":                   "active",
+	}
+	for sub, want := range cases {
+		if got := statusForSubscription(sub); got != want {
+			t.Errorf("statusForSubscription(%q) = %q, want %q", sub, got, want)
+		}
+	}
+}

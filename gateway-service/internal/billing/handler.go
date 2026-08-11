@@ -199,12 +199,18 @@ func (h *Handler) applyEvent(ctx context.Context, evt *WebhookEvent) error {
 				return err
 			}
 		}
-		// A lapsed/unpaid subscription suspends the tenant; otherwise it's active.
-		status := "active"
-		if evt.SubStatus == "past_due" || evt.SubStatus == "unpaid" || evt.SubStatus == "incomplete_expired" {
-			status = "suspended"
-		}
-		return h.tenants.SetStatus(ctx, tenantID, status)
+		return h.tenants.SetStatus(ctx, tenantID, statusForSubscription(evt.SubStatus))
+
+	// Dunning: a failed charge puts the tenant in the recoverable "past_due"
+	// state (still usable, warned in-app) rather than an immediate hard suspend;
+	// Stripe retries per the account's dunning schedule. A later successful
+	// payment (or exhausted retries flipping the subscription to unpaid) moves it
+	// back to active or on to suspended via the events below.
+	case "invoice.payment_failed":
+		return h.tenants.SetStatus(ctx, tenantID, "past_due")
+
+	case "invoice.payment_succeeded", "invoice.paid":
+		return h.tenants.SetStatus(ctx, tenantID, "active")
 
 	case "customer.subscription.deleted":
 		// Subscription cancelled → drop to the free plan, keep the tenant active.
@@ -233,6 +239,21 @@ func validPlan(p string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// statusForSubscription maps a Stripe subscription status onto a tenant status.
+// past_due is recoverable (Stripe is still retrying); unpaid/incomplete_expired
+// mean retries are exhausted, so the tenant is suspended; anything else is
+// treated as active. Pure and unit-tested.
+func statusForSubscription(subStatus string) string {
+	switch subStatus {
+	case "past_due":
+		return "past_due"
+	case "unpaid", "incomplete_expired", "canceled":
+		return "suspended"
+	default:
+		return "active"
 	}
 }
 

@@ -117,6 +117,14 @@ export function SLOView() {
   const statusColor = (s: string) => (s === 'critical' ? t.red : s === 'warning' ? t.amber : t.green);
   const sevColor = (s: string) => (s === 'critical' ? t.red : s === 'warning' ? t.amber : t.text2);
 
+  // Humanize the projected budget run-out span: hours under a day, otherwise days.
+  const formatDaysLeft = (days?: number) => {
+    if (days == null) return 'soon';
+    if (days <= 0) return 'now';
+    if (days < 1) return `~${Math.max(1, Math.round(days * 24))}h`;
+    return `~${Math.round(days)}d`;
+  };
+
   const primaryBtnStyle: React.CSSProperties = {
     padding: '10px 18px', borderRadius: '10px', border: 'none',
     background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, color: '#fff',
@@ -196,9 +204,22 @@ export function SLOView() {
                   <span style={{ fontSize: '12px', color: t.text2 }}>Error budget remaining</span>
                   <span style={{ fontSize: '13px', fontWeight: 700, color: c }}>{remaining.toFixed(1)}%</span>
                 </div>
-                <div style={{ height: '8px', background: t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', borderRadius: '100px', overflow: 'hidden', marginBottom: '14px' }}>
+                <div style={{ height: '8px', background: t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', borderRadius: '100px', overflow: 'hidden', marginBottom: it.forecast_burning ? '10px' : '14px' }}>
                   <div style={{ width: `${remaining}%`, height: '100%', background: c, transition: 'width 0.3s' }} />
                 </div>
+
+                {/* Error-budget-burn forecast (E4): projected run-out when the budget is declining. */}
+                {it.forecast_burning && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: '7px', marginBottom: '14px',
+                    padding: '7px 10px', borderRadius: '8px', fontSize: '12px', fontWeight: 600,
+                    background: (remaining < 25 ? t.red : t.amber) + '18',
+                    color: remaining < 25 ? t.red : t.amber,
+                  }}>
+                    <span>⏳</span>
+                    <span>Budget runs out in {formatDaysLeft(it.forecast_days_left)}{it.forecast_exhaust_at ? ` · ${new Date(it.forecast_exhaust_at).toLocaleDateString()}` : ''}</span>
+                  </div>
+                )}
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>

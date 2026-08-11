@@ -220,6 +220,11 @@ export interface SLODashboardItem {
   burn_rate: number; // 1.0 = on-track
   status: SLOStatus;
   trend: SLOTrendPoint[];
+  // Error-budget-burn forecast (SLOs · E4). forecast_burning is true only when
+  // the budget is actually declining; the other fields are then present.
+  forecast_burning: boolean;
+  forecast_exhaust_at?: string;
+  forecast_days_left?: number;
 }
 
 export interface SLOBudgetAlert {

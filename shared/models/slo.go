@@ -49,6 +49,15 @@ type SLODashboardItem struct {
 	BurnRate          float64        `json:"burn_rate"`           // multiplier (1.0 = on-track)
 	Status            string         `json:"status"`              // "healthy", "warning", "critical"
 	Trend             []SLOTrendPoint `json:"trend"`              // time-series for sparklines
+
+	// Error-budget-burn forecast (SLOs · E4). ForecastBurning is true only when
+	// the recent budget trajectory is actually declining; when true,
+	// ForecastExhaustAt is the projected run-out timestamp and ForecastDaysLeft
+	// the days until then. When false (flat or improving budget), the projection
+	// fields are omitted — there is no meaningful exhaustion date.
+	ForecastBurning   bool       `json:"forecast_burning"`
+	ForecastExhaustAt *time.Time `json:"forecast_exhaust_at,omitempty"`
+	ForecastDaysLeft  float64    `json:"forecast_days_left,omitempty"`
 }
 
 // SLOTrendPoint is a single data point in the SLI trend sparkline.

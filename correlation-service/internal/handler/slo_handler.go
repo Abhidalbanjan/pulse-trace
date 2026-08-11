@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 
+	"github.com/pulsetrace/correlation-service/internal/engine"
 	"github.com/pulsetrace/correlation-service/internal/llm"
 	"github.com/pulsetrace/correlation-service/internal/repository"
 	"github.com/pulsetrace/shared/models"
@@ -236,6 +237,15 @@ func (h *SLOHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 			Status:             status,
 			Trend:              trend,
 		}
+
+		// Error-budget-burn forecast (E4): project a run-out date from the recent
+		// budget trajectory. Only populated when the budget is actually declining.
+		if exhaustAt, daysLeft, burning := engine.ForecastBudgetExhaustion(trend, def.SLOTarget, budgetRemainingPct, now); burning {
+			item.ForecastBurning = true
+			item.ForecastExhaustAt = exhaustAt
+			item.ForecastDaysLeft = daysLeft
+		}
+
 		items = append(items, item)
 	}
 

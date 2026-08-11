@@ -29,7 +29,7 @@ func TestMFAChallengeToken_RoundTrip(t *testing.T) {
 func TestMFAChallengeToken_RejectsSessionToken(t *testing.T) {
 	// A full session token has no mfa_pending claim and must not be accepted as
 	// a challenge (and vice-versa the middleware rejects challenges as sessions).
-	session, err := issueSessionToken("alice", "admin", "default", "standard")
+	session, err := issueSessionToken("alice", "admin", "default", "standard", "test-jti")
 	if err != nil {
 		t.Fatal(err)
 	}

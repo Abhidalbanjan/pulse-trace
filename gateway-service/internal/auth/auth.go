@@ -102,18 +102,32 @@ const sessionTokenTTL = 24 * time.Hour
 
 // issueSessionToken mints the signed JWT that authorizes dashboard/API access.
 // Centralized so the password path, the MFA second-factor path, and any future
-// login path all produce identically-shaped, identically-signed sessions.
-func issueSessionToken(username, role, tenantID, tier string) (string, error) {
+// login path all produce identically-shaped, identically-signed sessions. The
+// jti binds the token to a revocable user_sessions row (see SessionStore).
+func issueSessionToken(username, role, tenantID, tier, jti string) (string, error) {
 	now := time.Now()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":         username,
 		"exp":         jwt.NewNumericDate(now.Add(sessionTokenTTL)),
 		"iat":         jwt.NewNumericDate(now),
+		"jti":         jti,
 		"role":        role,
 		"tenant_id":   tenantID,
 		"tenant_tier": tier,
 	})
 	return token.SignedString(jwtSecret)
+}
+
+// clientIP extracts the best-effort caller IP for session bookkeeping, honoring
+// the gateway's own X-Forwarded-For when present.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i > 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	return r.RemoteAddr
 }
 
 // Login handles POST /api/v1/auth/login
@@ -164,7 +178,8 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenString, err := issueSessionToken(creds.Username, role, tenantID, tier)
+	jti := createSession(r.Context(), h.db, creds.Username, tenantID, r.UserAgent(), clientIP(r))
+	tokenString, err := issueSessionToken(creds.Username, role, tenantID, tier, jti)
 	if err != nil {
 		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
 		return
@@ -212,7 +227,7 @@ func bearerToken(r *http.Request) string {
 // verbatim, so any caller could write into any tenant's data. That header (and
 // the other identity headers downstream services trust) is now stripped from
 // every inbound request up front and only ever re-set from a verified source.
-func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
+func AuthMiddleware(keys *IngestionKeyStore, sessions *SessionStore) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Strip client-supplied identity headers on EVERY request. Downstream
@@ -222,6 +237,7 @@ func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
 			r.Header.Del("X-Tenant-Tier")
 			r.Header.Del("X-User-Role")
 			r.Header.Del("X-User-Subject")
+			r.Header.Del("X-Session-ID")
 
 			// Route classification.
 			// NOTE: this middleware covers only the HTTP ingestion paths below. The
@@ -336,6 +352,16 @@ func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
 				return
 			}
 			if ok && token.Valid {
+				// Enforce session revocation: a token whose jti was revoked
+				// ("log out this device" / "log out everywhere") is rejected even
+				// though its signature and expiry are still valid.
+				if jti, _ := claims["jti"].(string); jti != "" {
+					if sessions.IsRevoked(jti) {
+						http.Error(w, "Unauthorized: session has been revoked", http.StatusUnauthorized)
+						return
+					}
+					r.Header.Set("X-Session-ID", jti)
+				}
 				if role, _ := claims["role"].(string); role != "" {
 					r.Header.Set("X-User-Role", role)
 				}
@@ -768,23 +794,8 @@ func (h *AuthHandler) SSOCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Generate PulseTrace JWT
-	expirationTime := time.Now().Add(24 * time.Hour)
-	claims := &jwt.RegisteredClaims{
-		Subject:   email,
-		ExpiresAt: jwt.NewNumericDate(expirationTime),
-		IssuedAt:  jwt.NewNumericDate(time.Now()),
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub":         claims.Subject,
-		"exp":         claims.ExpiresAt,
-		"iat":         claims.IssuedAt,
-		"role":        role,
-		"tenant_id":   tenantID,
-		"tenant_tier": tier,
-	})
-
-	tokenString, err := token.SignedString(jwtSecret)
+	jti := createSession(r.Context(), h.db, email, tenantID, r.UserAgent(), clientIP(r))
+	tokenString, err := issueSessionToken(email, role, tenantID, tier, jti)
 	if err != nil {
 		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
 		return

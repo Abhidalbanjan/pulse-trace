@@ -6,6 +6,15 @@ import { useTheme } from '@/context/ThemeContext';
 
 type Stage = 'idle' | 'enrolling' | 'done';
 
+interface SessionInfo {
+  id: string;
+  user_agent: string;
+  ip: string;
+  created_at: string;
+  last_seen_at: string;
+  current: boolean;
+}
+
 // SecurityPanel (F18) — self-service TOTP MFA management: enrol an authenticator,
 // confirm with a code, capture one-time recovery codes, and disable.
 export function SecurityPanel() {
@@ -19,6 +28,36 @@ export function SecurityPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [disableCode, setDisableCode] = useState('');
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+
+  const loadSessions = useCallback(() => {
+    fetchWithAuth('/api/v1/auth/sessions')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((j) => { if (j?.data) setSessions(j.data as SessionInfo[]); })
+      .catch(() => { /* non-fatal */ });
+  }, []);
+
+  useEffect(() => { loadSessions(); }, [loadSessions]);
+
+  const revokeSession = async (id: string) => {
+    try {
+      const res = await fetchWithAuth(`/api/v1/auth/sessions/${id}/revoke`, { method: 'POST' });
+      if (!res.ok) throw new Error(await res.text());
+      loadSessions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to revoke session');
+    }
+  };
+
+  const revokeOthers = async () => {
+    try {
+      const res = await fetchWithAuth('/api/v1/auth/sessions/revoke-others', { method: 'POST' });
+      if (!res.ok) throw new Error(await res.text());
+      loadSessions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to revoke sessions');
+    }
+  };
 
   const loadStatus = useCallback(() => {
     fetchWithAuth('/api/v1/auth/mfa/status')
@@ -181,6 +220,52 @@ export function SecurityPanel() {
           </div>
         </div>
       )}
+
+      {/* Active sessions / device management */}
+      <div style={{ marginTop: '40px', paddingTop: '28px', borderTop: `1px solid ${t.panelBorder}` }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px', flexWrap: 'wrap', marginBottom: '18px' }}>
+          <div>
+            <h3 style={{ fontSize: '19px', fontWeight: 700, margin: '0 0 8px', color: t.text1 }}>Active Sessions</h3>
+            <p style={{ color: t.text2, fontSize: '13.5px', maxWidth: '560px', lineHeight: 1.6 }}>
+              Devices signed in to your account. Revoking a session immediately invalidates its token.
+            </p>
+          </div>
+          {sessions.length > 1 && (
+            <button onClick={revokeOthers} style={{ ...ghostBtn, color: t.red, borderColor: t.red + '66' }}>Sign out all other devices</button>
+          )}
+        </div>
+        {sessions.length === 0 ? (
+          <p style={{ color: t.text2, fontSize: '13.5px' }}>No active sessions found.</p>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${t.panelBorder}`, textAlign: 'left' }}>
+                <th style={{ padding: '10px 8px', fontWeight: 600, color: t.text2, fontSize: '12px' }}>Device</th>
+                <th style={{ padding: '10px 8px', fontWeight: 600, color: t.text2, fontSize: '12px' }}>IP</th>
+                <th style={{ padding: '10px 8px', fontWeight: 600, color: t.text2, fontSize: '12px' }}>Signed in</th>
+                <th style={{ padding: '10px 8px', fontWeight: 600, color: t.text2, fontSize: '12px' }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {sessions.map((s) => (
+                <tr key={s.id} style={{ borderBottom: `1px solid ${t.panelBorder}` }}>
+                  <td style={{ padding: '12px 8px', fontSize: '13px', color: t.text1, maxWidth: '320px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.user_agent}>
+                    {s.user_agent || 'Unknown device'}
+                    {s.current && <span style={{ marginLeft: '8px', fontSize: '11px', fontWeight: 700, color: t.green }}>This device</span>}
+                  </td>
+                  <td style={{ padding: '12px 8px', fontSize: '12.5px', fontFamily: 'monospace', color: t.text2 }}>{s.ip || '—'}</td>
+                  <td style={{ padding: '12px 8px', fontSize: '12.5px', color: t.text2, whiteSpace: 'nowrap' }}>{s.created_at ? new Date(s.created_at).toLocaleString() : '—'}</td>
+                  <td style={{ padding: '12px 8px', textAlign: 'right' }}>
+                    {!s.current && (
+                      <button onClick={() => revokeSession(s.id)} style={{ ...ghostBtn, padding: '6px 12px', fontSize: '12px', color: t.red, borderColor: t.red + '55' }}>Revoke</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }

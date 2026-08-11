@@ -95,6 +95,9 @@ func main() {
 	// ingestion request belongs to. AuthMiddleware resolves the presented key
 	// against this store instead of trusting a client-supplied X-Tenant-ID header.
 	ingestionKeys := auth.NewIngestionKeyStore(authHandler.GetDB())
+	// Revocable-session registry (F18): AuthMiddleware consults its in-memory
+	// revoked-jti cache to reject tokens that were signed out.
+	sessionStore := auth.NewSessionStore(authHandler.GetDB())
 	// Tenants as first-class entities + the self-serve signup funnel.
 	tenantStore := auth.NewTenantStore(authHandler.GetDB())
 	// Usage metering: Redis counters on the hot path, flushed to usage_daily.
@@ -229,6 +232,14 @@ func main() {
 		mux.HandleFunc("POST /api/v1/auth/mfa/enroll", mfaHandler.Enroll)
 		mux.HandleFunc("POST /api/v1/auth/mfa/verify", mfaHandler.Verify)
 		mux.HandleFunc("POST /api/v1/auth/mfa/disable", mfaHandler.Disable)
+
+		// Session revocation & device management (F18): list the caller's active
+		// sessions and revoke one or all-others. Enforcement lives in
+		// AuthMiddleware, which rejects a token whose jti has been revoked.
+		sessionHandler := auth.NewSessionHandler(sessionStore, authHandler.GetDB())
+		mux.HandleFunc("GET /api/v1/auth/sessions", sessionHandler.List)
+		mux.HandleFunc("POST /api/v1/auth/sessions/revoke-others", sessionHandler.RevokeOthers)
+		mux.HandleFunc("POST /api/v1/auth/sessions/{id}/revoke", sessionHandler.Revoke)
 		mux.HandleFunc("GET /api/v1/admin/users", authHandler.GetUsers)
 		mux.HandleFunc("POST /api/v1/admin/users", authHandler.CreateUser)
 		mux.HandleFunc("DELETE /api/v1/admin/users", authHandler.DeleteUser)
@@ -377,7 +388,7 @@ func main() {
 	chain = pii.PIISanitizerMiddleware(chain)
 	chain = rateLimiter.RateLimit(chain)
 	chain = quotaEnforcer.Middleware(chain)
-	chain = auth.AuthMiddleware(ingestionKeys)(chain)
+	chain = auth.AuthMiddleware(ingestionKeys, sessionStore)(chain)
 	chain = middleware.RequestLogger(chain)
 	chain = middleware.Tracing(serviceName)(chain)
 	chain = middleware.CORS(chain)

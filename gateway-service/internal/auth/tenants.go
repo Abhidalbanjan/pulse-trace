@@ -11,9 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -131,7 +129,8 @@ func (s *TenantStore) Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := issueToken(req.Username, "admin", tenantID, "free")
+	jti := createSession(r.Context(), s.db, req.Username, tenantID, r.UserAgent(), clientIP(r))
+	token, err := issueSessionToken(req.Username, "admin", tenantID, "free", jti)
 	if err != nil {
 		http.Error(w, "account created but failed to issue token; please log in", http.StatusInternalServerError)
 		return
@@ -262,17 +261,3 @@ func (s *TenantStore) GetCurrentTenant(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(t)
 }
 
-// issueToken mints a PulseTrace JWT — shared by Signup and Login so the claim
-// shape stays identical.
-func issueToken(subject, role, tenantID, tier string) (string, error) {
-	now := time.Now()
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub":         subject,
-		"exp":         jwt.NewNumericDate(now.Add(24 * time.Hour)),
-		"iat":         jwt.NewNumericDate(now),
-		"role":        role,
-		"tenant_id":   tenantID,
-		"tenant_tier": tier,
-	})
-	return token.SignedString(jwtSecret)
-}

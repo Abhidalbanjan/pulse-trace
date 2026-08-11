@@ -30,7 +30,7 @@ func captureHandler(seen *http.Header) http.Handler {
 // back to the "default" tenant, never the attacker-chosen one.
 func TestIngestSpoofedTenantHeaderIsIgnored(t *testing.T) {
 	var seen http.Header
-	mw := AuthMiddleware(NewIngestionKeyStore(nil))(captureHandler(&seen))
+	mw := AuthMiddleware(NewIngestionKeyStore(nil), nil)(captureHandler(&seen))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/logs", nil)
 	req.Header.Set("X-Tenant-ID", "victim-tenant")
@@ -54,7 +54,7 @@ func TestIngestSpoofedTenantHeaderIsIgnored(t *testing.T) {
 // JWT the request is rejected, and the forged headers never reach the handler.
 func TestProtectedRouteStripsSpoofedIdentityHeaders(t *testing.T) {
 	var seen http.Header
-	mw := AuthMiddleware(NewIngestionKeyStore(nil))(captureHandler(&seen))
+	mw := AuthMiddleware(NewIngestionKeyStore(nil), nil)(captureHandler(&seen))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users", nil)
 	req.Header.Set("X-User-Role", "admin")
@@ -78,7 +78,7 @@ func TestServerIngestRequiresKeyWhenEnforced(t *testing.T) {
 	requireIngestionKey = true
 	defer func() { requireIngestionKey = orig }()
 
-	mw := AuthMiddleware(NewIngestionKeyStore(nil))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mw := AuthMiddleware(NewIngestionKeyStore(nil), nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -98,7 +98,7 @@ func TestServerIngestRequiresKeyWhenEnforced(t *testing.T) {
 func TestMigrationIngestBypassesJWT(t *testing.T) {
 	for _, path := range []string{"/v0.4/traces", "/v0.3/traces", "/services/collector", "/services/collector/event"} {
 		var seen http.Header
-		mw := AuthMiddleware(NewIngestionKeyStore(nil))(captureHandler(&seen))
+		mw := AuthMiddleware(NewIngestionKeyStore(nil), nil)(captureHandler(&seen))
 
 		req := httptest.NewRequest(http.MethodPost, path, nil)
 		// Forge identity headers — they must be stripped, not honored.

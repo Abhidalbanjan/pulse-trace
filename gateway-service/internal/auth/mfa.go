@@ -398,7 +398,8 @@ func (h *MFAHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenString, err := issueSessionToken(user, role, tenantID, tier)
+	jti := createSession(r.Context(), h.db, user, tenantID, r.UserAgent(), clientIP(r))
+	tokenString, err := issueSessionToken(user, role, tenantID, tier, jti)
 	if err != nil {
 		mfaJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate token"})
 		return

@@ -129,6 +129,10 @@ export default function LoginPage() {
     window.location.href = '/api/v1/auth/sso/login';
   };
 
+  const handleSAML = () => {
+    window.location.href = '/api/v1/auth/saml/login';
+  };
+
   const inputStyle: React.CSSProperties = {
     width: '100%', padding: '12px 16px', background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)',
     border: '1px solid ' + t.panelBorder, borderRadius: '10px',
@@ -354,6 +358,20 @@ export default function LoginPage() {
         >
           <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" style={{ width: '20px' }} />
           Continue with Google
+        </button>
+        )}
+
+        {!mfaToken && !forgotMode && (
+        <button
+          type="button"
+          onClick={handleSAML}
+          style={{
+            width: '100%', marginTop: '12px', padding: '14px', background: 'transparent', color: t.text1,
+            borderRadius: '10px', border: '1px solid ' + t.panelBorder, fontSize: '15px', fontWeight: 600,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', cursor: 'pointer',
+          }}
+        >
+          Continue with SAML SSO
         </button>
         )}
 

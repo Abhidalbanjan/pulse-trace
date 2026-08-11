@@ -40,4 +40,10 @@ test.describe('Auth', () => {
     await expect(page.getByRole('heading', { name: 'Set a new password' })).toBeVisible();
     await expect(page.getByLabel('New password')).toBeVisible();
   });
+
+  test('login offers OIDC and SAML SSO federation (F18)', async ({ page }) => {
+    await page.goto('/login');
+    await expect(page.getByRole('button', { name: /Continue with Google/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Continue with SAML SSO/i })).toBeVisible();
+  });
 });

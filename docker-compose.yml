@@ -490,6 +490,11 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-no-reply@pulsetrace.local}
+      # SAML 2.0 SSO (F18): point at the IdP's metadata to enable /auth/saml/*.
+      # SAML_SP_ROOT_URL is the gateway's externally-reachable base (for SP
+      # metadata + ACS URLs). Unset SAML_IDP_METADATA_* = SAML disabled.
+      SAML_IDP_METADATA_URL: ${SAML_IDP_METADATA_URL:-}
+      SAML_SP_ROOT_URL: ${SAML_SP_ROOT_URL:-http://localhost:8080}
     ports:
       - "8080:8080"
       - "4317:4317"

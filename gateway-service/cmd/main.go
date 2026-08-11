@@ -258,6 +258,17 @@ func main() {
 		}
 		mux.HandleFunc("/scim/v2/Users", scimHandler.ServeUsers)
 		mux.HandleFunc("/scim/v2/Users/{id}", scimHandler.ServeUser)
+
+		// SAML 2.0 SSO (F18): the enterprise alternative to OIDC. Metadata/login/
+		// ACS are public (the ACS verifies the IdP's signed assertion itself, via
+		// crewjam/saml); disabled until SAML_IDP_METADATA_* is configured.
+		samlHandler := auth.NewSAMLHandler(authHandler.GetDB(), sessionStore)
+		if samlHandler.Configured() {
+			log.Println("gateway-service: SAML SSO enabled at /api/v1/auth/saml/login")
+		}
+		mux.HandleFunc("GET /api/v1/auth/saml/metadata", samlHandler.Metadata)
+		mux.HandleFunc("GET /api/v1/auth/saml/login", samlHandler.Login)
+		mux.HandleFunc("POST /api/v1/auth/saml/acs", samlHandler.ACS)
 		mux.HandleFunc("GET /api/v1/admin/users", authHandler.GetUsers)
 		mux.HandleFunc("POST /api/v1/admin/users", authHandler.CreateUser)
 		mux.HandleFunc("DELETE /api/v1/admin/users", authHandler.DeleteUser)

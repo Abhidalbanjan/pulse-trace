@@ -333,6 +333,7 @@ func AuthMiddleware(keys *IngestionKeyStore, sessions *SessionStore) func(http.H
 				r.URL.Path == "/api/v1/auth/mfa/login" ||
 				r.URL.Path == "/api/v1/auth/password/forgot" || r.URL.Path == "/api/v1/auth/password/reset" ||
 				r.URL.Path == "/api/v1/auth/sso/login" || r.URL.Path == "/api/v1/auth/sso/config" || r.URL.Path == "/api/v1/auth/sso/callback" ||
+				strings.HasPrefix(r.URL.Path, "/api/v1/auth/saml/") ||
 				r.URL.Path == "/api/v1/webhooks/stripe" || r.URL.Path == "/api/v1/webhooks/github" || r.URL.Path == "/api/v1/control-plane/incidents" {
 				next.ServeHTTP(w, r)
 				return

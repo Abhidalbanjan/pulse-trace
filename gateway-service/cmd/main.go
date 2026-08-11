@@ -219,6 +219,16 @@ func main() {
 		mux.HandleFunc("GET /api/v1/auth/sso/login", authHandler.SSOLogin)
 		mux.HandleFunc("GET /api/v1/auth/sso/config", authHandler.GetSSOConfig)
 		mux.HandleFunc("GET /api/v1/auth/sso/callback", authHandler.SSOCallback)
+
+		// Multi-factor auth (F18): TOTP enrolment + two-step login. /mfa/login is
+		// public (it redeems the post-password challenge, see AuthMiddleware
+		// allowlist); the rest require a session and act on the caller's own user.
+		mfaHandler := auth.NewMFAHandler(authHandler.GetDB())
+		mux.HandleFunc("POST /api/v1/auth/mfa/login", mfaHandler.Login)
+		mux.HandleFunc("GET /api/v1/auth/mfa/status", mfaHandler.Status)
+		mux.HandleFunc("POST /api/v1/auth/mfa/enroll", mfaHandler.Enroll)
+		mux.HandleFunc("POST /api/v1/auth/mfa/verify", mfaHandler.Verify)
+		mux.HandleFunc("POST /api/v1/auth/mfa/disable", mfaHandler.Disable)
 		mux.HandleFunc("GET /api/v1/admin/users", authHandler.GetUsers)
 		mux.HandleFunc("POST /api/v1/admin/users", authHandler.CreateUser)
 		mux.HandleFunc("DELETE /api/v1/admin/users", authHandler.DeleteUser)

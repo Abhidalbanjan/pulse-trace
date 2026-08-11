@@ -13,7 +13,38 @@ export default function LoginPage() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  // Two-step MFA: once the password is accepted for an MFA-enabled account, the
+  // server returns a short-lived challenge instead of a session. We hold it here
+  // and switch the form to a code prompt.
+  const [mfaToken, setMfaToken] = useState<string | null>(null);
+  const [mfaCode, setMfaCode] = useState('');
   const { login } = useAuth();
+
+  const finishLogin = (data: { token: string; role?: string; user?: unknown }) => {
+    const userData = data.user || { id: 'temp-id', email: email, role: data.role || 'admin' };
+    login(data.token, userData as never);
+  };
+
+  // Second factor: exchange the challenge + a TOTP/recovery code for a session.
+  const handleMfaSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      const res = await fetch('/api/v1/auth/mfa/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mfa_token: mfaToken, code: mfaCode.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Verification failed');
+      finishLogin(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An unexpected error occurred');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -53,8 +84,14 @@ export default function LoginPage() {
         throw new Error(data.error || data.message || 'Authentication failed');
       }
 
-      const userData = data.user || { id: 'temp-id', email: email, role: data.role || 'admin' };
-      login(data.token, userData);
+      // MFA gate: correct password, but a second factor is still required.
+      if (data.mfa_required && data.mfa_token) {
+        setMfaToken(data.mfa_token);
+        setMfaCode('');
+        return;
+      }
+
+      finishLogin(data);
 
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An unexpected error occurred');
@@ -113,10 +150,12 @@ export default function LoginPage() {
         </div>
 
         <h1 style={{ fontSize: '24px', fontWeight: 600, margin: '0 0 8px', color: t.text1 }}>
-          {isLogin ? 'Welcome back' : 'Create your account'}
+          {mfaToken ? 'Two-factor authentication' : isLogin ? 'Welcome back' : 'Create your account'}
         </h1>
         <p style={{ color: t.text2, marginBottom: '32px', textAlign: 'center', fontSize: '14px' }}>
-          Enter your credentials to access the enterprise observability platform.
+          {mfaToken
+            ? 'Enter the 6-digit code from your authenticator app, or a recovery code.'
+            : 'Enter your credentials to access the enterprise observability platform.'}
         </p>
 
         {error && (
@@ -129,6 +168,42 @@ export default function LoginPage() {
           </div>
         )}
 
+        {mfaToken ? (
+          <form onSubmit={handleMfaSubmit} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div>
+              <label style={labelStyle}>Authentication code</label>
+              <input
+                type="text"
+                inputMode="text"
+                autoFocus
+                value={mfaCode}
+                onChange={(e) => setMfaCode(e.target.value)}
+                required
+                aria-label="Authentication code"
+                style={{ ...inputStyle, letterSpacing: '0.3em', textAlign: 'center', fontSize: '18px' }}
+                placeholder="123456"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={loading}
+              style={{
+                width: '100%', padding: '14px', marginTop: '8px', fontSize: '15px', fontWeight: 600,
+                background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, color: '#fff',
+                border: 'none', borderRadius: '10px', cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1,
+              }}
+            >
+              {loading ? 'Verifying…' : 'Verify'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setMfaToken(null); setMfaCode(''); setError(''); }}
+              style={{ background: 'none', border: 'none', color: t.text2, fontSize: '13px', cursor: 'pointer' }}
+            >
+              ← Back to sign in
+            </button>
+          </form>
+        ) : (
         <form onSubmit={handleSubmit} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
           {!isLogin && (
             <div>
@@ -202,7 +277,9 @@ export default function LoginPage() {
             {loading ? 'Authenticating...' : (isLogin ? 'Sign In' : 'Sign Up')}
           </button>
         </form>
+        )}
 
+        {!mfaToken && (
         <div style={{
           width: '100%', display: 'flex', alignItems: 'center', gap: '16px', margin: '24px 0'
         }}>
@@ -210,7 +287,9 @@ export default function LoginPage() {
           <span style={{ fontSize: '12px', color: t.text2 }}>OR</span>
           <div style={{ flex: 1, height: '1px', background: t.panelBorder }} />
         </div>
+        )}
 
+        {!mfaToken && (
         <button
           type="button"
           onClick={handleSSO}
@@ -224,7 +303,9 @@ export default function LoginPage() {
           <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" style={{ width: '20px' }} />
           Continue with Google
         </button>
+        )}
 
+        {!mfaToken && (
         <p style={{ marginTop: '32px', fontSize: '14px', color: t.text2 }}>
           {isLogin ? "Don't have an account? " : "Already have an account? "}
           <span
@@ -239,6 +320,7 @@ export default function LoginPage() {
             {isLogin ? 'Sign up' : 'Sign in'}
           </span>
         </p>
+        )}
       </div>
     </div>
   );

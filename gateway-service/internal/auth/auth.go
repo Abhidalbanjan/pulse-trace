@@ -87,6 +87,33 @@ type Credentials struct {
 type TokenResponse struct {
 	Token string `json:"token"`
 	Role  string `json:"role"`
+
+	// MFARequired + MFAToken are set instead of Token when the account has MFA
+	// enabled: the password was correct, but a second factor is still required.
+	// The client exchanges MFAToken plus a TOTP/recovery code at
+	// POST /api/v1/auth/mfa/login for the real session token. No role or session
+	// JWT is issued until that second step completes.
+	MFARequired bool   `json:"mfa_required,omitempty"`
+	MFAToken    string `json:"mfa_token,omitempty"`
+}
+
+// sessionTokenTTL is how long an issued dashboard session is valid.
+const sessionTokenTTL = 24 * time.Hour
+
+// issueSessionToken mints the signed JWT that authorizes dashboard/API access.
+// Centralized so the password path, the MFA second-factor path, and any future
+// login path all produce identically-shaped, identically-signed sessions.
+func issueSessionToken(username, role, tenantID, tier string) (string, error) {
+	now := time.Now()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":         username,
+		"exp":         jwt.NewNumericDate(now.Add(sessionTokenTTL)),
+		"iat":         jwt.NewNumericDate(now),
+		"role":        role,
+		"tenant_id":   tenantID,
+		"tenant_tier": tier,
+	})
+	return token.SignedString(jwtSecret)
 }
 
 // Login handles POST /api/v1/auth/login
@@ -103,7 +130,9 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var storedHash, role, tenantID, tier string
-	err := h.db.QueryRow("SELECT password_hash, role, tenant_id, tier FROM users WHERE username = $1", creds.Username).Scan(&storedHash, &role, &tenantID, &tier)
+	var mfaEnabled bool
+	err := h.db.QueryRow("SELECT password_hash, role, tenant_id, tier, COALESCE(mfa_enabled, false) FROM users WHERE username = $1", creds.Username).
+		Scan(&storedHash, &role, &tenantID, &tier, &mfaEnabled)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "Invalid username or password", http.StatusUnauthorized)
@@ -120,30 +149,27 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate JWT
-	expirationTime := time.Now().Add(24 * time.Hour)
-	claims := &jwt.RegisteredClaims{
-		Subject:   creds.Username,
-		ExpiresAt: jwt.NewNumericDate(expirationTime),
-		IssuedAt:  jwt.NewNumericDate(time.Now()),
+	w.Header().Set("Content-Type", "application/json")
+
+	// MFA gate: with a second factor enrolled, a correct password alone does not
+	// yield a session. Issue a short-lived challenge the client redeems at
+	// /api/v1/auth/mfa/login with a TOTP or recovery code.
+	if mfaEnabled {
+		challenge, err := issueMFAChallengeToken(creds.Username)
+		if err != nil {
+			http.Error(w, "Failed to start MFA challenge", http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(TokenResponse{MFARequired: true, MFAToken: challenge})
+		return
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub":         claims.Subject,
-		"exp":         claims.ExpiresAt,
-		"iat":         claims.IssuedAt,
-		"role":        role,
-		"tenant_id":   tenantID,
-		"tenant_tier": tier,
-	})
-
-	tokenString, err := token.SignedString(jwtSecret)
+	tokenString, err := issueSessionToken(creds.Username, role, tenantID, tier)
 	if err != nil {
 		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(TokenResponse{Token: tokenString, Role: role})
 }
 
@@ -273,6 +299,7 @@ func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
 
 			// Other public (no-token) endpoints. No tenant is attributed here.
 			if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/api/v1/auth/register" || r.URL.Path == "/api/v1/auth/signup" || r.URL.Path == "/healthz" ||
+				r.URL.Path == "/api/v1/auth/mfa/login" ||
 				r.URL.Path == "/api/v1/auth/sso/login" || r.URL.Path == "/api/v1/auth/sso/config" || r.URL.Path == "/api/v1/auth/sso/callback" ||
 				r.URL.Path == "/api/v1/webhooks/stripe" || r.URL.Path == "/api/v1/webhooks/github" || r.URL.Path == "/api/v1/control-plane/incidents" {
 				next.ServeHTTP(w, r)
@@ -299,6 +326,15 @@ func AuthMiddleware(keys *IngestionKeyStore) func(http.Handler) http.Handler {
 
 			// Set identity headers strictly from signed claims.
 			claims, ok := token.Claims.(jwt.MapClaims)
+			// A partial MFA-challenge token (issued after password, before the
+			// second factor) is validly signed but must NOT authorize protected
+			// routes — otherwise MFA could be bypassed by presenting the challenge
+			// as a session. It is only accepted by POST /api/v1/auth/mfa/login,
+			// which is public and verifies it itself.
+			if ok && claims["mfa_pending"] == true {
+				http.Error(w, "Unauthorized: complete MFA to obtain a session", http.StatusUnauthorized)
+				return
+			}
 			if ok && token.Valid {
 				if role, _ := claims["role"].(string); role != "" {
 					r.Header.Set("X-User-Role", role)

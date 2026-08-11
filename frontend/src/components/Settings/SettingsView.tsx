@@ -6,6 +6,7 @@ import { fetchWithAuth } from '@/lib/api';
 import { RolesPanel } from './RolesPanel';
 import { PoliciesPanel } from './PoliciesPanel';
 import { AuditLogPanel } from './AuditLogPanel';
+import { SecurityPanel } from './SecurityPanel';
 import { RateLimitsPanel } from './RateLimitsPanel';
 import { AlertRulesPanel } from './AlertRulesPanel';
 import { BillingPanel } from './BillingPanel';
@@ -219,7 +220,7 @@ export function SettingsView() {
       <div style={{ width: '230px', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '4px' }}>
         <h2 style={{ fontSize: '24px', fontWeight: 700, margin: '0 0 20px', color: t.text1 }}>Settings</h2>
 
-        {['users', 'billing', 'roles', 'policies', 'ratelimits', 'audit', 'apikeys', 'sso', 'alerts', 'anomalies', 'privacy'].map(tab => (
+        {['users', 'security', 'billing', 'roles', 'policies', 'ratelimits', 'audit', 'apikeys', 'sso', 'alerts', 'anomalies', 'privacy'].map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -238,6 +239,7 @@ export function SettingsView() {
             }}
           >
             {tab === 'users' ? 'Users'
+              : tab === 'security' ? 'Security (MFA)'
               : tab === 'billing' ? 'Billing & Usage'
               : tab === 'roles' ? 'Roles (RBAC)'
               : tab === 'policies' ? 'Policies (ABAC)'
@@ -332,6 +334,7 @@ export function SettingsView() {
           </div>
         )}
 
+        {activeTab === 'security' && <SecurityPanel />}
         {activeTab === 'billing' && <BillingPanel />}
         {activeTab === 'roles' && <RolesPanel />}
 

@@ -46,6 +46,16 @@ test.describe('Settings', () => {
     await expect(page.getByRole('status')).toContainText(/tamper-evident|verified|integrity check/i, { timeout: 10000 });
   });
 
+  test('Security tab offers MFA enrolment (F18)', async ({ page }) => {
+    await page.goto('/settings');
+    await page.getByRole('button', { name: 'Security (MFA)' }).click();
+    await expect(page.getByRole('heading', { name: 'Two-Factor Authentication' })).toBeVisible({ timeout: 10000 });
+    // The seeded admin has no MFA, so the panel resolves to the not-enabled
+    // state and offers enrolment — proving /api/v1/auth/mfa/status is wired.
+    await expect(page.getByText('Not enabled')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('button', { name: 'Set up authenticator' })).toBeVisible();
+  });
+
   test('SSO tab shows configuration status', async ({ page }) => {
     await page.goto('/settings');
     await page.getByRole('button', { name: 'SSO / SAML' }).click();

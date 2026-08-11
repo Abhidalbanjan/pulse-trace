@@ -476,6 +476,9 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-pulsetrace}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-pulsetrace_secret}
       JWT_SECRET: ${JWT_SECRET:-}
+      # Encrypts TOTP MFA secrets at rest (F18). A dev default keeps local
+      # enrolment working out of the box; override in any real deployment.
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef}
     ports:
       - "8080:8080"
       - "4317:4317"

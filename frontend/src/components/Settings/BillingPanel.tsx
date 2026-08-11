@@ -7,6 +7,13 @@ import { useTheme } from '@/context/ThemeContext';
 
 interface Tenant { id: string; name: string; plan: string; status: string; }
 interface Usage { traces: number; metrics: number; logs: number; rum: number; }
+interface PlanLimits { traces: number; metrics: number; logs: number; rum: number; }
+type PlanCTA = 'current' | 'upgrade' | 'downgrade' | 'contact';
+interface Plan {
+  id: string; label: string; price: string; period: string;
+  limits: PlanLimits; features: string[]; cta: PlanCTA; self_serve: boolean;
+}
+interface Catalog { current_plan: string; self_serve: boolean; plans: Plan[]; }
 
 const PLAN_LABEL: Record<string, string> = {
   free: 'Free', standard: 'Standard', premium: 'Premium', enterprise: 'Enterprise',
@@ -21,15 +28,18 @@ export function BillingPanel() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [planChoice, setPlanChoice] = useState('standard');
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
 
   const load = async () => {
     try {
-      const [tRes, uRes] = await Promise.all([
+      const [tRes, uRes, pRes] = await Promise.all([
         fetchWithAuth('/api/v1/tenant'),
         fetchWithAuth('/api/v1/usage'),
+        fetchWithAuth('/api/v1/billing/plans'),
       ]);
       if (tRes.ok) setTenant(await tRes.json());
       if (uRes.ok) setUsage((await uRes.json()).usage);
+      if (pRes.ok) setCatalog(await pRes.json());
     } catch {
       setError('Failed to load billing information.');
     }
@@ -46,7 +56,7 @@ export function BillingPanel() {
       if (res.status === 501) { setNotice('Self-serve billing is disabled on this deployment — contact your account team to change plans.'); return; }
       if (!res.ok) throw new Error((await res.text()) || 'Checkout failed');
       const { url } = await res.json();
-      if (url) window.location.href = url;
+      if (url) window.location.assign(url);
     } catch (e) {
       setError(errMessage(e, 'Checkout failed'));
     } finally { setBusy(false); }
@@ -76,7 +86,7 @@ export function BillingPanel() {
       if (res.status === 501) { setNotice('Self-serve billing is disabled on this deployment.'); return; }
       if (!res.ok) throw new Error((await res.text()) || 'Could not open billing portal');
       const { url } = await res.json();
-      if (url) window.location.href = url;
+      if (url) window.location.assign(url);
     } catch (e) {
       setError(errMessage(e, 'Could not open billing portal'));
     } finally { setBusy(false); }
@@ -127,9 +137,49 @@ export function BillingPanel() {
         </div>
       </div>
 
+      {/* Plan comparison (F17): live catalog with per-plan upgrade/downgrade CTAs. */}
+      <div style={{ fontSize: 15, fontWeight: 700, color: t.text1, margin: '4px 0 14px' }}>Compare plans</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 12 }}>
+        {(catalog?.plans ?? []).map((p) => {
+          const isCurrent = p.cta === 'current';
+          return (
+            <div key={p.id} style={{
+              ...card,
+              borderColor: isCurrent ? t.accent : t.panelBorder,
+              boxShadow: isCurrent ? `0 0 0 1px ${t.accent}` : 'none',
+              display: 'flex', flexDirection: 'column', gap: 10,
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span style={{ fontSize: 15, fontWeight: 700, color: t.text1 }}>{p.label}</span>
+                {isCurrent && <span style={{ fontSize: 10.5, fontWeight: 700, color: t.accent, textTransform: 'uppercase' }}>Current</span>}
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: t.text1 }}>
+                {p.price}{p.period && <span style={{ fontSize: 12, fontWeight: 500, color: t.text2 }}>/{p.period}</span>}
+              </div>
+              <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {p.features.map((f) => (
+                  <li key={f} style={{ fontSize: 12, color: t.text2, lineHeight: 1.4, display: 'flex', gap: 6 }}>
+                    <span style={{ color: t.green }}>✓</span>{f}
+                  </li>
+                ))}
+              </ul>
+              <div style={{ marginTop: 'auto', paddingTop: 6 }}>
+                {p.cta === 'current' ? (
+                  <button style={{ ...btn(false), width: '100%', cursor: 'default', opacity: 0.6 }} disabled>Current plan</button>
+                ) : p.cta === 'contact' ? (
+                  <a href="mailto:sales@pulsetrace.local?subject=PulseTrace%20Enterprise" style={{ ...btn(false), width: '100%', textAlign: 'center', textDecoration: 'none', display: 'block' }}>Contact sales</a>
+                ) : p.cta === 'upgrade' ? (
+                  <button style={{ ...btn(true), width: '100%' }} disabled={busy} onClick={() => checkout(p.id)}>Upgrade</button>
+                ) : (
+                  // downgrade: to a paid tier via checkout (Stripe prorates), to free via the portal
+                  <button style={{ ...btn(false), width: '100%' }} disabled={busy} onClick={() => (p.id === 'free' ? portal() : checkout(p.id))}>Downgrade</button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-        <button style={btn(true)} disabled={busy} onClick={() => checkout('standard')}>Upgrade to Standard</button>
-        <button style={btn(true)} disabled={busy} onClick={() => checkout('premium')}>Upgrade to Premium</button>
         <button style={btn(false)} disabled={busy} onClick={portal}>Manage billing</button>
       </div>
 

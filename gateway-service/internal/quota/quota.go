@@ -55,6 +55,21 @@ func limitsForPlan(plan string) Limits {
 	return planLimits["free"]
 }
 
+// PlanOrder is the tiers from lowest to highest, so callers (e.g. the billing
+// plan catalog) can decide whether a change is an upgrade or a downgrade.
+var PlanOrder = []string{"free", "standard", "premium", "enterprise"}
+
+// LimitsForPlan exposes a plan's monthly ceilings (unknown → free), so the
+// billing UI can show the same limits the enforcer actually applies rather than
+// duplicating them. The bool reports whether the plan name is a known tier.
+func LimitsForPlan(plan string) (Limits, bool) {
+	l, ok := planLimits[plan]
+	if !ok {
+		return planLimits["free"], false
+	}
+	return l, true
+}
+
 const planCacheTTL = 60 * time.Second
 
 type planEntry struct {

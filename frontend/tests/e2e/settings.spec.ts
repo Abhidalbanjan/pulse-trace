@@ -36,6 +36,15 @@ test.describe('Settings', () => {
     await expect(page.getByText('✓ Valid')).toBeVisible({ timeout: 10000 });
   });
 
+  test('Billing tab shows the plan-comparison catalog (F17)', async ({ page }) => {
+    await page.goto('/settings');
+    await page.getByRole('button', { name: 'Billing & Usage' }).click();
+    await expect(page.getByText('Compare plans')).toBeVisible({ timeout: 10000 });
+    // The catalog renders every tier with an actionable CTA.
+    await expect(page.getByText('Enterprise').first()).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Contact sales' }).first()).toBeVisible();
+  });
+
   test('Rate Limits tab lists seeded rules', async ({ page }) => {
     await page.goto('/settings');
     await page.getByRole('button', { name: 'Rate Limits' }).click();

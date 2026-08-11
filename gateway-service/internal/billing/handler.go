@@ -32,6 +32,17 @@ func NewHandler(provider Provider, tenants *auth.TenantStore) *Handler {
 // registers the webhook route, and hides the operator plan override, in SaaS mode).
 func (h *Handler) IsStripe() bool { return h.stripe != nil }
 
+// Plans handles GET /api/v1/billing/plans — the plan-comparison catalog for the
+// caller's tenant, with per-plan upgrade/downgrade CTAs derived from its current
+// plan. Read-only; the quota limits shown are exactly what the enforcer applies.
+func (h *Handler) Plans(w http.ResponseWriter, r *http.Request) {
+	plan := "free"
+	if t, err := h.tenants.GetTenant(r.Context(), tenantOf(r)); err == nil && t != nil && t.Plan != "" {
+		plan = t.Plan
+	}
+	writeJSON(w, BuildPlanCatalog(plan, h.IsStripe()))
+}
+
 func tenantOf(r *http.Request) string {
 	if t := r.Header.Get("X-Tenant-ID"); t != "" {
 		return t

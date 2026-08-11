@@ -43,6 +43,28 @@ func (h *Handler) Plans(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, BuildPlanCatalog(plan, h.IsStripe()))
 }
 
+// Invoices handles GET /api/v1/billing/invoices — the caller tenant's invoice
+// history from the billing provider. A tenant with no billing customer, or a
+// manual/on-prem deployment, gets an empty list rather than an error.
+func (h *Handler) Invoices(w http.ResponseWriter, r *http.Request) {
+	empty := map[string]interface{}{"invoices": []Invoice{}}
+
+	t, err := h.tenants.GetTenant(r.Context(), tenantOf(r))
+	if err != nil || t == nil || t.StripeCustomerID == "" {
+		writeJSON(w, empty)
+		return
+	}
+	invoices, err := h.provider.ListInvoices(r.Context(), t.StripeCustomerID)
+	if err != nil {
+		if !errors.Is(err, ErrManualBilling) {
+			log.Printf("billing: failed to list invoices for %s: %v", t.ID, err)
+		}
+		writeJSON(w, empty)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"invoices": invoices})
+}
+
 func tenantOf(r *http.Request) string {
 	if t := r.Header.Get("X-Tenant-ID"); t != "" {
 		return t

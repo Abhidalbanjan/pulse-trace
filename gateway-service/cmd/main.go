@@ -212,6 +212,8 @@ func main() {
 		// In-app plan comparison (F17): the catalog with per-plan upgrade/downgrade
 		// CTAs, quota limits straight from the enforcer.
 		mux.HandleFunc("GET /api/v1/billing/plans", billingHandler.Plans)
+		// Invoice history (F17): the tenant's past invoices from the provider.
+		mux.HandleFunc("GET /api/v1/billing/invoices", billingHandler.Invoices)
 		mux.HandleFunc("POST /api/v1/billing/checkout", billingHandler.Checkout)
 		mux.HandleFunc("POST /api/v1/billing/portal", billingHandler.Portal)
 		if billingHandler.IsStripe() {

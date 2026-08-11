@@ -30,6 +30,7 @@ type Provider interface {
 	Name() string
 	Checkout(ctx context.Context, tenantID, customerID, email, plan string) (redirectURL string, err error)
 	Portal(ctx context.Context, customerID, returnURL string) (url string, err error)
+	ListInvoices(ctx context.Context, customerID string) ([]Invoice, error)
 }
 
 // FromEnv selects the provider from BILLING_PROVIDER ("stripe" | "manual",
@@ -139,6 +140,61 @@ func (s *StripeProvider) Portal(ctx context.Context, customerID, returnURL strin
 		return "", err
 	}
 	return out.URL, nil
+}
+
+// Invoice is the normalized subset of a Stripe invoice the UI renders. Amounts
+// are in the currency's minor unit (cents), as Stripe reports them.
+type Invoice struct {
+	ID               string `json:"id"`
+	Number           string `json:"number"`
+	AmountDue        int64  `json:"amount_due"`
+	AmountPaid       int64  `json:"amount_paid"`
+	Currency         string `json:"currency"`
+	Status           string `json:"status"` // draft|open|paid|void|uncollectible
+	Created          int64  `json:"created"`
+	HostedInvoiceURL string `json:"hosted_invoice_url"`
+	InvoicePDF       string `json:"invoice_pdf"`
+}
+
+// ListInvoices returns a customer's invoices, newest first. Manual billing has
+// none, so it returns ErrManualBilling for the handler to map to an empty list.
+func (ManualProvider) ListInvoices(context.Context, string) ([]Invoice, error) {
+	return nil, ErrManualBilling
+}
+
+// ListInvoices fetches the customer's recent invoices from the Stripe API.
+func (s *StripeProvider) ListInvoices(ctx context.Context, customerID string) ([]Invoice, error) {
+	if customerID == "" {
+		return []Invoice{}, nil
+	}
+	var out struct {
+		Data []Invoice `json:"data"`
+	}
+	if err := s.get(ctx, "/v1/invoices?limit=24&customer="+url.QueryEscape(customerID), &out); err != nil {
+		return nil, err
+	}
+	if out.Data == nil {
+		out.Data = []Invoice{}
+	}
+	return out.Data, nil
+}
+
+func (s *StripeProvider) get(ctx context.Context, path string, out interface{}) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.stripe.com"+path, nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(s.secretKey, "")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("stripe %s returned %d: %s", path, resp.StatusCode, string(body))
+	}
+	return json.Unmarshal(body, out)
 }
 
 func (s *StripeProvider) post(ctx context.Context, path string, form url.Values, out interface{}) error {

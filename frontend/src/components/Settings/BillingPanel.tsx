@@ -14,6 +14,11 @@ interface Plan {
   limits: PlanLimits; features: string[]; cta: PlanCTA; self_serve: boolean;
 }
 interface Catalog { current_plan: string; self_serve: boolean; plans: Plan[]; }
+interface Invoice {
+  id: string; number: string; amount_due: number; amount_paid: number;
+  currency: string; status: string; created: number;
+  hosted_invoice_url: string; invoice_pdf: string;
+}
 
 const PLAN_LABEL: Record<string, string> = {
   free: 'Free', standard: 'Standard', premium: 'Premium', enterprise: 'Enterprise',
@@ -29,19 +34,30 @@ export function BillingPanel() {
   const [notice, setNotice] = useState<string | null>(null);
   const [planChoice, setPlanChoice] = useState('standard');
   const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
 
   const load = async () => {
     try {
-      const [tRes, uRes, pRes] = await Promise.all([
+      const [tRes, uRes, pRes, iRes] = await Promise.all([
         fetchWithAuth('/api/v1/tenant'),
         fetchWithAuth('/api/v1/usage'),
         fetchWithAuth('/api/v1/billing/plans'),
+        fetchWithAuth('/api/v1/billing/invoices'),
       ]);
       if (tRes.ok) setTenant(await tRes.json());
       if (uRes.ok) setUsage((await uRes.json()).usage);
       if (pRes.ok) setCatalog(await pRes.json());
+      if (iRes.ok) setInvoices((await iRes.json()).invoices ?? []);
     } catch {
       setError('Failed to load billing information.');
+    }
+  };
+
+  const money = (cents: number, currency: string) => {
+    try {
+      return new Intl.NumberFormat(undefined, { style: 'currency', currency: (currency || 'usd').toUpperCase() }).format((cents || 0) / 100);
+    } catch {
+      return `${((cents || 0) / 100).toFixed(2)} ${currency?.toUpperCase() || ''}`;
     }
   };
   // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
@@ -182,6 +198,43 @@ export function BillingPanel() {
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <button style={btn(false)} disabled={busy} onClick={portal}>Manage billing</button>
       </div>
+
+      {/* Invoice history (F17) */}
+      {invoices.length > 0 && (
+        <div style={{ marginTop: 28 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: t.text1, marginBottom: 12 }}>Invoice history</div>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid ' + t.panelBorder, textAlign: 'left' }}>
+                <th style={{ padding: '9px 8px', fontSize: 12, fontWeight: 600, color: t.text2 }}>Date</th>
+                <th style={{ padding: '9px 8px', fontSize: 12, fontWeight: 600, color: t.text2 }}>Invoice</th>
+                <th style={{ padding: '9px 8px', fontSize: 12, fontWeight: 600, color: t.text2 }}>Amount</th>
+                <th style={{ padding: '9px 8px', fontSize: 12, fontWeight: 600, color: t.text2 }}>Status</th>
+                <th style={{ padding: '9px 8px', fontSize: 12, fontWeight: 600, color: t.text2 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {invoices.map((inv) => (
+                <tr key={inv.id} style={{ borderBottom: '1px solid ' + t.panelBorder }}>
+                  <td style={{ padding: '11px 8px', fontSize: 13, color: t.text2, whiteSpace: 'nowrap' }}>{inv.created ? new Date(inv.created * 1000).toLocaleDateString() : '—'}</td>
+                  <td style={{ padding: '11px 8px', fontSize: 12.5, fontFamily: 'monospace', color: t.text1 }}>{inv.number || inv.id}</td>
+                  <td style={{ padding: '11px 8px', fontSize: 13, color: t.text1 }}>{money(inv.amount_paid || inv.amount_due, inv.currency)}</td>
+                  <td style={{ padding: '11px 8px' }}>
+                    <span style={{ fontSize: 11.5, fontWeight: 700, textTransform: 'capitalize', color: inv.status === 'paid' ? t.green : inv.status === 'open' ? t.amber : t.text2 }}>{inv.status}</span>
+                  </td>
+                  <td style={{ padding: '11px 8px', textAlign: 'right' }}>
+                    {inv.invoice_pdf ? (
+                      <a href={inv.invoice_pdf} target="_blank" rel="noreferrer" style={{ fontSize: 12.5, color: t.accent, textDecoration: 'none' }}>PDF</a>
+                    ) : inv.hosted_invoice_url ? (
+                      <a href={inv.hosted_invoice_url} target="_blank" rel="noreferrer" style={{ fontSize: 12.5, color: t.accent, textDecoration: 'none' }}>View</a>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div style={{ ...card, marginTop: 24 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: t.text1, marginBottom: 6 }}>Admin: set plan directly</div>

@@ -118,6 +118,53 @@ func (s *SessionStore) IsRevoked(jti string) bool {
 	return ok
 }
 
+// RevokeAllForUser revokes every active session a user has — used after a
+// password reset, where forcing a fresh login on all devices is the point.
+func (s *SessionStore) RevokeAllForUser(ctx context.Context, username string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`UPDATE user_sessions SET revoked_at = now() WHERE username = $1 AND revoked_at IS NULL RETURNING id`, username)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	s.markRevokedLocal(ids...)
+	return nil
+}
+
+// RevokeOthersForUser revokes a user's sessions except one (their current one),
+// used after an authenticated password change so the acting device stays in.
+func (s *SessionStore) RevokeOthersForUser(ctx context.Context, username, exceptJTI string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`UPDATE user_sessions SET revoked_at = now() WHERE username = $1 AND id <> $2 AND revoked_at IS NULL RETURNING id`,
+		username, exceptJTI)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	s.markRevokedLocal(ids...)
+	return nil
+}
+
 func (s *SessionStore) markRevokedLocal(jtis ...string) {
 	s.mu.Lock()
 	for _, j := range jtis {

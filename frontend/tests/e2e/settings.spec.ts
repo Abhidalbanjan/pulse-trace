@@ -66,6 +66,9 @@ test.describe('Settings', () => {
     // state and offers enrolment — proving /api/v1/auth/mfa/status is wired.
     await expect(page.getByText('Not enabled')).toBeVisible({ timeout: 10000 });
     await expect(page.getByRole('button', { name: 'Set up authenticator' })).toBeVisible();
+    // The same tab hosts password change + active-session management (F18).
+    await expect(page.getByRole('heading', { name: 'Change Password' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Active Sessions' })).toBeVisible();
   });
 
   test('SSO tab shows configuration status', async ({ page }) => {

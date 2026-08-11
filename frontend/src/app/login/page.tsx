@@ -18,7 +18,32 @@ export default function LoginPage() {
   // and switch the form to a code prompt.
   const [mfaToken, setMfaToken] = useState<string | null>(null);
   const [mfaCode, setMfaCode] = useState('');
+  // Forgot-password: an inline sub-flow that posts the username and shows a
+  // uniform "check your email" acknowledgement (the API never reveals whether
+  // the account exists).
+  const [forgotMode, setForgotMode] = useState(false);
+  const [forgotSent, setForgotSent] = useState(false);
   const { login } = useAuth();
+
+  const handleForgot = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      await fetch('/api/v1/auth/password/forgot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: email }),
+      });
+      setForgotSent(true);
+    } catch {
+      // Even on a network error we show the same acknowledgement to avoid
+      // leaking anything about the account.
+      setForgotSent(true);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const finishLogin = (data: { token: string; role?: string; user?: unknown }) => {
     const userData = data.user || { id: 'temp-id', email: email, role: data.role || 'admin' };
@@ -150,10 +175,12 @@ export default function LoginPage() {
         </div>
 
         <h1 style={{ fontSize: '24px', fontWeight: 600, margin: '0 0 8px', color: t.text1 }}>
-          {mfaToken ? 'Two-factor authentication' : isLogin ? 'Welcome back' : 'Create your account'}
+          {forgotMode ? 'Reset your password' : mfaToken ? 'Two-factor authentication' : isLogin ? 'Welcome back' : 'Create your account'}
         </h1>
         <p style={{ color: t.text2, marginBottom: '32px', textAlign: 'center', fontSize: '14px' }}>
-          {mfaToken
+          {forgotMode
+            ? 'Enter your username and we’ll send a reset link if the account exists.'
+            : mfaToken
             ? 'Enter the 6-digit code from your authenticator app, or a recovery code.'
             : 'Enter your credentials to access the enterprise observability platform.'}
         </p>
@@ -168,7 +195,27 @@ export default function LoginPage() {
           </div>
         )}
 
-        {mfaToken ? (
+        {forgotMode ? (
+          forgotSent ? (
+            <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div style={{ padding: '14px 16px', background: t.green + '18', color: t.green, borderRadius: '10px', fontSize: '14px', textAlign: 'center' }}>
+                If an account exists for that username, a reset link is on its way.
+              </div>
+              <button type="button" onClick={() => { setForgotMode(false); setForgotSent(false); }} style={{ background: 'none', border: 'none', color: t.accent, fontSize: '14px', cursor: 'pointer' }}>← Back to sign in</button>
+            </div>
+          ) : (
+            <form onSubmit={handleForgot} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div>
+                <label style={labelStyle}>Email or Username</label>
+                <input type="text" value={email} onChange={(e) => setEmail(e.target.value)} required aria-label="Email or Username" style={inputStyle} placeholder="admin" />
+              </div>
+              <button type="submit" disabled={loading} style={{ width: '100%', padding: '14px', marginTop: '4px', fontSize: '15px', fontWeight: 600, background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, color: '#fff', border: 'none', borderRadius: '10px', cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1 }}>
+                {loading ? 'Sending…' : 'Send reset link'}
+              </button>
+              <button type="button" onClick={() => { setForgotMode(false); setError(''); }} style={{ background: 'none', border: 'none', color: t.text2, fontSize: '13px', cursor: 'pointer' }}>← Back to sign in</button>
+            </form>
+          )
+        ) : mfaToken ? (
           <form onSubmit={handleMfaSubmit} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
             <div>
               <label style={labelStyle}>Authentication code</label>
@@ -276,10 +323,15 @@ export default function LoginPage() {
           >
             {loading ? 'Authenticating...' : (isLogin ? 'Sign In' : 'Sign Up')}
           </button>
+          {isLogin && (
+            <button type="button" onClick={() => { setForgotMode(true); setError(''); }} style={{ background: 'none', border: 'none', color: t.text2, fontSize: '13px', cursor: 'pointer', alignSelf: 'center' }}>
+              Forgot password?
+            </button>
+          )}
         </form>
         )}
 
-        {!mfaToken && (
+        {!mfaToken && !forgotMode && (
         <div style={{
           width: '100%', display: 'flex', alignItems: 'center', gap: '16px', margin: '24px 0'
         }}>
@@ -289,7 +341,7 @@ export default function LoginPage() {
         </div>
         )}
 
-        {!mfaToken && (
+        {!mfaToken && !forgotMode && (
         <button
           type="button"
           onClick={handleSSO}
@@ -305,7 +357,7 @@ export default function LoginPage() {
         </button>
         )}
 
-        {!mfaToken && (
+        {!mfaToken && !forgotMode && (
         <p style={{ marginTop: '32px', fontSize: '14px', color: t.text2 }}>
           {isLogin ? "Don't have an account? " : "Already have an account? "}
           <span

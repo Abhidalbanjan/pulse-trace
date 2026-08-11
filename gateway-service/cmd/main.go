@@ -240,6 +240,14 @@ func main() {
 		mux.HandleFunc("GET /api/v1/auth/sessions", sessionHandler.List)
 		mux.HandleFunc("POST /api/v1/auth/sessions/revoke-others", sessionHandler.RevokeOthers)
 		mux.HandleFunc("POST /api/v1/auth/sessions/{id}/revoke", sessionHandler.Revoke)
+
+		// Password management (F18): authenticated change (revokes other sessions)
+		// + the anti-enumeration forgot/reset flow. forgot/reset are public (see
+		// the AuthMiddleware allowlist); change requires a session.
+		passwordHandler := auth.NewPasswordHandler(authHandler.GetDB(), sessionStore, auth.MailerFromEnv())
+		mux.HandleFunc("POST /api/v1/auth/password/change", passwordHandler.Change)
+		mux.HandleFunc("POST /api/v1/auth/password/forgot", passwordHandler.Forgot)
+		mux.HandleFunc("POST /api/v1/auth/password/reset", passwordHandler.Reset)
 		mux.HandleFunc("GET /api/v1/admin/users", authHandler.GetUsers)
 		mux.HandleFunc("POST /api/v1/admin/users", authHandler.CreateUser)
 		mux.HandleFunc("DELETE /api/v1/admin/users", authHandler.DeleteUser)

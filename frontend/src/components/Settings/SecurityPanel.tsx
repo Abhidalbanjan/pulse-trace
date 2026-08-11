@@ -29,6 +29,30 @@ export function SecurityPanel() {
   const [error, setError] = useState<string | null>(null);
   const [disableCode, setDisableCode] = useState('');
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [pwCurrent, setPwCurrent] = useState('');
+  const [pwNew, setPwNew] = useState('');
+  const [pwConfirm, setPwConfirm] = useState('');
+  const [pwMsg, setPwMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const changePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPwMsg(null);
+    if (pwNew !== pwConfirm) { setPwMsg({ ok: false, text: 'New passwords do not match.' }); return; }
+    if (pwNew.length < 8) { setPwMsg({ ok: false, text: 'New password must be at least 8 characters.' }); return; }
+    try {
+      const res = await fetchWithAuth('/api/v1/auth/password/change', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ current_password: pwCurrent, new_password: pwNew }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setPwMsg({ ok: true, text: 'Password changed. Other devices have been signed out.' });
+      setPwCurrent(''); setPwNew(''); setPwConfirm('');
+      loadSessions();
+    } catch (err) {
+      setPwMsg({ ok: false, text: err instanceof Error ? err.message : 'Failed to change password' });
+    }
+  };
 
   const loadSessions = useCallback(() => {
     fetchWithAuth('/api/v1/auth/sessions')
@@ -220,6 +244,18 @@ export function SecurityPanel() {
           </div>
         </div>
       )}
+
+      {/* Password change */}
+      <div style={{ marginTop: '40px', paddingTop: '28px', borderTop: `1px solid ${t.panelBorder}` }}>
+        <h3 style={{ fontSize: '19px', fontWeight: 700, margin: '0 0 16px', color: t.text1 }}>Change Password</h3>
+        <form onSubmit={changePassword} style={{ maxWidth: '420px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <input type="password" value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} required aria-label="Current password" placeholder="Current password" style={input} />
+          <input type="password" value={pwNew} onChange={(e) => setPwNew(e.target.value)} required aria-label="New password" placeholder="New password (min 8 chars)" style={input} />
+          <input type="password" value={pwConfirm} onChange={(e) => setPwConfirm(e.target.value)} required aria-label="Confirm new password" placeholder="Confirm new password" style={input} />
+          {pwMsg && <div style={{ fontSize: '13px', color: pwMsg.ok ? t.green : t.red }}>{pwMsg.text}</div>}
+          <button type="submit" style={{ ...primaryBtn, alignSelf: 'flex-start' }}>Change password</button>
+        </form>
+      </div>
 
       {/* Active sessions / device management */}
       <div style={{ marginTop: '40px', paddingTop: '28px', borderTop: `1px solid ${t.panelBorder}` }}>

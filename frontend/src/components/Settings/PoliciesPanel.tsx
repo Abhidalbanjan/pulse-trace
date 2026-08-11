@@ -15,6 +15,34 @@ interface Policy {
   enabled: boolean;
 }
 
+// Attribute catalog for the guided builder. These mirror the env the backend
+// evaluates a condition against (subject.role/tier/tenant_id, action,
+// resource.type — see auth.abacValidationEnv), so a rule built here maps 1:1
+// onto what actually runs. The backend /validate endpoint is the correctness
+// gate; this catalog is authoring convenience.
+const ATTRIBUTES: { key: string; label: string; suggestions: string[] }[] = [
+  { key: 'subject.role', label: 'User role', suggestions: [] },
+  { key: 'subject.tier', label: 'Tenant tier', suggestions: ['standard', 'pro', 'enterprise'] },
+  { key: 'subject.tenant_id', label: 'Tenant ID', suggestions: [] },
+  { key: 'action', label: 'Action', suggestions: ['read', 'create', 'update', 'delete'] },
+  { key: 'resource.type', label: 'Resource type', suggestions: ['incidents', 'topology', 'admin', 'settings'] },
+];
+const OPERATORS: { key: string; label: string }[] = [
+  { key: '==', label: 'is' },
+  { key: '!=', label: 'is not' },
+];
+
+interface Clause { attr: string; op: string; value: string }
+
+// buildCondition turns the guided clauses into an expr-lang string. String
+// values are JSON-quoted so operator-typed input can't break out of the literal.
+function buildCondition(clauses: Clause[], join: string): string {
+  return clauses
+    .filter((c) => c.value.trim() !== '')
+    .map((c) => `${c.attr} ${c.op} ${JSON.stringify(c.value)}`)
+    .join(` ${join} `);
+}
+
 export function PoliciesPanel() {
   const { tokens: t } = useTheme();
   const [policies, setPolicies] = useState<Policy[]>([]);
@@ -23,6 +51,13 @@ export function PoliciesPanel() {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: '', effect: 'deny', resource: '*', condition: '', priority: 100 });
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Guided builder state.
+  const [mode, setMode] = useState<'guided' | 'advanced'>('guided');
+  const [clauses, setClauses] = useState<Clause[]>([{ attr: 'subject.role', op: '==', value: '' }]);
+  const [join, setJoin] = useState('&&');
+  const [roleSuggestions, setRoleSuggestions] = useState<string[]>([]);
+  const [validity, setValidity] = useState<{ valid: boolean; error?: string } | null>(null);
 
   const fetchPolicies = useCallback(() => {
     fetchWithAuth('/api/v1/admin/policies')
@@ -40,17 +75,63 @@ export function PoliciesPanel() {
 
   useEffect(() => { fetchPolicies(); }, [fetchPolicies]);
 
+  // Pull real role names so the role clause offers the tenant's actual roles.
+  useEffect(() => {
+    fetchWithAuth('/api/v1/admin/roles')
+      .then(res => (res.ok ? res.json() : null))
+      .then(json => {
+        if (json?.data) setRoleSuggestions((json.data as { name: string }[]).map(r => r.name).filter(Boolean));
+      })
+      .catch(() => { /* suggestions are optional */ });
+  }, []);
+
+  // Keep the condition in sync with the builder while in guided mode.
+  const condition = mode === 'guided' ? buildCondition(clauses, join) : form.condition;
+
+  // Live-validate the condition against the backend compiler (debounced), so the
+  // operator sees the exact error before committing.
+  useEffect(() => {
+    const c = condition.trim();
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (!c) { if (!cancelled) setValidity(null); return; }
+      fetchWithAuth('/api/v1/admin/policies/validate', {
+        method: 'POST',
+        body: JSON.stringify({ condition: c }),
+      })
+        .then(res => res.json())
+        .then(j => { if (!cancelled) setValidity({ valid: !!j.valid, error: j.error }); })
+        .catch(() => { if (!cancelled) setValidity(null); });
+    }, 400);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [condition]);
+
+  const suggestionsFor = (attr: string): string[] => {
+    if (attr === 'subject.role' && roleSuggestions.length) return roleSuggestions;
+    return ATTRIBUTES.find(a => a.key === attr)?.suggestions ?? [];
+  };
+
   const createPolicy = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
-    if (!form.name.trim() || !form.condition.trim()) return;
+    const finalCondition = condition.trim();
+    if (!form.name.trim() || !finalCondition) {
+      setFormError('A name and at least one condition are required.');
+      return;
+    }
+    if (validity && !validity.valid) {
+      setFormError(`Condition is invalid: ${validity.error}`);
+      return;
+    }
     try {
       const res = await fetchWithAuth('/api/v1/admin/policies', {
         method: 'POST',
-        body: JSON.stringify(form),
+        body: JSON.stringify({ ...form, condition: finalCondition }),
       });
       if (!res.ok) throw new Error(await res.text());
       setForm({ name: '', effect: 'deny', resource: '*', condition: '', priority: 100 });
+      setClauses([{ attr: 'subject.role', op: '==', value: '' }]);
+      setValidity(null);
       setShowForm(false);
       fetchPolicies();
     } catch (err) {
@@ -96,6 +177,10 @@ export function PoliciesPanel() {
     background: 'transparent', color: t.text1, cursor: 'pointer',
   };
   const ghostRedBtnStyle: React.CSSProperties = { ...ghostBtnStyle, border: '1px solid ' + t.red, color: t.red };
+  const smallSelect: React.CSSProperties = { ...inputStyle, padding: '8px 10px', fontSize: '13px' };
+
+  const setClause = (i: number, patch: Partial<Clause>) =>
+    setClauses(cs => cs.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
 
   return (
     <div>
@@ -110,7 +195,7 @@ export function PoliciesPanel() {
       </div>
 
       {showForm && (
-        <form onSubmit={createPolicy} style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '20px', borderRadius: '12px', border: '1px solid ' + t.panelBorder, marginBottom: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        <form onSubmit={createPolicy} style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '20px', borderRadius: '12px', border: '1px solid ' + t.panelBorder, marginBottom: '24px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
             <input
               required
@@ -119,11 +204,7 @@ export function PoliciesPanel() {
               onChange={e => setForm({ ...form, name: e.target.value })}
               style={{ ...inputStyle, flex: 1, minWidth: '160px' }}
             />
-            <select
-              value={form.effect}
-              onChange={e => setForm({ ...form, effect: e.target.value })}
-              style={inputStyle}
-            >
+            <select value={form.effect} onChange={e => setForm({ ...form, effect: e.target.value })} style={inputStyle}>
               <option value="deny">deny</option>
               <option value="allow">allow</option>
             </select>
@@ -141,15 +222,97 @@ export function PoliciesPanel() {
               style={{ ...inputStyle, width: '100px' }}
             />
           </div>
-          <input
-            required
-            placeholder='Condition, e.g. subject.role == "viewer" && action != "read"'
-            value={form.condition}
-            onChange={e => setForm({ ...form, condition: e.target.value })}
-            style={{ ...inputStyle, fontFamily: 'monospace', fontSize: '13px' }}
-          />
+
+          {/* Guided / Advanced toggle */}
+          <div style={{ display: 'flex', gap: '4px', background: t.dark ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.05)', borderRadius: '8px', padding: '4px', alignSelf: 'flex-start' }}>
+            {(['guided', 'advanced'] as const).map(m => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => {
+                  if (m === 'advanced' && mode === 'guided') setForm(f => ({ ...f, condition: buildCondition(clauses, join) }));
+                  setMode(m);
+                }}
+                style={{
+                  padding: '6px 14px', borderRadius: '6px', border: 'none', fontSize: '12.5px', fontWeight: 600, cursor: 'pointer',
+                  background: mode === m ? (t.dark ? 'rgba(255,255,255,0.12)' : '#fff') : 'transparent',
+                  color: mode === m ? t.text1 : t.text2,
+                }}
+              >
+                {m === 'guided' ? 'Guided builder' : 'Advanced (expr)'}
+              </button>
+            ))}
+          </div>
+
+          {mode === 'guided' ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {clauses.length > 1 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '12.5px', color: t.text2 }}>
+                  Match
+                  <select value={join} onChange={e => setJoin(e.target.value)} style={smallSelect}>
+                    <option value="&&">ALL clauses (AND)</option>
+                    <option value="||">ANY clause (OR)</option>
+                  </select>
+                </div>
+              )}
+              {clauses.map((c, i) => (
+                <div key={i} style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <select value={c.attr} onChange={e => setClause(i, { attr: e.target.value })} style={smallSelect} aria-label="Attribute">
+                    {ATTRIBUTES.map(a => <option key={a.key} value={a.key}>{a.label}</option>)}
+                  </select>
+                  <select value={c.op} onChange={e => setClause(i, { op: e.target.value })} style={smallSelect} aria-label="Operator">
+                    {OPERATORS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+                  </select>
+                  <input
+                    list={`clause-suggest-${i}`}
+                    value={c.value}
+                    onChange={e => setClause(i, { value: e.target.value })}
+                    placeholder="value"
+                    aria-label="Value"
+                    style={{ ...smallSelect, flex: 1, minWidth: '140px' }}
+                  />
+                  <datalist id={`clause-suggest-${i}`}>
+                    {suggestionsFor(c.attr).map(s => <option key={s} value={s} />)}
+                  </datalist>
+                  {clauses.length > 1 && (
+                    <button type="button" onClick={() => setClauses(cs => cs.filter((_, idx) => idx !== i))} style={ghostRedBtnStyle} aria-label="Remove clause">✕</button>
+                  )}
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() => setClauses(cs => [...cs, { attr: 'action', op: '!=', value: '' }])}
+                style={{ ...ghostBtnStyle, alignSelf: 'flex-start' }}
+              >
+                + Add clause
+              </button>
+            </div>
+          ) : (
+            <input
+              placeholder='Condition, e.g. subject.role == "viewer" && action != "read"'
+              value={form.condition}
+              onChange={e => setForm({ ...form, condition: e.target.value })}
+              style={{ ...inputStyle, fontFamily: 'monospace', fontSize: '13px' }}
+            />
+          )}
+
+          {/* Generated expression + live validity */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            <code style={{ flex: 1, minWidth: '220px', fontFamily: 'monospace', fontSize: '12.5px', padding: '10px 12px', borderRadius: '8px', background: t.dark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.04)', color: condition.trim() ? t.text1 : t.text2, wordBreak: 'break-all' }}>
+              {condition.trim() || 'Your condition will appear here.'}
+            </code>
+            {condition.trim() && validity && (
+              <span style={{ fontSize: '12.5px', fontWeight: 700, color: validity.valid ? t.green : t.red, whiteSpace: 'nowrap' }}>
+                {validity.valid ? '✓ Valid' : '✗ Invalid'}
+              </span>
+            )}
+          </div>
+          {validity && !validity.valid && validity.error && (
+            <div style={{ color: t.red, fontSize: '12.5px', fontFamily: 'monospace' }}>{validity.error}</div>
+          )}
+
           {formError && <div style={{ color: t.red, fontSize: '13px' }}>{formError}</div>}
-          <button type="submit" style={{ ...primaryBtnStyle, alignSelf: 'flex-start' }}>Create Policy</button>
+          <button type="submit" disabled={!!(validity && !validity.valid)} style={{ ...primaryBtnStyle, alignSelf: 'flex-start', opacity: validity && !validity.valid ? 0.5 : 1 }}>Create Policy</button>
         </form>
       )}
 

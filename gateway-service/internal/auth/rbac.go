@@ -196,6 +196,27 @@ func (e *RBACEngine) Policies() []Policy {
 	return out
 }
 
+// abacValidationEnv returns the representative attribute environment a policy
+// condition is authored against: the same shape EvaluateABAC builds at request
+// time (subject.role/tenant_id/tier, resource.type, action). A condition that
+// compiles against this env is one that can actually run.
+func abacValidationEnv() map[string]interface{} {
+	return map[string]interface{}{
+		"subject":  map[string]interface{}{"role": "", "tenant_id": "", "tier": ""},
+		"resource": map[string]interface{}{"type": ""},
+		"action":   "",
+	}
+}
+
+// ValidateCondition compiles an expr-lang policy condition against the
+// representative env and returns a descriptive error if it is malformed or not
+// boolean-typed. Compile-only: it never runs the expression, so it is safe to
+// call on unsaved, operator-supplied input for live authoring feedback.
+func ValidateCondition(condition string) error {
+	_, err := expr.Compile(condition, expr.Env(abacValidationEnv()), expr.AsBool())
+	return err
+}
+
 // evaluateCondition compiles and runs an expr-lang boolean expression against
 // the subject/resource/action attributes. expr-lang is a sandboxed expression
 // language (no side effects, no arbitrary code execution) - safe to evaluate
@@ -471,11 +492,7 @@ func (e *RBACEngine) CreatePolicy(w http.ResponseWriter, r *http.Request) {
 
 	// Validate the condition compiles before persisting a policy that would
 	// otherwise silently no-op (or worse, error) on every request.
-	if _, err := evaluateCondition(req.Condition, map[string]interface{}{
-		"subject":  map[string]interface{}{"role": "", "tenant_id": "", "tier": ""},
-		"resource": map[string]interface{}{"type": ""},
-		"action":   "",
-	}); err != nil {
+	if err := ValidateCondition(req.Condition); err != nil {
 		http.Error(w, "invalid condition expression: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -506,6 +523,30 @@ func (e *RBACEngine) policyByID(id string) (Policy, bool) {
 	err := e.db.QueryRow("SELECT id, name, effect, resource, condition, priority, enabled FROM abac_policies WHERE id = $1", id).
 		Scan(&p.ID, &p.Name, &p.Effect, &p.Resource, &p.Condition, &p.Priority, &p.Enabled)
 	return p, err == nil
+}
+
+// ValidatePolicy handles POST /api/v1/admin/policies/validate {condition} and
+// reports whether the expr-lang condition compiles, so the policy-authoring UI
+// can give live feedback (and surface the exact compiler error) before an
+// operator commits a rule. Read-only: it never persists anything.
+func (e *RBACEngine) ValidatePolicy(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Condition string `json:"condition"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	resp := map[string]interface{}{"valid": true}
+	if strings.TrimSpace(req.Condition) == "" {
+		resp["valid"] = false
+		resp["error"] = "condition is empty"
+	} else if err := ValidateCondition(req.Condition); err != nil {
+		resp["valid"] = false
+		resp["error"] = err.Error()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // UpdatePolicy handles PUT /api/v1/admin/policies/{id} (used to enable/disable

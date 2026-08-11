@@ -222,3 +222,30 @@ func TestHasPermission_SavedSearchesViewer(t *testing.T) {
 		t.Error("viewer must not gain write on other resources from the carve-out")
 	}
 }
+
+func TestValidateCondition(t *testing.T) {
+	valid := []string{
+		`subject.role == "viewer"`,
+		`subject.role == "viewer" && action != "read"`,
+		`subject.tier == "enterprise" || subject.tenant_id == "acme"`,
+		`resource.type == "incidents" && action == "delete"`,
+	}
+	for _, c := range valid {
+		if err := ValidateCondition(c); err != nil {
+			t.Errorf("expected %q to be valid, got: %v", c, err)
+		}
+	}
+
+	invalid := []string{
+		`subject.role ==`,            // syntax error
+		`subject.role = "viewer"`,    // assignment, not comparison
+		`"just a string"`,            // not boolean-typed
+		`subject.role && action`,     // non-boolean operands
+		`(subject.role == "viewer"`,  // unbalanced parens
+	}
+	for _, c := range invalid {
+		if err := ValidateCondition(c); err == nil {
+			t.Errorf("expected %q to be rejected, but it compiled", c)
+		}
+	}
+}

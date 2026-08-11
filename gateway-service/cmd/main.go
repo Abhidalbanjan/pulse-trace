@@ -267,6 +267,9 @@ func main() {
 		// ABAC: attribute-based policy CRUD (expr-lang conditions over subject/resource/action)
 		mux.HandleFunc("GET /api/v1/admin/policies", rbacEngine.ListPolicies)
 		mux.HandleFunc("POST /api/v1/admin/policies", rbacEngine.CreatePolicy)
+		// Live condition validation for the guided policy builder (F18): compiles
+		// the expr-lang condition and returns the exact error, no persistence.
+		mux.HandleFunc("POST /api/v1/admin/policies/validate", rbacEngine.ValidatePolicy)
 		mux.HandleFunc("PUT /api/v1/admin/policies/{id}", rbacEngine.UpdatePolicy)
 		mux.HandleFunc("DELETE /api/v1/admin/policies/{id}", rbacEngine.DeletePolicy)
 

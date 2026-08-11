@@ -24,6 +24,18 @@ test.describe('Settings', () => {
     await expect(page.getByText('viewer-write-block')).toBeVisible({ timeout: 10000 });
   });
 
+  test('guided policy builder composes and validates a condition (F18)', async ({ page }) => {
+    await page.goto('/settings');
+    await page.getByRole('button', { name: 'Policies (ABAC)' }).click();
+    await page.getByRole('button', { name: '+ New Policy' }).click();
+
+    // Fill a guided clause: role is viewer. The builder generates the expr-lang
+    // and the backend /validate endpoint confirms it compiles.
+    await page.getByLabel('Value').first().fill('viewer');
+    await expect(page.getByText('subject.role == "viewer"')).toBeVisible();
+    await expect(page.getByText('✓ Valid')).toBeVisible({ timeout: 10000 });
+  });
+
   test('Rate Limits tab lists seeded rules', async ({ page }) => {
     await page.goto('/settings');
     await page.getByRole('button', { name: 'Rate Limits' }).click();

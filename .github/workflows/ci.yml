@@ -100,6 +100,52 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Dependency audit (F21). Criticals in production deps block the build;
+      # highs are reported but not gated, because a fresh framework advisory
+      # fixable only by a major bump must not wedge every PR (patchable
+      # transitives are pinned via package.json "overrides").
+      - name: Audit production dependencies (critical blocks)
+        run: npm audit --omit=dev --audit-level=critical
+
+      - name: Report high+ advisories (non-blocking)
+        if: always()
+        run: npm audit --omit=dev --audit-level=high || true
+
+  security:
+    name: security / govulncheck / ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - action-service
+          - alert-service
+          - correlation-service
+          - gateway-service
+          - log-service
+          - notification-service
+          - shared
+          - topology-service
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: ${{ matrix.service }}/go.sum
+
+      # govulncheck reports only vulnerabilities the code actually reaches, so a
+      # failure here is a real, call-path-verified CVE — not dependency-graph
+      # noise. Gated at zero across every Go module (F21).
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Scan ${{ matrix.service }}
+        working-directory: ${{ matrix.service }}
+        run: govulncheck ./...
+
   parity:
     name: backend↔frontend parity
     runs-on: ubuntu-latest

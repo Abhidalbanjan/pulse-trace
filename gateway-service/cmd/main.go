@@ -82,6 +82,12 @@ func main() {
 		if err := migrate.Run(ctx, authHandler.GetDB(), "gateway", gatewaymigrations.FS); err != nil {
 			log.Fatalf("gateway-service: schema migration failed: %v", err)
 		}
+		// Tamper-evidence back-fill (F20): hash-chain any audit rows written
+		// before the chain existed, so the whole trail verifies. Idempotent and
+		// self-skipping once every row already carries a hash.
+		if err := auth.BackfillAuditChain(ctx, authHandler.GetDB()); err != nil {
+			log.Printf("gateway-service: WARNING - audit chain back-fill failed: %v", err)
+		}
 	} else {
 		log.Println("gateway-service: WARNING — no database connection, skipping migrations")
 	}
@@ -254,8 +260,11 @@ func main() {
 		mux.HandleFunc("PUT /api/v1/admin/policies/{id}", rbacEngine.UpdatePolicy)
 		mux.HandleFunc("DELETE /api/v1/admin/policies/{id}", rbacEngine.DeletePolicy)
 
-		// Audit trail for role/policy/user mutations
+		// Audit trail for role/policy/user mutations — tamper-evident (F20): the
+		// log is hash-chained, exportable for compliance, and verifiable on demand.
 		mux.HandleFunc("GET /api/v1/admin/audit-log", auditLogHandler.ListAuditLog)
+		mux.HandleFunc("GET /api/v1/admin/audit-log/verify", auditLogHandler.VerifyAuditLog)
+		mux.HandleFunc("GET /api/v1/admin/audit-log/export", auditLogHandler.ExportAuditLog)
 
 		// Dynamic rate limit rules: DB-backed, no redeploy needed to change a limit
 		mux.HandleFunc("GET /api/v1/admin/rate-limits", rateLimitRuleHandler.ListRateLimitRules)

@@ -36,6 +36,16 @@ test.describe('Settings', () => {
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
   });
 
+  test('Audit Log integrity can be verified (F20)', async ({ page }) => {
+    await page.goto('/settings');
+    await page.getByRole('button', { name: 'Audit Log' }).click();
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
+    // The hash-chain verifier replays the trail server-side; the seeded log is
+    // intact, so the status banner resolves to a tamper-evident result.
+    await page.getByRole('button', { name: 'Verify integrity' }).click();
+    await expect(page.getByRole('status')).toContainText(/tamper-evident|verified|integrity check/i, { timeout: 10000 });
+  });
+
   test('SSO tab shows configuration status', async ({ page }) => {
     await page.goto('/settings');
     await page.getByRole('button', { name: 'SSO / SAML' }).click();

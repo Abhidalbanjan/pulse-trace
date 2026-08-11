@@ -315,19 +315,91 @@ jobs:
     name: docker build / ${{ matrix.service }}
     runs-on: ubuntu-latest
     needs: [go-services]
+    # Push to GHCR only on a merge to main; PRs just build to prove the image
+    # compiles. GITHUB_TOKEN needs package write for the push.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
+      # image = the Helm chart's per-service image name (values.yaml), so a pushed
+      # tag is exactly what deploy-staging pulls.
       matrix:
-        service:
-          - action-service
-          - alert-service
-          - correlation-service
-          - gateway-service
-          - log-service
-          - notification-service
-          - topology-service
+        include:
+          - { service: action-service,       image: pulse-trace-action-service }
+          - { service: alert-service,        image: pulse-trace-alert-service }
+          - { service: correlation-service,  image: pulse-trace-correlation-service }
+          - { service: gateway-service,      image: pulse-trace-gateway }
+          - { service: log-service,          image: pulse-trace-log-service }
+          - { service: notification-service, image: pulse-trace-notification-service }
+          - { service: topology-service,     image: pulse-trace-topology-service }
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build ${{ matrix.service }} image
-        run: docker build -f ${{ matrix.service }}/Dockerfile -t pulsetrace/${{ matrix.service }}:ci .
+      - name: Resolve lowercase owner (GHCR requires it)
+        id: owner
+        run: echo "lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.image }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.service }}/Dockerfile
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: |
+            ghcr.io/${{ steps.owner.outputs.lc }}/${{ matrix.image }}:${{ github.sha }}
+            ghcr.io/${{ steps.owner.outputs.lc }}/${{ matrix.image }}:latest
+
+  deploy-staging:
+    name: deploy to staging
+    runs-on: ubuntu-latest
+    needs: [go-services, frontend, parity, e2e, security, docker-build]
+    # Only on a merge to main, and only when a staging cluster is configured. The
+    # `staging` environment lets an operator add required reviewers / protection.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      # No STAGING_KUBECONFIG → skip cleanly rather than fail, so the pipeline is
+      # green on repos/forks without a cluster while remaining ready to deploy.
+      - name: Check for a staging kubeconfig
+        id: guard
+        run: |
+          if [ -n "${{ secrets.STAGING_KUBECONFIG }}" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No STAGING_KUBECONFIG secret set — skipping staging deploy."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: azure/setup-helm@v4
+        if: steps.guard.outputs.deploy == 'true'
+
+      - name: Configure kubeconfig
+        if: steps.guard.outputs.deploy == 'true'
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > "$HOME/.kube/config"
+
+      - name: Resolve lowercase owner
+        if: steps.guard.outputs.deploy == 'true'
+        id: owner
+        run: echo "lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: helm upgrade --install (staging, images pinned to this commit)
+        if: steps.guard.outputs.deploy == 'true'
+        run: |
+          helm upgrade --install pulsetrace helm/pulsetrace \
+            -n pulsetrace --create-namespace \
+            --set image.registry="ghcr.io/${{ steps.owner.outputs.lc }}/" \
+            --set image.tag="${{ github.sha }}" \
+            --wait --timeout 5m

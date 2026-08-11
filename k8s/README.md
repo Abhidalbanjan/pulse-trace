@@ -86,3 +86,9 @@ spec:
         - podSelector: {}   # only pods in this namespace (gateway + services)
 ```
 | `PLAYBOOK_HMAC_SECRET` | Must be identical on correlation-service and topology-service. |
+
+## Disaster recovery
+
+Backup, restore, and failover posture — RPO/RTO targets, per-datastore
+backup/restore runbooks, and the single-region-today / multi-region-future
+stance — are documented in [`DISASTER_RECOVERY.md`](../DISASTER_RECOVERY.md).

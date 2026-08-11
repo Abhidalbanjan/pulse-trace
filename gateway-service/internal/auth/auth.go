@@ -144,9 +144,9 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var storedHash, role, tenantID, tier string
-	var mfaEnabled bool
-	err := h.db.QueryRow("SELECT password_hash, role, tenant_id, tier, COALESCE(mfa_enabled, false) FROM users WHERE username = $1", creds.Username).
-		Scan(&storedHash, &role, &tenantID, &tier, &mfaEnabled)
+	var mfaEnabled, active bool
+	err := h.db.QueryRow("SELECT password_hash, role, tenant_id, tier, COALESCE(mfa_enabled, false), COALESCE(active, true) FROM users WHERE username = $1", creds.Username).
+		Scan(&storedHash, &role, &tenantID, &tier, &mfaEnabled, &active)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "Invalid username or password", http.StatusUnauthorized)
@@ -160,6 +160,13 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	// Compare passwords
 	if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(creds.Password)); err != nil {
 		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
+		return
+	}
+
+	// A deactivated account (e.g. deprovisioned over SCIM) cannot sign in, even
+	// with correct credentials.
+	if !active {
+		http.Error(w, "This account has been deactivated.", http.StatusForbidden)
 		return
 	}
 
@@ -309,6 +316,14 @@ func AuthMiddleware(keys *IngestionKeyStore, sessions *SessionStore) func(http.H
 			}
 
 			if isMigrationIngest {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// SCIM provisioning authenticates with its own bearer token (SCIM_TOKEN)
+			// inside the handler, not a JWT, so it bypasses the JWT gate here.
+			// Identity headers were already stripped above; nothing is trusted.
+			if strings.HasPrefix(r.URL.Path, "/scim/v2/") {
 				next.ServeHTTP(w, r)
 				return
 			}

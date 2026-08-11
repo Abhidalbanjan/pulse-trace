@@ -26,7 +26,8 @@
     "POST /api/v1/webhooks/github": "inbound GitHub webhook",
     "POST /api/v1/webhooks/stripe": "inbound Stripe billing webhook",
     "POST /api/v1/auth/register": "legacy alias of /auth/signup (UI uses signup)",
-    "POST /api/v1/slo/evaluate-pr": "CI/PR shift-left gate caller, not a screen"
+    "POST /api/v1/slo/evaluate-pr": "CI/PR shift-left gate caller, not a screen",
+    "/scim/v2": "SCIM 2.0 user provisioning (F18) — machine-to-machine, driven by the enterprise IdP's directory sync, not a UI screen"
   },
 
   "proxyUpstreams": {

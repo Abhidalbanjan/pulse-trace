@@ -248,6 +248,16 @@ func main() {
 		mux.HandleFunc("POST /api/v1/auth/password/change", passwordHandler.Change)
 		mux.HandleFunc("POST /api/v1/auth/password/forgot", passwordHandler.Forgot)
 		mux.HandleFunc("POST /api/v1/auth/password/reset", passwordHandler.Reset)
+
+		// SCIM 2.0 provisioning (F18): enterprise IdPs push user lifecycle here.
+		// Machine-to-machine — authenticated by SCIM_TOKEN inside the handler (see
+		// the AuthMiddleware allowlist for /scim/), disabled until a token is set.
+		scimHandler := auth.NewSCIMHandler(authHandler.GetDB(), sessionStore)
+		if scimHandler.Enabled() {
+			log.Println("gateway-service: SCIM 2.0 provisioning enabled at /scim/v2/Users")
+		}
+		mux.HandleFunc("/scim/v2/Users", scimHandler.ServeUsers)
+		mux.HandleFunc("/scim/v2/Users/{id}", scimHandler.ServeUser)
 		mux.HandleFunc("GET /api/v1/admin/users", authHandler.GetUsers)
 		mux.HandleFunc("POST /api/v1/admin/users", authHandler.CreateUser)
 		mux.HandleFunc("DELETE /api/v1/admin/users", authHandler.DeleteUser)

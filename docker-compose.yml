@@ -479,6 +479,17 @@ services:
       # Encrypts TOTP MFA secrets at rest (F18). A dev default keeps local
       # enrolment working out of the box; override in any real deployment.
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef}
+      # Base URL used to build password-reset links (F18). Points at the frontend.
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+      # SCIM 2.0 provisioning (F18): set a bearer token to enable /scim/v2/Users
+      # for an enterprise IdP directory sync. Unset = disabled. SMTP_* enable
+      # password-reset email delivery; unset = the reset link is logged instead.
+      SCIM_TOKEN: ${SCIM_TOKEN:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@pulsetrace.local}
     ports:
       - "8080:8080"
       - "4317:4317"

@@ -11,7 +11,7 @@
 import React, { useState } from 'react';
 import { useTheme } from '@/context/ThemeContext';
 import { api } from '@/lib/api/client';
-import type { Incident, IncidentTimelineEvent } from '@/lib/api/types';
+import type { Incident, IncidentTimelineEvent, CausalProviders } from '@/lib/api/types';
 import { useApiResource } from '@/lib/hooks/useApiResource';
 import { StateBoundary } from '@/components/ui';
 import { RemediationPanel } from './RemediationPanel';
@@ -50,6 +50,14 @@ export function IncidentsView() {
     { key: effectiveId ?? '', enabled: !!effectiveId },
   );
 
+  // Causal-AI provider chain health — deployment-wide, so fetched once and
+  // polled slowly. Backs the analyzer-health badge; a failure here must never
+  // break the incident view, so errors just leave the badge absent.
+  const providers = useApiResource<CausalProviders | null>(
+    () => api.getData<CausalProviders>('/api/v1/causal/providers').then((d) => d ?? null),
+    { pollMs: 60000 },
+  );
+
   const getSeverityColor = (severity: string) => {
     switch (severity) {
       case 'CRITICAL': return t.red;
@@ -73,6 +81,61 @@ export function IncidentsView() {
   };
 
   const criticalCount = list.filter((i) => i.severity === 'CRITICAL').length;
+
+  // Provider-health badge: a small pill telling the operator whether the
+  // flagship causal AI is running on a live LLM, degraded to a backup, or on
+  // the deterministic rule-based analyzer — without opening a config file.
+  const providerBadge = () => {
+    const ph = providers.data;
+    if (!ph) return null;
+    if (!ph.llm_enabled) {
+      return badgePill('Rule-based analyzer', t.text2, t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)',
+        'No LLM provider configured — causal analysis uses the deterministic rule-based engine.');
+    }
+    const plist = ph.providers ?? [];
+    const healthy = plist.filter((p) => p.healthy);
+    const allHealthy = plist.length > 0 && healthy.length === plist.length;
+    const anyHealthy = healthy.length > 0;
+    const color = allHealthy ? t.green : anyHealthy ? t.amber : t.red;
+    const label = !anyHealthy
+      ? 'Causal AI: all providers down'
+      : allHealthy
+        ? `Causal AI: ${healthy[0].name}`
+        : `Causal AI: ${healthy[0].name} (backup)`;
+    const title = plist
+      .map((p) => `${p.name}: ${p.healthy ? 'healthy' : `cooling down${p.cooldown_remaining ? ` ${p.cooldown_remaining}` : ''} (${p.failures} failures)`}`)
+      .join('\n');
+    return (
+      <span title={title} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 600, color: t.text2, background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', padding: '3px 10px', borderRadius: '100px' }}>
+        <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: color }} />
+        {label}
+      </span>
+    );
+  };
+
+  // Grounding badge: whether the narrative shown survived the hallucination
+  // guardrail intact ("Grounded") or had fabricated causal links removed
+  // ("Adjusted"). This is what lets an on-call engineer trust the story.
+  const groundingBadge = (inc: Incident) => {
+    const g = inc.causal?.grounding;
+    if (!g) return null;
+    if (g.grounded) {
+      return badgePill('✓ Grounded', t.green, `${t.green}18`,
+        'Every causal link was verified against services in this incident’s evidence.');
+    }
+    const dropped = g.dropped_links ?? 0;
+    const unknown = (g.unknown_services ?? []).join(', ');
+    return badgePill('⚠ Adjusted', t.amber, `${t.amber}20`,
+      `Guardrail removed ${dropped} unverifiable causal link(s)${unknown ? ` referencing: ${unknown}` : ''}. Confidence was capped.`);
+  };
+
+  function badgePill(label: string, fg: string, bg: string, title: string) {
+    return (
+      <span title={title} style={{ fontSize: '11px', fontWeight: 700, color: fg, background: bg, padding: '3px 10px', borderRadius: '100px', whiteSpace: 'nowrap' }}>
+        {label}
+      </span>
+    );
+  }
 
   return (
     <div style={{ display: 'flex', gap: '20px', height: 'calc(100vh - 124px)', minWidth: 0 }}>
@@ -155,6 +218,8 @@ export function IncidentsView() {
                   <div style={{ minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px', flexWrap: 'wrap' }}>
                       <h3 style={{ fontSize: '17px', fontWeight: 700, margin: 0, color: t.text1 }}>&#10022; AI Root Cause Analysis</h3>
+                      {inc.causal && groundingBadge(inc)}
+                      {providerBadge()}
                       {inc.causal && (
                         <span style={{ fontSize: '11px', color: t.text2 }}>
                           {inc.causal.model ? `${inc.causal.model} · ` : ''}

@@ -146,6 +146,47 @@ func (f *FallbackAnalyzer) candidates() []*fallbackLink {
 	return live
 }
 
+// ProviderHealth is a point-in-time snapshot of one link in the analyzer
+// chain, suitable for surfacing to an operator. It answers "is my flagship
+// causal AI actually working, and on which provider?" without exposing the
+// internal link type or requiring a live request.
+type ProviderHealth struct {
+	Name              string `json:"name"`                 // analyzer identifier, e.g. "claude-sonnet-4-5"
+	Healthy           bool   `json:"healthy"`              // not currently in a cooldown window
+	Failures          int    `json:"failures"`             // consecutive failures (0 once it recovers)
+	CooldownRemaining string `json:"cooldown_remaining,omitempty"` // human-readable, only while unhealthy
+}
+
+// HealthReporter is implemented by analyzers that can report per-provider
+// health. FallbackAnalyzer satisfies it; NoopAnalyzer does not (it has no
+// providers to be up or down). The correlation-service health endpoint type-
+// asserts for this so it works with either analyzer.
+type HealthReporter interface {
+	Health() []ProviderHealth
+}
+
+// Health returns the current state of every link in the chain, in priority
+// order. Safe for concurrent use.
+func (f *FallbackAnalyzer) Health() []ProviderHealth {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	now := f.now()
+	out := make([]ProviderHealth, 0, len(f.links))
+	for _, l := range f.links {
+		h := ProviderHealth{
+			Name:     l.analyzer.Name(),
+			Failures: l.failures,
+			Healthy:  !now.Before(l.downUntil),
+		}
+		if !h.Healthy {
+			h.CooldownRemaining = l.downUntil.Sub(now).Round(time.Second).String()
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
 func (f *FallbackAnalyzer) recordSuccess(l *fallbackLink) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

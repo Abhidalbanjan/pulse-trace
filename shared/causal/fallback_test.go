@@ -291,3 +291,41 @@ func TestNewAnalyzerChainRejectsEmptySpecs(t *testing.T) {
 		t.Error("expected an error for an empty spec list")
 	}
 }
+
+func TestFallbackHealthReportsPerLinkState(t *testing.T) {
+	clock := time.Now()
+	primary := alwaysFails("primary")
+	backup := &stubAnalyzer{name: "backup"}
+	f := newTestChain(t, &clock, primary, backup)
+
+	// Both links start healthy with no failures.
+	h := f.Health()
+	if len(h) != 2 {
+		t.Fatalf("expected 2 links, got %d", len(h))
+	}
+	if !h[0].Healthy || !h[1].Healthy || h[0].Failures != 0 {
+		t.Fatalf("expected both links healthy and unfailed, got %+v", h)
+	}
+
+	// One analysis: primary fails (goes into cooldown), backup answers.
+	if _, err := f.Analyze(context.Background(), &Evidence{}); err != nil {
+		t.Fatalf("expected success via backup, got %v", err)
+	}
+
+	h = f.Health()
+	if h[0].Healthy {
+		t.Error("primary should be unhealthy (cooling down) after a failure")
+	}
+	if h[0].Failures != 1 {
+		t.Errorf("expected 1 failure on primary, got %d", h[0].Failures)
+	}
+	if h[0].CooldownRemaining == "" {
+		t.Error("expected a cooldown-remaining string on the unhealthy link")
+	}
+	if !h[1].Healthy {
+		t.Error("backup should remain healthy after answering")
+	}
+
+	// FallbackAnalyzer satisfies HealthReporter (the handler type-asserts for it).
+	var _ HealthReporter = f
+}

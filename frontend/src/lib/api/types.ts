@@ -113,6 +113,19 @@ export interface PlaybookAction {
   rejected_at?: string;
 }
 
+/**
+ * Hallucination-guardrail verdict (mirrors shared/models.GroundingReport).
+ * Present on analyses produced after the guardrail shipped; absent on older
+ * rows. `grounded` is true when every causal link the analyzer produced
+ * referenced a service that actually appears in the incident's evidence.
+ */
+export interface GroundingReport {
+  grounded: boolean;
+  unknown_services?: string[];
+  dropped_links?: number;
+  confidence_penalty?: number;
+}
+
 /** Structured causal-AI output attached to an incident. */
 export interface CausalAnalysis {
   chain: CausalLink[];
@@ -122,6 +135,22 @@ export interface CausalAnalysis {
   model: string;
   analyzed_at?: string;
   playbook?: PlaybookAction;
+  grounding?: GroundingReport | null;
+}
+
+/** One link in the causal-AI provider chain's health (mirrors causal.ProviderHealth). */
+export interface CausalProviderHealth {
+  name: string;
+  healthy: boolean;
+  failures: number;
+  cooldown_remaining?: string;
+}
+
+/** Response of GET /api/v1/causal/providers — analyzer chain health. */
+export interface CausalProviders {
+  analyzer: string;
+  llm_enabled: boolean;
+  providers: CausalProviderHealth[];
 }
 
 export type IncidentSeverity = 'CRITICAL' | 'ERROR' | 'WARNING' | 'INFO' | string;

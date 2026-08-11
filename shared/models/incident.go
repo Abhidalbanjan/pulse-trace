@@ -83,13 +83,39 @@ type PlaybookAction struct {
 // computed asynchronously after incident upsert and stored on the incident
 // row as JSONB.
 type CausalAnalysis struct {
-	Chain      []CausalLink    `json:"chain"`            // ordered causal links, upstream → downstream
-	Narrative  string          `json:"narrative"`        // human-readable causal story
-	RootCause  string          `json:"root_cause"`       // refined hypothesis (supersedes regex inference)
-	Confidence float64         `json:"confidence"`       // 0.0 – 1.0
-	Model      string          `json:"model"`            // analyzer identifier (e.g., "claude-opus-4-7", "rule-based")
-	AnalyzedAt time.Time       `json:"analyzed_at"`
-	Playbook   *PlaybookAction `json:"playbook,omitempty"` // suggested recovery playbook
+	Chain      []CausalLink     `json:"chain"`            // ordered causal links, upstream → downstream
+	Narrative  string           `json:"narrative"`        // human-readable causal story
+	RootCause  string           `json:"root_cause"`       // refined hypothesis (supersedes regex inference)
+	Confidence float64          `json:"confidence"`       // 0.0 – 1.0
+	Model      string           `json:"model"`            // analyzer identifier (e.g., "claude-opus-4-7", "rule-based")
+	AnalyzedAt time.Time        `json:"analyzed_at"`
+	Playbook   *PlaybookAction  `json:"playbook,omitempty"`  // suggested recovery playbook
+	Grounding  *GroundingReport `json:"grounding,omitempty"` // hallucination-guardrail verdict (nil for pre-guardrail rows)
+}
+
+// GroundingReport records the outcome of validating an analyzer's output
+// against the incident's actual evidence — the hallucination guardrail.
+//
+// An LLM can name a service that is not in the incident, invent a causal edge
+// between two unrelated services, or report high confidence on a fabricated
+// story. Before the narrative is shown to an on-call engineer it is checked
+// against the real topology: any causal link touching a service the incident
+// never involved is dropped, and confidence is capped when that happens. This
+// report is what lets the UI mark a narrative "grounded" (every claim anchored
+// to real evidence) versus "adjusted" (hallucinated claims were removed).
+type GroundingReport struct {
+	// Grounded is true when every causal link the analyzer produced referenced
+	// only services present in the incident's evidence — nothing was dropped.
+	Grounded bool `json:"grounded"`
+	// UnknownServices are service names the analyzer referenced in the causal
+	// chain that do not appear anywhere in the incident evidence. Sorted, deduped.
+	UnknownServices []string `json:"unknown_services,omitempty"`
+	// DroppedLinks is how many causal links were removed for referencing an
+	// unknown service.
+	DroppedLinks int `json:"dropped_links,omitempty"`
+	// ConfidencePenalty is how much confidence was subtracted because the
+	// output contained hallucinated references (original − final).
+	ConfidencePenalty float64 `json:"confidence_penalty,omitempty"`
 }
 
 // IncidentAlert is the join record linking an alert to an incident.

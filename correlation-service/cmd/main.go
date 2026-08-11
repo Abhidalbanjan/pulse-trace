@@ -103,6 +103,7 @@ func main() {
 	// rule-based analyzer — the service runs identically without an API key.
 	analyzer := selectCausalAnalyzer()
 	log.Printf("causal analyzer: %s", analyzer.Name())
+	causalHealthHandler := handler.NewCausalHealthHandler(analyzer)
 
 	// ── Topology Client ───────────────────────────────────────────────────────
 	topoURL := os.Getenv("TOPOLOGY_SERVICE_URL")
@@ -222,6 +223,7 @@ func main() {
 	sloHandler.RegisterRoutes(mux)
 	anomalyHandler.RegisterRoutes(mux)
 	chatHandler.RegisterRoutes(mux)
+	causalHealthHandler.RegisterRoutes(mux)
 	mux.Handle("/debug/pprof/", http.DefaultServeMux)
 
 	chain := middleware.CORS(middleware.Tracing(serviceName)(middleware.RequestLogger(mux)))

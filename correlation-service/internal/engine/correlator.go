@@ -203,6 +203,22 @@ func (c *Correlator) scheduleCausalAnalysis(incidentID string) {
 			}
 		}
 
+		// Hallucination guardrail: validate the analyzer's output against the
+		// incident's real evidence before it is persisted or shown. Drops
+		// causal links referencing services the incident never involved and
+		// caps confidence when it does. Deterministic and applied to every
+		// result — LLM or rule-based — so the stored narrative is always
+		// anchored to real topology. See shared/causal.GroundAnalysis.
+		result = causal.GroundAnalysis(result, evidence)
+		if result.Grounding != nil && !result.Grounding.Grounded {
+			log.Printf("causal: guardrail pruned %d hallucinated link(s) from incident %s (unknown services: %v)",
+				result.Grounding.DroppedLinks, incidentID, result.Grounding.UnknownServices)
+			span.SetAttributes(
+				attribute.Int("causal.grounding.dropped_links", result.Grounding.DroppedLinks),
+				attribute.Bool("causal.grounding.grounded", false),
+			)
+		}
+
 		if err := c.repo.UpdateCausalAnalysis(ctx, incidentID, result); err != nil {
 			span.RecordError(err)
 			log.Printf("causal: persist analysis for %s: %v", incidentID, err)

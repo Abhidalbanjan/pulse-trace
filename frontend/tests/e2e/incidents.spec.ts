@@ -13,6 +13,15 @@ test.describe('Incidents', () => {
     await expect(page.getByText('Restart Postgres Pool')).toHaveCount(0);
   });
 
+  test('surfaces causal-AI provider health next to the analysis (F15)', async ({ page }) => {
+    await page.goto('/incidents');
+    await expect(page.getByText('AI Root Cause Analysis')).toBeVisible({ timeout: 15000 });
+    // The provider-health badge always resolves to a concrete state: a live/backup
+    // LLM ("Causal AI: <provider>") or the deterministic engine ("Rule-based
+    // analyzer") — proving GET /api/v1/causal/providers is wired, not blank.
+    await expect(page.getByText(/Causal AI:|Rule-based analyzer/).first()).toBeVisible({ timeout: 10000 });
+  });
+
   test('remediation panel is policy-aware and supports dry-run when a playbook exists', async ({ page }) => {
     await page.goto('/incidents');
     await expect(page.getByText('AI Root Cause Analysis')).toBeVisible({ timeout: 15000 });

@@ -156,6 +156,11 @@ func main() {
 		// with no route for it here, every request 404'd at the gateway and
 		// never reached correlation-service's ChatHandler.
 		{Prefix: "/api/v1/chat", Upstream: correlationServiceURL},
+		// Causal-AI provider health (F15): GET /api/v1/causal/providers reports
+		// whether the LLM analyzer chain is up and on which provider, backing
+		// the Incidents page's provider-health badge. Read-only, not tenant-
+		// scoped (deployment-wide config), served by correlation-service.
+		{Prefix: "/api/v1/causal", Upstream: correlationServiceURL},
 		{Prefix: "/api/v1/topology/", Upstream: topologyServiceURL},
 		{Prefix: "/api/v1/actions", Upstream: actionServiceURL},
 		{Prefix: "/api/v1/profiler/", Upstream: pyroscopeURL},

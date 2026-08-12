@@ -15,6 +15,7 @@ import type { Incident, IncidentTimelineEvent, CausalProviders } from '@/lib/api
 import { useApiResource } from '@/lib/hooks/useApiResource';
 import { StateBoundary } from '@/components/ui';
 import { RemediationPanel } from './RemediationPanel';
+import { PostmortemPanel } from './PostmortemPanel';
 
 export function IncidentsView() {
   const { tokens: t } = useTheme();
@@ -29,6 +30,8 @@ export function IncidentsView() {
   // Selection: sticky once the user clicks; defaults to the first incident so the
   // detail pane is never empty when there's data (derived, so no effect needed).
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Detail-pane tab: the live causal analysis vs. the AI-drafted postmortem (E1).
+  const [detailTab, setDetailTab] = useState<'analysis' | 'postmortem'>('analysis');
   const effectiveId = selectedId ?? list[0]?.id ?? null;
 
   // Per-incident detail carries the full causal analysis + playbook; refetched
@@ -213,6 +216,26 @@ export function IncidentsView() {
                   <h2 style={{ fontSize: '26px', fontWeight: 700, margin: 0, color: t.text1 }}>{titleOf(inc)}</h2>
                 </div>
 
+                {/* Detail tabs: live analysis vs. AI-drafted postmortem (E1) */}
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
+                  {([['analysis', 'Analysis'], ['postmortem', 'Postmortem']] as const).map(([tab, label]) => (
+                    <button
+                      key={tab}
+                      onClick={() => setDetailTab(tab)}
+                      style={{
+                        padding: '8px 16px', borderRadius: '10px', border: `1px solid ${t.panelBorder}`,
+                        background: detailTab === tab ? t.accentSoft : 'transparent',
+                        color: detailTab === tab ? t.accent : t.text2, fontWeight: 600, fontSize: '13px', cursor: 'pointer',
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {detailTab === 'postmortem' ? (
+                  <PostmortemPanel incidentId={inc.id} />
+                ) : (
                 <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.6fr) minmax(0,1fr)', gap: 'clamp(16px,3vw,40px)' }}>
                   {/* Left: causal analysis */}
                   <div style={{ minWidth: 0 }}>
@@ -294,6 +317,7 @@ export function IncidentsView() {
                     </StateBoundary>
                   </div>
                 </div>
+                )}
               </div>
             )}
           </StateBoundary>

@@ -13,6 +13,19 @@ test.describe('Incidents', () => {
     await expect(page.getByText('Restart Postgres Pool')).toHaveCount(0);
   });
 
+  test('generates an AI-drafted postmortem (Incidents E1)', async ({ page }) => {
+    await page.goto('/incidents');
+    await expect(page.getByText('AI Root Cause Analysis')).toBeVisible({ timeout: 15000 });
+    await page.getByRole('button', { name: 'Postmortem' }).click();
+    // Generate (LLM when configured, deterministic template otherwise — always works).
+    await page.getByRole('button', { name: /Generate postmortem/i }).click();
+    // The drafted document carries the structured sections.
+    await expect(page.getByRole('heading', { name: 'Summary' })).toBeVisible({ timeout: 20000 });
+    await expect(page.getByRole('heading', { name: 'Action Items' })).toBeVisible();
+    // Edit + Export controls appear once a draft exists.
+    await expect(page.getByRole('button', { name: 'Export' })).toBeVisible();
+  });
+
   test('surfaces causal-AI provider health next to the analysis (F15)', async ({ page }) => {
     await page.goto('/incidents');
     await expect(page.getByText('AI Root Cause Analysis')).toBeVisible({ timeout: 15000 });

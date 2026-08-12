@@ -118,6 +118,16 @@ type GroundingReport struct {
 	ConfidencePenalty float64 `json:"confidence_penalty,omitempty"`
 }
 
+// IncidentPostmortem is an editable, AI-drafted retrospective for an incident
+// (Incidents · E1). Generated from the incident's evidence and then editable.
+type IncidentPostmortem struct {
+	IncidentID  string     `json:"incident_id" db:"incident_id"`
+	Content     string     `json:"content" db:"content"`
+	Model       string     `json:"model" db:"model"` // provider/analyzer that drafted it, or "template"
+	GeneratedAt time.Time  `json:"generated_at" db:"generated_at"`
+	EditedAt    *time.Time `json:"edited_at,omitempty" db:"edited_at"`
+}
+
 // IncidentAlert is the join record linking an alert to an incident.
 type IncidentAlert struct {
 	IncidentID  string    `json:"incident_id" db:"incident_id"`

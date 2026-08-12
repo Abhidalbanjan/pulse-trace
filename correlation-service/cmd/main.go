@@ -139,6 +139,7 @@ func main() {
 	repo := repository.NewIncidentRepository(pool)
 	correlator := engine.NewCorrelator(repo, publisher, analyzer, topoClient, forwarder, autoRouter)
 	incidentHandler := handler.NewIncidentHandler(repo)
+	postmortemRepo := repository.NewPostmortemRepository(pool)
 	// Per-action approval authz: only roles in REMEDIATION_ELEVATED_ROLES (plus
 	// admin) may approve high-risk actions (scale/rollback/delete…); low-risk
 	// restarts stay approvable by anyone the gateway RBAC already let through.
@@ -159,6 +160,10 @@ func main() {
 	// ── LLM provider (shared by the SLO and chat handlers) ────────────────────
 	chatProvider := selectChatProvider()
 	log.Printf("correlation-service: chat/SLO LLM provider = %s", chatProvider.Name())
+
+	// AI-drafted incident postmortems (Incidents · E1): drafts from incident
+	// evidence via the LLM, falling back to a deterministic template.
+	postmortemHandler := handler.NewPostmortemHandler(repo, postmortemRepo, chatProvider)
 
 	sloRepo := repository.NewSLORepository(pool, quickwitURL)
 	sloHandler := handler.NewSLOHandler(sloRepo, chatProvider)
@@ -219,6 +224,7 @@ func main() {
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	incidentHandler.RegisterRoutes(mux)
+	postmortemHandler.RegisterRoutes(mux)
 	playbookHandler.RegisterRoutes(mux)
 	sloHandler.RegisterRoutes(mux)
 	anomalyHandler.RegisterRoutes(mux)

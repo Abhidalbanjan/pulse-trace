@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { fetchWithAuth } from '@/lib/api';
 import { TraceWaterfall } from './TraceWaterfall';
 import { TraceAnalyticsView } from './TraceAnalyticsView';
+import { TraceSearchView } from './TraceSearchView';
 import { useTheme } from '@/context/ThemeContext';
 
 interface SpanTag { key: string; value: unknown; }
@@ -30,7 +31,7 @@ export function TracesView() {
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(() => searchParams.get('trace'));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<'list' | 'analytics'>('list');
+  const [viewMode, setViewMode] = useState<'search' | 'list' | 'analytics'>('search');
   const [tagFilter, setTagFilter] = useState('');
 
   useEffect(() => {
@@ -160,37 +161,32 @@ export function TracesView() {
 
       {/* View Switcher */}
       <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-        <button
-          onClick={() => setViewMode('list')}
-          style={{
-            padding: '8px 16px',
-            borderRadius: '10px',
-            border: '1px solid ' + t.panelBorder,
-            background: viewMode === 'list' ? t.accentSoft : 'transparent',
-            color: viewMode === 'list' ? t.accent : t.text2,
-            fontWeight: 500,
-            cursor: 'pointer'
-          }}
-        >
-          Trace Explorer
-        </button>
-        <button
-          onClick={() => setViewMode('analytics')}
-          style={{
-            padding: '8px 16px',
-            borderRadius: '10px',
-            border: '1px solid ' + t.panelBorder,
-            background: viewMode === 'analytics' ? t.accentSoft : 'transparent',
-            color: viewMode === 'analytics' ? t.accent : t.text2,
-            fontWeight: 500,
-            cursor: 'pointer'
-          }}
-        >
-          Analytics (ClickHouse)
-        </button>
+        {([
+          ['search', 'Trace Search'],
+          ['list', 'Trace Explorer'],
+          ['analytics', 'Analytics'],
+        ] as const).map(([mode, label]) => (
+          <button
+            key={mode}
+            onClick={() => setViewMode(mode)}
+            style={{
+              padding: '8px 16px',
+              borderRadius: '10px',
+              border: '1px solid ' + t.panelBorder,
+              background: viewMode === mode ? t.accentSoft : 'transparent',
+              color: viewMode === mode ? t.accent : t.text2,
+              fontWeight: 500,
+              cursor: 'pointer',
+            }}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
-      {viewMode === 'analytics' ? (
+      {viewMode === 'search' ? (
+        <TraceSearchView />
+      ) : viewMode === 'analytics' ? (
         <TraceAnalyticsView />
       ) : (
         <>

@@ -355,6 +355,13 @@ func main() {
 	mux.HandleFunc("GET /api/v1/services", serviceHandler.ListServices)
 	mux.HandleFunc("GET /api/v1/services/{name}", serviceHandler.GetServiceDetail)
 
+	// First-class trace search + retrieval over ClickHouse otel_traces (Traces · E1):
+	// APM-style search (service/operation/duration/status/tag) → per-trace summaries,
+	// and full-span fetch for the waterfall.
+	tracesHandler := handler.NewTracesHandler(clickhouseURL)
+	mux.HandleFunc("GET /api/v1/traces", tracesHandler.Search)
+	mux.HandleFunc("GET /api/v1/traces/{id}", tracesHandler.GetTrace)
+
 	// Native Metrics APIs (powered by ClickHouse otel_metrics_* tables, populated
 	// by the collector's clickhouse/metrics exporter — see
 	// otel-collector/otel-collector-config.yaml)

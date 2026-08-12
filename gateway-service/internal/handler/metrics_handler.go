@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 )
 
 // MetricsHandler is PulseTrace's native metrics pillar: it queries the
@@ -143,6 +144,62 @@ func (h *MetricsHandler) ListMetricNames(w http.ResponseWriter, r *http.Request)
 
 	resp, err := h.ch.queryScoped(tenantFromRequest(r), query, nil)
 	if !h.writeErrOrEmpty(w, resp, err, "MetricsHandler.ListMetricNames") {
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(w, resp.Body)
+}
+
+// resolveMetricTable maps a user-facing type ("gauge"/"sum") to its ClickHouse
+// table, defaulting to gauge. Exposed as a helper so both QueryMetric and the
+// catalog validate the type the same way (an unknown type never reaches SQL).
+func resolveMetricTable(rawType string) string {
+	if tbl, ok := metricTableFor[rawType]; ok {
+		return tbl
+	}
+	return metricTableFor["gauge"]
+}
+
+// buildMetricCatalogSQL builds the label-discovery query for one metric: the
+// distinct label keys and their values (with occurrence counts) from the
+// datapoint Attributes map, over the last 24h. Pure (no I/O) and injection-safe
+// — the table is a validated enum and the metric name is a bind param — so it is
+// unit-testable and can't be used to read another tenant or table.
+func buildMetricCatalogSQL(table string) (string, map[string]string) {
+	sql := fmt.Sprintf(`
+		SELECT tup.1 AS label_key, tup.2 AS label_value, count() AS n
+		FROM (
+			SELECT arrayJoin(Attributes) AS tup
+			FROM pulsetrace.%s
+			WHERE ResourceAttributes['tenant.id'] = {tenant:String}
+			  AND MetricName = {metric:String}
+			  AND TimeUnix >= now() - INTERVAL 24 HOUR
+		)
+		GROUP BY label_key, label_value
+		ORDER BY label_key ASC, n DESC
+		LIMIT 500
+		FORMAT JSON
+	`, table)
+	return sql, map[string]string{}
+}
+
+// MetricCatalog handles GET /api/v1/metrics/catalog?metric=&type=gauge|sum —
+// the label dimensions (keys + values) available for a metric, so the explorer
+// can show what a series can be sliced by without the user guessing.
+func (h *MetricsHandler) MetricCatalog(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	metric := strings.TrimSpace(r.URL.Query().Get("metric"))
+	if metric == "" {
+		http.Error(w, "metric is required", http.StatusBadRequest)
+		return
+	}
+
+	sql, params := buildMetricCatalogSQL(resolveMetricTable(r.URL.Query().Get("type")))
+	params["metric"] = metric
+
+	resp, err := h.ch.queryScoped(tenantFromRequest(r), sql, params)
+	if !h.writeErrOrEmpty(w, resp, err, "MetricsHandler.MetricCatalog") {
 		return
 	}
 	defer resp.Body.Close()

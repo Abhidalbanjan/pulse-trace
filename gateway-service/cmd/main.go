@@ -366,6 +366,9 @@ func main() {
 	// by the collector's clickhouse/metrics exporter — see
 	// otel-collector/otel-collector-config.yaml)
 	mux.HandleFunc("GET /api/v1/metrics", metricsHandler.ListMetricNames)
+	// Metric explorer (Metrics · E1): label keys/values for a metric so the UI can
+	// show what a series can be sliced by.
+	mux.HandleFunc("GET /api/v1/metrics/catalog", metricsHandler.MetricCatalog)
 	mux.HandleFunc("GET /api/v1/metrics/query", metricsHandler.QueryMetric)
 
 	// Error Tracking APIs (ClickHouse grouping + Postgres triage workflow)

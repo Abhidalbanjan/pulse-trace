@@ -77,3 +77,36 @@ func TestMetricIntervalBucketSeconds_MatchesBuckets(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveMetricTable(t *testing.T) {
+	if resolveMetricTable("sum") != "otel_metrics_sum" {
+		t.Error("sum should resolve to otel_metrics_sum")
+	}
+	if resolveMetricTable("gauge") != "otel_metrics_gauge" {
+		t.Error("gauge should resolve to otel_metrics_gauge")
+	}
+	// Unknown/empty type defaults to gauge (never an unvalidated table name).
+	if resolveMetricTable("") != "otel_metrics_gauge" || resolveMetricTable("bogus; DROP") != "otel_metrics_gauge" {
+		t.Error("unknown type must default to the gauge table")
+	}
+}
+
+func TestBuildMetricCatalogSQL_TenantScopedBoundAndTableFromEnum(t *testing.T) {
+	sql, params := buildMetricCatalogSQL(resolveMetricTable("sum"))
+	if !strings.Contains(sql, "ResourceAttributes['tenant.id'] = {tenant:String}") {
+		t.Fatal("catalog query must be tenant-scoped")
+	}
+	if !strings.Contains(sql, "MetricName = {metric:String}") {
+		t.Fatal("metric name must be a bind param, not concatenated")
+	}
+	if !strings.Contains(sql, "pulsetrace.otel_metrics_sum") {
+		t.Fatal("expected the resolved (enum) table in the FROM clause")
+	}
+	if !strings.Contains(sql, "arrayJoin(Attributes)") || !strings.Contains(sql, "GROUP BY label_key, label_value") {
+		t.Fatal("expected label-facet extraction over the Attributes map")
+	}
+	// The builder binds nothing itself; the handler adds metric + tenant.
+	if len(params) != 0 {
+		t.Fatalf("builder should return no params, got %v", params)
+	}
+}

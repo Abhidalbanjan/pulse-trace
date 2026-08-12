@@ -56,6 +56,8 @@ interface MetricName {
 // instrumented counters and gauges (queue depth, cache hit rate, collector
 // throughput, etc).
 interface MetricRow { time_bucket: string; value: number; }
+// A label dimension of a metric (Metrics · E1 explorer): key → value + count.
+interface MetricLabel { label_key: string; label_value: string; n: number | string; }
 
 export function MetricsView() {
   const { tokens: t } = useTheme();
@@ -69,6 +71,20 @@ export function MetricsView() {
   const [chartLoading, setChartLoading] = useState(false);
   const [chartError, setChartError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [labels, setLabels] = useState<MetricLabel[]>([]);
+
+  // Metric explorer (E1): when a metric is selected, discover its label
+  // dimensions so the user can see what the series can be sliced by.
+  useEffect(() => {
+    if (!selected) return;
+    let cancelled = false;
+    const p = new URLSearchParams({ metric: selected.name, type: selected.type });
+    fetchWithAuth(`/api/v1/metrics/catalog?${p.toString()}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((j) => { if (!cancelled) setLabels(j?.data ?? []); })
+      .catch(() => { if (!cancelled) setLabels([]); });
+    return () => { cancelled = true; };
+  }, [selected]);
 
   useEffect(() => {
     fetchWithAuth('/api/v1/metrics')
@@ -222,6 +238,28 @@ export function MetricsView() {
                 ))}
               </div>
             </div>
+
+            {/* Label dimensions (Metrics · E1 explorer) */}
+            {labels.length > 0 && (() => {
+              const grouped = labels.reduce<Record<string, string[]>>((acc, l) => {
+                (acc[l.label_key] ||= []).push(l.label_value);
+                return acc;
+              }, {});
+              return (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', marginBottom: '16px', padding: '12px 14px', borderRadius: '12px', background: t.dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', border: '1px solid ' + t.panelBorder }}>
+                  <span style={{ fontSize: '11px', color: t.text2, textTransform: 'uppercase', fontWeight: 700, alignSelf: 'center' }}>Dimensions</span>
+                  {Object.entries(grouped).map(([key, values]) => (
+                    <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: '12px', fontWeight: 600, color: t.text1, fontFamily: 'monospace' }}>{key}:</span>
+                      {values.slice(0, 8).map((v) => (
+                        <span key={v} title={`${key} = ${v}`} style={{ fontSize: '11.5px', color: t.text2, padding: '2px 8px', borderRadius: '100px', background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)' }}>{v}</span>
+                      ))}
+                      {values.length > 8 && <span style={{ fontSize: '11px', color: t.text2 }}>+{values.length - 8}</span>}
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
 
             {chartError && (
               <div style={{ padding: '16px', background: t.redSoft, color: t.red, borderRadius: '8px', marginBottom: '16px' }}>{chartError}</div>

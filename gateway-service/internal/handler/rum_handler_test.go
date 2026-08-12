@@ -1,6 +1,9 @@
 package handler
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestClassifyUserAgent(t *testing.T) {
 	cases := []struct {
@@ -64,6 +67,42 @@ func TestSortedBreakdown_OrderedByCountThenName(t *testing.T) {
 	for i, w := range want {
 		if got[i].Name != w {
 			t.Errorf("position %d = %q, want %q (full: %+v)", i, got[i].Name, w, got)
+		}
+	}
+}
+
+func TestCwvVerdict(t *testing.T) {
+	cases := []struct{ metric string; p75 float64; want string }{
+		{"LCP", 2000, "good"}, {"LCP", 3000, "needs-improvement"}, {"LCP", 5000, "poor"},
+		{"INP", 150, "good"}, {"INP", 300, "needs-improvement"}, {"INP", 600, "poor"},
+		{"CLS", 0.05, "good"}, {"CLS", 0.2, "needs-improvement"}, {"CLS", 0.4, "poor"},
+		{"FID", 80, "good"}, {"lcp", 2500, "good"}, // boundary + case-insensitive
+		{"UNKNOWN", 1, "unknown"},
+	}
+	for _, c := range cases {
+		if got := cwvVerdict(c.metric, c.p75); got != c.want {
+			t.Errorf("cwvVerdict(%s, %v) = %s, want %s", c.metric, c.p75, got, c.want)
+		}
+	}
+}
+
+func TestBuildWebVitalsSQL_DimensionAndSafety(t *testing.T) {
+	page, dim := buildWebVitalsSQL("page", "24 HOUR")
+	if dim != "page" || !strings.Contains(page, "Path AS group_value") {
+		t.Fatalf("page dimension should group by Path, got dim=%s", dim)
+	}
+	dev, ddim := buildWebVitalsSQL("device", "7 DAY")
+	if ddim != "device" || !strings.Contains(dev, "'Tablet'") || !strings.Contains(dev, "'Mobile'") || !strings.Contains(dev, "'Desktop'") {
+		t.Fatal("device dimension should classify UA into Tablet/Mobile/Desktop in SQL")
+	}
+	// Unknown dimension defaults to page.
+	if _, d := buildWebVitalsSQL("bogus", "24 HOUR"); d != "page" {
+		t.Fatalf("unknown dimension should default to page, got %s", d)
+	}
+	// Always tenant-scoped + web_vitals only.
+	for _, sql := range []string{page, dev} {
+		if !strings.Contains(sql, "TenantID = {tenant:String}") || !strings.Contains(sql, "Type = 'web_vitals'") {
+			t.Fatal("web-vitals query must be tenant-scoped and web_vitals-only")
 		}
 	}
 }

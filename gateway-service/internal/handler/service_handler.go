@@ -246,6 +246,24 @@ func toStr(v interface{}) string {
 	return s
 }
 
+// toFloat coerces a decoded JSON value to float64, tolerating the two shapes
+// ClickHouse's FORMAT JSON produces for numerics: a JSON number (Float64 →
+// float64) and a quoted string (UInt64 and friends). Returns 0 on anything else.
+func toFloat(v interface{}) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case json.Number:
+		f, _ := n.Float64()
+		return f
+	case string:
+		f, _ := strconv.ParseFloat(n, 64)
+		return f
+	default:
+		return 0
+	}
+}
+
 // flagRegressions compares each version's error rate and p99 latency against the
 // version immediately before it (by first_seen) and marks a regression when either
 // jumps sharply - without this, spotting "v1.2.3 has 3x the error rate of v1.2.2"

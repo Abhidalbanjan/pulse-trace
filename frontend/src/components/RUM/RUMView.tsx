@@ -12,6 +12,9 @@ interface RUMTrendRow { time_bucket?: string; metric?: string; p75?: number; }
 interface RUMSession { session_id?: string; entry_path?: string; page_views?: number | string; errors?: number | string; duration_seconds?: number | string; last_seen?: string; browser?: string; os?: string; device?: string; }
 interface Breakdown { name: string; count: number }
 interface RUMDevices { browsers: Breakdown[]; os: Breakdown[]; devices: Breakdown[] }
+// A Core Web Vitals breakdown row (RUM · E4): p75 of one metric for one
+// page/device group, rated good/needs-improvement/poor server-side.
+interface WVRow { group_value?: string; metric?: string; p75?: number | string; samples?: number | string; rating?: string }
 
 const RANGE_OPTIONS = [
   { value: '24h', label: 'Last 24 Hours' },
@@ -29,6 +32,18 @@ export function RUMView() {
   const [devices, setDevices] = useState<RUMDevices>({ browsers: [], os: [], devices: [] });
   const [range, setRange] = useState('24h');
   const [loading, setLoading] = useState(true);
+  const [wvDimension, setWvDimension] = useState<'page' | 'device'>('page');
+  const [webVitals, setWebVitals] = useState<WVRow[]>([]);
+
+  // Core Web Vitals breakdown by the selected dimension + window (E4).
+  useEffect(() => {
+    let cancelled = false;
+    fetchWithAuth(`/api/v1/rum/web-vitals?dimension=${wvDimension}&interval=${range}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((j) => { if (!cancelled) setWebVitals(j?.data ?? []); })
+      .catch(() => { if (!cancelled) setWebVitals([]); });
+    return () => { cancelled = true; };
+  }, [range, wvDimension]);
 
   useEffect(() => {
     // Fetch Web Vitals Analytics
@@ -85,6 +100,27 @@ export function RUMView() {
     return Array.from(byTime.values()).sort((a, b) => String(a.time_bucket).localeCompare(String(b.time_bucket)));
   }, [trends]);
   const trendMetrics = React.useMemo(() => Array.from(new Set(trends.map(r => r.metric).filter(Boolean))) as string[], [trends]);
+
+  // Pivot flat CWV rows into one row per page/device group with a cell per metric.
+  const wvPivot = React.useMemo(() => {
+    const metricSet = new Set<string>();
+    const byGroup = new Map<string, Record<string, { p75: number; rating: string }>>();
+    for (const r of webVitals) {
+      const g = r.group_value || '(none)';
+      const m = r.metric || '';
+      if (!m) continue;
+      metricSet.add(m);
+      if (!byGroup.has(g)) byGroup.set(g, {});
+      byGroup.get(g)![m] = { p75: Number(r.p75 ?? 0), rating: r.rating || 'unknown' };
+    }
+    return {
+      metrics: Array.from(metricSet).sort(),
+      rows: Array.from(byGroup.entries()).map(([group, cells]) => ({ group, cells })),
+    };
+  }, [webVitals]);
+
+  const ratingColor = (rating: string) => (rating === 'good' ? t.green : rating === 'poor' ? t.red : rating === 'needs-improvement' ? t.amber : t.text2);
+  const fmtVital = (metric: string, p75: number) => (metric.toUpperCase() === 'CLS' ? p75.toFixed(3) : `${Math.round(p75)}ms`);
 
   // Core Web Vitals are rated at the 75th percentile (Google's methodology), so
   // read p75_value — the number the good/needs-improvement/poor thresholds below
@@ -221,6 +257,54 @@ export function RUMView() {
                     ))}
                   </LineChart>
                 </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+
+          {/* Core Web Vitals breakdown by page / device (RUM · E4) */}
+          <div style={{ padding: '22px 24px', borderRadius: '20px', background: t.panelBg, border: '1px solid ' + t.panelBorder, backdropFilter: 'blur(30px) saturate(180%)', boxShadow: t.shadow }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginBottom: '16px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 700, margin: 0 }}>Web Vitals by {wvDimension === 'page' ? 'Page' : 'Device'} (p75)</h3>
+              <div style={{ display: 'flex', gap: '4px', background: t.dark ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.05)', borderRadius: '8px', padding: '4px' }}>
+                {(['page', 'device'] as const).map((d) => (
+                  <button key={d} onClick={() => setWvDimension(d)} style={{ padding: '6px 14px', borderRadius: '6px', border: 'none', fontSize: '12.5px', fontWeight: 600, cursor: 'pointer', background: wvDimension === d ? (t.dark ? 'rgba(255,255,255,0.12)' : '#fff') : 'transparent', color: wvDimension === d ? t.text1 : t.text2, textTransform: 'capitalize' }}>{d}</button>
+                ))}
+              </div>
+            </div>
+            {wvPivot.rows.length === 0 ? (
+              <div style={{ padding: '28px', textAlign: 'center', color: t.text2, fontSize: '13px' }}>No web-vitals datapoints for this breakdown yet.</div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid ' + t.panelBorder }}>
+                      <th style={{ padding: '10px 12px', fontSize: '12px', fontWeight: 600, color: t.text2, textTransform: 'capitalize' }}>{wvDimension}</th>
+                      {wvPivot.metrics.map((m) => (
+                        <th key={m} style={{ padding: '10px 12px', fontSize: '12px', fontWeight: 600, color: t.text2 }}>{m}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {wvPivot.rows.map((row) => (
+                      <tr key={row.group} style={{ borderBottom: '1px solid ' + t.panelBorder }}>
+                        <td style={{ padding: '11px 12px', fontSize: '13px', color: t.text1, fontFamily: 'monospace', maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.group}>{row.group}</td>
+                        {wvPivot.metrics.map((m) => {
+                          const cell = row.cells[m];
+                          return (
+                            <td key={m} style={{ padding: '11px 12px', fontSize: '13px' }}>
+                              {cell ? (
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: ratingColor(cell.rating), flexShrink: 0 }} />
+                                  <span style={{ color: t.text1 }}>{fmtVital(m, cell.p75)}</span>
+                                </span>
+                              ) : <span style={{ color: t.text2 }}>—</span>}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </div>

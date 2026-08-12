@@ -336,6 +336,114 @@ func (h *RUMHandler) GetSessions(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": chResult.Data})
 }
 
+// cwvVerdict rates a Core Web Vital's p75 value against Google's
+// good/needs-improvement/poor thresholds. Pure and unit-tested so the rating
+// logic has one source of truth. Latency metrics are in milliseconds; CLS is
+// unitless. An unknown metric returns "unknown" rather than a misleading rating.
+func cwvVerdict(metric string, p75 float64) string {
+	switch strings.ToUpper(strings.TrimSpace(metric)) {
+	case "LCP":
+		return cwvBand(p75, 2500, 4000)
+	case "INP":
+		return cwvBand(p75, 200, 500)
+	case "FID":
+		return cwvBand(p75, 100, 300)
+	case "CLS":
+		return cwvBand(p75, 0.1, 0.25)
+	case "FCP":
+		return cwvBand(p75, 1800, 3000)
+	case "TTFB":
+		return cwvBand(p75, 800, 1800)
+	default:
+		return "unknown"
+	}
+}
+
+func cwvBand(v, good, poor float64) string {
+	switch {
+	case v <= good:
+		return "good"
+	case v <= poor:
+		return "needs-improvement"
+	default:
+		return "poor"
+	}
+}
+
+// webVitalsGroupExpr returns the ClickHouse GROUP-BY expression for a CWV
+// breakdown dimension. "device" classifies the User-Agent in SQL (so p75s stay
+// correct per group), mirroring classifyUserAgent's iPad→Tablet / mobile→Mobile
+// rules; "page" groups by Path. The expression references only fixed column
+// names — no user input — so it is injection-safe. Any other dimension defaults
+// to page.
+func webVitalsGroupExpr(dimension string) (expr string, resolvedDimension string) {
+	if strings.EqualFold(dimension, "device") {
+		ua := "UserAgent"
+		return "multiIf(" +
+			"positionCaseInsensitive(" + ua + ", 'iPad') > 0 OR positionCaseInsensitive(" + ua + ", 'Tablet') > 0, 'Tablet', " +
+			"positionCaseInsensitive(" + ua + ", 'Mobi') > 0 OR positionCaseInsensitive(" + ua + ", 'Android') > 0 OR positionCaseInsensitive(" + ua + ", 'iPhone') > 0, 'Mobile', " +
+			"'Desktop')", "device"
+	}
+	return "Path", "page"
+}
+
+// buildWebVitalsSQL builds the grouped p75-per-metric CWV query. Pure and
+// injection-safe: the group expression is from a fixed enum and the interval is
+// the validated enum from rumInterval; the tenant is bound by tenantQuery.
+func buildWebVitalsSQL(dimension, sqlInterval string) (sql, resolvedDimension string) {
+	groupExpr, dim := webVitalsGroupExpr(dimension)
+	sql = fmt.Sprintf(`
+		SELECT
+			%s AS group_value,
+			MetricName AS metric,
+			quantile(0.75)(MetricValue) AS p75,
+			count() AS samples
+		FROM pulsetrace.rum_events
+		WHERE TenantID = {tenant:String} AND Type = 'web_vitals' AND Timestamp >= now() - INTERVAL %s
+		GROUP BY group_value, metric
+		HAVING group_value != ''
+		ORDER BY group_value ASC, metric ASC
+		LIMIT 500
+		FORMAT JSON
+	`, groupExpr, sqlInterval)
+	return sql, dim
+}
+
+// GetWebVitals returns Core Web Vitals (p75 per metric) broken down by page or
+// device, each annotated with its good/needs-improvement/poor rating (RUM · E4).
+//
+//	GET /api/v1/rum/web-vitals?dimension=page|device&interval=24h|7d
+func (h *RUMHandler) GetWebVitals(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	sqlInterval, _ := rumInterval(r)
+
+	sql, dimension := buildWebVitalsSQL(r.URL.Query().Get("dimension"), sqlInterval)
+	resp, err := h.tenantQuery(r, sql)
+	if err != nil {
+		http.Error(w, "failed to query web vitals", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"dimension": dimension, "data": []interface{}{}})
+		return
+	}
+
+	var chResult struct {
+		Data []map[string]interface{} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&chResult); err != nil {
+		http.Error(w, "failed to decode web vitals", http.StatusInternalServerError)
+		return
+	}
+	// Annotate each row with its rating server-side so the threshold logic is
+	// unit-tested and consistent everywhere.
+	for _, row := range chResult.Data {
+		row["rating"] = cwvVerdict(toStr(row["metric"]), toFloat(row["p75"]))
+	}
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"dimension": dimension, "data": chResult.Data})
+}
+
 // GetDevices returns the device / browser / OS breakdown over the window. The
 // User-Agent classification runs server-side (classifyUserAgent) so the same
 // rules produce the sessions' device labels and this breakdown. Scoped to tenant.

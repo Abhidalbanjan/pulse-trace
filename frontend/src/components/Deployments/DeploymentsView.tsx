@@ -15,6 +15,15 @@ import type { DeployGate } from '@/lib/api/types';
 import { useApiResource } from '@/lib/hooks/useApiResource';
 import { StateBoundary } from '@/components/ui';
 
+interface DORAMetrics {
+  window_days: number;
+  total_deploys: number;
+  deploy_frequency_per_day: number; deploy_frequency_rating: string;
+  change_failure_rate_pct: number; change_failure_rating: string;
+  mttr_minutes: number; mttr_rating: string;
+  resolved_incidents: number;
+}
+
 export function DeploymentsView() {
   const { tokens: t } = useTheme();
   const [showSetup, setShowSetup] = useState(false);
@@ -24,6 +33,16 @@ export function DeploymentsView() {
     { pollMs: 20000 },
   );
   const list = gates.data ?? [];
+
+  // DORA scorecard (Deploy Gates · E2).
+  const dora = useApiResource<DORAMetrics | null>(
+    () => api.get<DORAMetrics>('/api/v1/deployments/dora').then((d) => d ?? null),
+    { pollMs: 60000 },
+  );
+
+  const ratingColor = (r: string) => (r === 'elite' ? t.green : r === 'high' ? t.accent : r === 'medium' ? t.amber : r === 'n/a' ? t.text2 : t.red);
+  const fmtMTTR = (min: number) => (min <= 0 ? '—' : min < 60 ? `${Math.round(min)}m` : min < 24 * 60 ? `${(min / 60).toFixed(1)}h` : `${(min / 1440).toFixed(1)}d`);
+  const fmtFreq = (perDay: number) => (perDay >= 1 ? `${perDay.toFixed(1)}/day` : perDay > 0 ? `${(perDay * 7).toFixed(1)}/wk` : '—');
 
   const webhookUrl = typeof window !== 'undefined' ? `${window.location.origin}/api/v1/webhooks/github` : '/api/v1/webhooks/github';
 
@@ -41,6 +60,27 @@ export function DeploymentsView() {
           {showSetup ? 'Hide setup' : 'Configure webhook'}
         </button>
       </div>
+
+      {/* DORA scorecard (Deploy Gates · E2) */}
+      {dora.data && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', marginBottom: '24px' }}>
+          {[
+            { label: 'Deploy frequency', value: fmtFreq(dora.data.deploy_frequency_per_day), rating: dora.data.deploy_frequency_rating, sub: `${dora.data.total_deploys} deploys · ${Math.round(dora.data.window_days)}d` },
+            { label: 'Change-failure rate', value: `${dora.data.change_failure_rate_pct.toFixed(0)}%`, rating: dora.data.change_failure_rating, sub: 'deploys followed by an incident' },
+            { label: 'Time to restore (MTTR)', value: fmtMTTR(dora.data.mttr_minutes), rating: dora.data.mttr_rating, sub: `${dora.data.resolved_incidents} resolved incidents` },
+            { label: 'Lead time', value: 'n/a', rating: 'n/a', sub: 'needs commit timestamps' },
+          ].map((tile) => (
+            <div key={tile.label} style={{ background: t.panelBg, border: '1px solid ' + t.panelBorder, borderRadius: '14px', padding: '16px 18px' }}>
+              <div style={{ fontSize: '12px', color: t.text2, marginBottom: '8px' }}>{tile.label}</div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px' }}>
+                <span style={{ fontSize: '24px', fontWeight: 700, color: t.text1 }}>{tile.value}</span>
+                <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', color: ratingColor(tile.rating) }}>{tile.rating}</span>
+              </div>
+              <div style={{ fontSize: '11.5px', color: t.text2, marginTop: '6px' }}>{tile.sub}</div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {showSetup && (
         <div style={{ background: t.panelBg, border: '1px solid ' + t.panelBorder, borderRadius: '14px', padding: '18px', marginBottom: '20px' }}>

@@ -1,0 +1,560 @@
+# PulseTrace vs OpenObserve — Gap Analysis & Plan to Win Every Dimension
+
+_Author: competitive engineering plan · Created: 2026-08-13_
+_Subject: [openobserve/openobserve](https://github.com/openobserve/openobserve) (AGPL-3.0, Rust) as documented at openobserve.ai/docs as of Aug 2026._
+_Implementation plan: [COMPETITIVE_OPENOBSERVE_IMPLEMENTATION.md](COMPETITIVE_OPENOBSERVE_IMPLEMENTATION.md) — the phase-by-phase "how"._
+
+This document does three things:
+
+1. **Grounds both products honestly** — what PulseTrace actually is in this repo
+   (not what the README claims), and what OpenObserve actually ships.
+2. **Names every dimension where OpenObserve is genuinely better**, with the
+   mechanism that makes it better — not a feature-name list.
+3. **Gives an executable plan (Waves O0–O7)** that first reaches parity on those,
+   then adds a *strictly-better delta* on every dimension, including the ones we
+   already win.
+
+It follows the house conventions of [enhancements/README.md](enhancements/README.md):
+epics numbered `E1…En`, effort in S/M/L, explicit backend + frontend touchpoints,
+a DoD per epic, and the parity gate stays at 100%.
+
+---
+
+## 0. Method and evidence base
+
+| Side | How it was assessed |
+| --- | --- |
+| PulseTrace | Direct code read: 220 Go files across 8 modules, 66 `.tsx` screens/components, all HTTP routes extracted from the 6 services, `docker-compose.yml` (23 runtime containers), Quickwit index + Kafka source config, ClickHouse table DDL, [ROAD_TO_100.md](../ROAD_TO_100.md), [PARITY_REPORT.md](../PARITY_REPORT.md), [PERF_BASELINE.md](../PERF_BASELINE.md). |
+| OpenObserve | Public repo README + openobserve.ai docs: architecture (router/ingester/querier/compactor/scheduler), streams, pipelines, dashboards, enterprise edition. Performance figures below are **their published claims**, not independently measured — closing that is Wave O0. |
+
+### 0.1 What PulseTrace actually is (correcting the README)
+
+The README's diagram says logs land in ClickHouse. **They do not.** The real
+topology, from the code:
+
+- **Logs** → Kafka `logs` topic → **Quickwit** (`pulsetrace-logs`, `mode: dynamic`,
+  VRL transform in [`quickwit/kafka-source.yaml`](../../quickwit/kafka-source.yaml)).
+  `log-service/internal/consumer/` is **empty** — there is no ClickHouse log
+  consumer. All four log-ingest paths (native, OTLP via
+  [`logbridge`](../../gateway-service/internal/logbridge/logbridge.go), Datadog,
+  Splunk HEC) converge on that one topic.
+- **Traces / metrics** → OTel Collector → ClickHouse `otel_traces` / `otel_metrics`,
+  queried by param-driven handlers that build SQL server-side.
+- **RUM / synthetics** → ClickHouse app-owned tables, `PARTITION BY TenantID`,
+  hardcoded `TTL … + INTERVAL 7 DAY`.
+- **Control plane** → Postgres (alerts, incidents, SLOs, RBAC, billing, audit).
+- **Topology** → Neo4j.
+
+This matters for the plan: our log tier is **already object-store-native**
+(Quickwit splits), which is closer to OpenObserve's economics than the README
+suggests — but the **metrics/traces tier is SSD-resident ClickHouse**, which is
+where the cost gap actually lives. Fix the README as part of O0.
+
+### 0.2 What OpenObserve actually is
+
+A single Rust binary that can run five roles (router, ingester, querier,
+compactor, scheduler). Ingest → parse → schema-evolve → real-time alert eval →
+WAL (hourly buckets, 128 MB files) → memtable (256 MB) → immutable snapshot →
+**Parquet on object storage**; compactor merges to ≤2 GB files and enforces
+retention. Queriers are stateless, cache Parquet in memory, and a leader querier
+fans work out over gRPC. Metadata: SQLite (single node) or Postgres + NATS (HA).
+Claims: 140× lower storage cost than Elasticsearch, 2+ PB/day at the largest
+deployment, ~2.6 TB/day on a single node.
+
+---
+
+## 1. Head-to-head scorecard
+
+Verdict is **today**, before any work in this plan.
+
+| # | Dimension | PulseTrace today | OpenObserve today | Verdict |
+| --- | --- | --- | --- | :---: |
+| D1 | Time-to-first-data / deployability | 23 containers, 11 volumes, Kafka+ZK+Neo4j+RabbitMQ+Redis+CH+PG+Quickwit+MinIO+Azurite+Jaeger+Prom+Grafana+Pyroscope | one binary / one container, SQLite + disk, no deps | **OO** |
+| D2 | Storage economics | Quickwit splits (good) + ClickHouse SSD hot for traces/metrics/RUM; S3/Azure/GCS only as *cold* tier | Parquet-on-object-store as the **primary** tier, compaction, 99% search-space pruning | **OO** |
+| D3 | Ad-hoc query power | No user query language. Logs = Quickwit query string; metrics = fixed params → server-built SQL; no joins, no aggregations, no user SQL | SQL over any stream + PromQL for metrics + VRL functions + visual builder | **OO** |
+| D4 | Custom dashboards | **None.** No `/dashboards` route exists | Folders, tabs, 19+ panel types, variables + dependencies, filters, time-comparison, drilldown, import/export, histogram cache | **OO** |
+| D5 | Streams / schema flexibility | Fixed tables; Quickwit index is `mode: dynamic` but nothing surfaces the inferred schema; TTLs hardcoded in DDL; no per-tenant retention | Stream registry, schema inference + evolution, per-stream FTS keys / partition keys / UDS / retention, stream stats | **OO** |
+| D6 | Ingest pipelines / transforms | Vector in compose + one VRL script in the Quickwit source — no user-facing product | Real-time + scheduled pipelines, no-code graph editor, VRL functions, enrichment tables, remote destinations, import/export | **OO** |
+| D7 | Ingestion source breadth | OTLP (gRPC+HTTP), native JSON, Datadog logs + v0.3/0.4/0.5 traces, Splunk HEC | + Elasticsearch `_bulk`, Prometheus remote-write, Fluent Bit/Fluentd/Filebeat/Vector/Telegraf, Kinesis Firehose, syslog, K8s/Docker | **OO** |
+| D8 | Scheduled reports | None | Scheduled dashboard reports (email/PDF) | **OO** |
+| D9 | Session replay | Lightweight event timeline (RUM E1) | Full session replay | **OO** |
+| D10 | LLM/AI observability *of the customer's apps* | None (we use AI, we don't monitor theirs) | LLM monitoring: prompts, tokens, latency, cost | **OO** |
+| D11 | Data controls at ingest | 4-regex global PII middleware ([`pii/sanitizer.go`](../../gateway-service/internal/pii/sanitizer.go)) | Sensitive Data Redaction (configurable), cipher keys, AES-256-SIV | **OO** |
+| D12 | Multi-region / federation | Single region (admitted in [DISASTER_RECOVERY.md](../DISASTER_RECOVERY.md)) | Super Cluster: federated search across clusters/regions | **OO** |
+| D13 | Auth breadth | OIDC, SAML 2.0, SCIM 2.0, TOTP MFA, RBAC + ABAC, session revocation, password lifecycle | OIDC, OAuth, SAML, **LDAP/AD**, custom roles | **OO** (LDAP only) |
+| D14 | Compliance certifications | None claimed | SOC 2 Type II, ISO 27001, GDPR, HIPAA-ready | **OO** |
+| D15 | Proven scale | Published p50/p95/p99 for the ingest path at a *permitted* rate; ceiling undocumented | 2+ PB/day claimed at largest deployment | **OO** (claimed) |
+| D16 | Incident lifecycle & RCA | Correlation → incidents → causal RCA with a **CI-gated eval harness at 90.9%** → AI postmortems → **self-healing playbooks** (dry-run / approve / reject, risk-tier authz, hallucination guardrail) | Alerts + incident tracking + AI query assistant | **PT** |
+| D17 | SLO engineering | Multi-window multi-burn-rate, budget forecasting, PR-time SLO evaluation, deploy gates + DORA + change-failure linking | Basic alerting; no SLO/error-budget product | **PT** |
+| D18 | APM pillar depth | Continuous profiling (flat + diff flame graph), synthetics (multi-step + assertions + uptime SLA), error tracking (clustering, regression alerting, assignment), Neo4j topology (blast radius, anomaly overlay), Backstage-style catalog | Traces + service map + RUM; none of profiling / synthetics / catalog / deploy intelligence | **PT** |
+| D19 | Deletability & GDPR | Tenant purge across every store + deletion certificate + closed account | **Documented limitation: data is immutable, only whole retention periods can be dropped** | **PT** |
+| D20 | Audit integrity | Hash-chained tamper-evident audit + server-side verify + NDJSON export | "Immutable audit logging" | **PT** |
+| D21 | Engineering discipline | Parity CI gate at 100% (164 routes, 0 orphans), causal eval gate, k6 perf gate, govulncheck at zero | Not published | **PT** |
+
+**Score: OpenObserve leads 15, PulseTrace leads 6.** The 15 are not all equal —
+D1–D6 are the ones a buyer hits in the first 20 minutes, and they are the ones
+that decide the evaluation.
+
+### 1.1 The strategic read
+
+PulseTrace is a **deep incident-intelligence platform on a heavyweight stack**.
+OpenObserve is a **light, cheap, flexible telemetry substrate**. We win once a
+buyer is already ingesting data and doing incident work; they win *before that*,
+in evaluation, on install time, storage bill, and "can I just ask it a question."
+
+So the plan is not "add their features." It is: **make our substrate as cheap,
+fast and self-serve as theirs, then keep the incident-intelligence layer they
+don't have.** A telemetry substrate is table stakes; the intelligence on top is
+the product. Waves O1–O5 buy the table stakes. Waves O6–O7 make the win durable.
+
+---
+
+## 2. Where OpenObserve is genuinely better — mechanisms, not features
+
+**G1 · One binary vs 23 containers.** Our compose brings up ZooKeeper, Kafka,
+Neo4j, ClickHouse, Postgres, RabbitMQ, Redis, Jaeger, OTel Collector, Prometheus,
+Grafana, Vector, Quickwit (+ setup), MinIO (+ mc), Azurite, Pyroscope, plus 7
+first-party services. Every one is a failure mode, a RAM allocation, and a reason
+an evaluator quits. OpenObserve's evaluator is running in under a minute with
+`docker run`, and the *same binary* is the HA deployment with roles turned on.
+
+**G2 · Object store as the primary tier, not the cold tier.** Our
+`storage.xml` tiers ClickHouse to S3/Azure/GCS on age. OpenObserve never has a
+hot SSD tier at all — Parquet lands in object storage within seconds, queriers
+are stateless and cache on demand, and the compactor rewrites to ≤2 GB files.
+That is what makes "140× cheaper than Elastic" structurally plausible and lets
+them scale queriers independently of data. Our traces/metrics path pays SSD
+prices for the whole retention window.
+
+**G3 · No query language is a hard ceiling.** Every question a user can ask us
+has to have been anticipated by a Go handler. `metrics_handler.go` supports
+`rate`/`p50`/`p90`/`p95`/`p99` because someone wrote a `switch`. A user who wants
+"error rate by customer tier joined against deploys, bucketed 5m" simply cannot
+ask. OpenObserve users write SQL. This is the single largest capability gap and
+it is invisible in a feature checklist.
+
+**G4 · No dashboards means no daily habit.** We have 17 opinionated screens and
+zero user-authored views. Dashboards are how an observability tool becomes the
+tab someone leaves open, how it spreads from the on-call engineer to the team
+lead, and how a migration from Grafana/Datadog is even conceivable. Its absence
+also caps D8 (reports) and D17's visibility.
+
+**G5 · No stream abstraction means no self-service data.** Quickwit is already in
+`mode: dynamic`, so arbitrary JSON fields *are* indexed — but no API or screen
+exposes the inferred schema, per-stream retention, FTS keys, or partition keys.
+Retention is `INTERVAL 7 DAY` compiled into DDL. A customer cannot say "keep
+audit logs 400 days, app logs 14."
+
+**G6 · Pipelines are where competitors capture the ingest path.** Whoever owns
+the transform/route/enrich step owns the data. OpenObserve has real-time and
+scheduled pipelines with a visual editor, VRL, enrichment tables, and remote
+destinations. We have a VRL snippet buried in a Quickwit source file that no user
+will ever see.
+
+**G7 · Ingestion breadth is the migration moat.** Our Datadog + Splunk "Trojan
+Horse" endpoints are exactly the right idea — but we stop three protocols short.
+`_bulk` (Elasticsearch) and Prometheus `remote_write` are the two that unlock the
+largest installed bases, and Fluent Bit / Filebeat / Telegraf are what actually
+runs on customer fleets.
+
+**G8 · SDR vs four regexes.** [`pii/sanitizer.go`](../../gateway-service/internal/pii/sanitizer.go)
+runs 4 hardcoded patterns on every request body, globally, unconfigurable, and
+one of them (`{13,19}` digits) will corrupt legitimate numeric payloads. A
+regulated buyer needs per-field, per-stream, configurable, auditable redaction.
+
+**G9 · Federated search.** Their Super Cluster answers one query across regions.
+Our DR doc honestly says single-region. Any buyer with EU + US data residency
+requirements is currently unservable.
+
+**G10 · LDAP/AD.** We have OIDC + SAML + SCIM, which covers modern IdPs, but a
+large slice of on-prem enterprise is still LDAP-bound.
+
+**G11 · Certifications.** SOC 2 Type II / ISO 27001 / HIPAA BAA gate procurement
+regardless of how good the code is. Not a code task — a program with a start date.
+
+**G12 · Independently proven scale.** Their number is public. Ours is a per-PR k6
+gate at a rate deliberately *under* the tenant limiter — good regression hygiene,
+not a scale claim. We have no published throughput ceiling.
+
+---
+
+## 3. Where PulseTrace already wins — protect and widen
+
+Do not trade any of these away while chasing G1–G12.
+
+- **Autonomous remediation** with policy-aware dry-run/approve/reject and
+  risk-tier authz. OpenObserve has nothing comparable.
+- **Causal RCA with a published, CI-enforced accuracy gate** (90.9%, one
+  deliberately-unsolvable fixture). "AI RCA" that is *measured* is rare.
+- **SLO/error-budget engineering**, including PR-time evaluation and deploy gates
+  with DORA + change-failure linking.
+- **Profiling, synthetics, error tracking, catalog, Neo4j topology** — four
+  pillars and a graph they do not have at all.
+- **Deletability.** Their own docs state data is immutable and only whole
+  retention periods can be dropped. We ship a per-tenant purge with a deletion
+  certificate. Against GDPR Art. 17 this is not a feature difference, it is a
+  compliance difference. **Make it a headline.**
+- **Tamper-evident audit chain** — stronger than "immutable logging".
+- **The parity gate.** 164 routes, 0 orphans, enforced in CI. It is why every
+  wave below can be trusted to actually ship UI.
+
+---
+
+## 4. The plan
+
+Eight waves. O0 is a prerequisite for honest claims; O1–O2 are the hard ones and
+carry the most value; O3–O5 are large but mechanical; O6–O7 make the lead durable.
+
+Cross-cutting rules (per [enhancements/README.md](enhancements/README.md)):
+tenant-scoped server-side, admin surfaces RBAC-gated, every new route gets a UI
+consumer or a `uiNone` registration, pure logic unit-tested, one e2e per flow,
+fail-closed, all gates green per slice.
+
+---
+
+### Wave O0 — Measure before claiming · effort M
+
+Nothing in this document should be asserted publicly until it is measured.
+
+| Epic | What to build | Effort |
+| --- | --- | :---: |
+| **O0.1** | **Head-to-head bench harness** in `scripts/bench/`: bring up OpenObserve (single binary) and PulseTrace side by side, replay an identical corpus (10 GB mixed logs/traces/metrics), and record: bytes-on-disk per GB ingested, ingest throughput ceiling per node, query p50/p95/p99 across 6 query classes (needle-in-haystack, full-scan aggregation, high-cardinality group-by, trace-by-id, metric range-query, regex), cold-start seconds, container count, idle + loaded RSS. | M |
+| **O0.2** | **`BENCHMARK.md`**, machine-written by the harness (same discipline as [PERF_BASELINE.md](../PERF_BASELINE.md)) — never hand-edited. Publish losses as loudly as wins; the file is the scoreboard for this whole plan. | S |
+| **O0.3** | **Find our real throughput ceiling**: dedicated tenant, limiter raised, ramp to failure, document the knee and the binding constraint per protocol. Closes G12. | S |
+| **O0.4** | **Fix the README architecture diagram** — logs go to Quickwit, not ClickHouse. Shipping a wrong diagram in the front door of the repo costs credibility in exactly the evaluation we are trying to win. | S |
+
+**DoD:** `BENCHMARK.md` exists, is regenerated by one command, and every claim in
+§1 of this document is replaced by a measured number.
+
+---
+
+### Wave O1 — Deployability and economics (closes G1, G2) · effort L
+
+The highest-leverage wave. Two independent tracks.
+
+#### O1.1 — `pulsetrace-lite`: single-container mode · effort L
+
+One container, no external dependencies, working UI in <60 s, honest degradation.
+Same binaries, different wiring — **not a fork**:
+
+| Dependency today | Lite substitution | Mechanism |
+| --- | --- | --- |
+| Kafka + ZooKeeper | in-process channel bus | `shared/kafka` gets a `Bus` interface; the existing producer/consumer become one implementation, an in-memory bounded queue with disk spill becomes the other |
+| Postgres | embedded SQLite | migrations already live per service; add a dialect shim in `shared/db` and a `sqlite` build tag |
+| Neo4j | Postgres/SQLite adjacency tables | topology-service repo interface behind a `GraphStore` port; the graph is small (services × edges), Cypher usage is shallow |
+| RabbitMQ | same in-process bus | notification worker already consumes an interface |
+| Quickwit | Quickwit **embedded as a library-mode process** in the container, or `tantivy` directly | keep the index format identical so lite→HA is a data-compatible upgrade |
+| ClickHouse | `chdb` (embedded ClickHouse) or DuckDB over the same Parquet | query SQL is generated in one place per handler; target the same dialect |
+| MinIO / Azurite | local filesystem, S3 optional | already configurable |
+| Jaeger / Prometheus / Grafana | not shipped in lite | our own UI already covers these; they are dev conveniences |
+
+- **Backend:** `shared/bus` port + two adapters; `shared/db` dialect shim;
+  `GraphStore` port in topology-service; a `PULSETRACE_MODE=lite|cluster` switch
+  resolved once at startup in each `cmd/main.go`; a single `Dockerfile.lite` with
+  a supervisor that runs all six services in one container (or one binary with
+  role flags — preferred, mirroring OpenObserve's router/ingester/querier model).
+- **Frontend:** a mode badge in Settings; features unavailable in lite render as
+  explicit "requires cluster mode" states, never as fake success.
+- **Tests:** an e2e that boots lite from a clean volume and asserts first-data <60 s;
+  a data-compat test that a lite volume upgrades into cluster mode.
+- **DoD:** `docker run -p 8080:8080 pulsetrace/pulsetrace` → login → send OTLP →
+  see the log in Explorer, on a laptop, with no other process running.
+
+#### O1.2 — Object-store-primary telemetry tier · effort L
+
+- **Backend:** move traces/metrics/RUM/synthetics off SSD-primary ClickHouse to
+  the same posture as our logs: recent data in a small hot window, everything
+  else as Parquet/splits on object storage with a compaction job. Two viable
+  routes — (a) ClickHouse `MergeTree` with an *aggressive* `TTL … TO DISK 's3'`
+  (hours, not days) plus `allow_experimental_object_type` for wide rows, or
+  (b) write Parquet directly and query via chDb/DuckDB. **Recommend (a) first**:
+  it is a storage-policy change plus a benchmark, not a rewrite, and O0.1 will
+  tell us whether it closes the gap.
+- **Backend:** a **compactor** worker (small-part merge + retention enforcement +
+  file-list index), the piece OpenObserve has and we do not.
+- **Backend:** end the implicit double-cost question — confirm via O0.1 whether
+  Quickwit splits + ClickHouse `otel_logs` hold overlapping data; if so, drop the
+  unqueried copy.
+- **Frontend:** Settings → Storage: bytes by tier, by stream, by tenant;
+  projected monthly cost; the compaction backlog.
+- **DoD:** `BENCHMARK.md` shows bytes-on-disk per GB ingested **at or below**
+  OpenObserve's for the same corpus, with query p95 no worse than 1.2×.
+
+---
+
+### Wave O2 — Query power (closes G3) · effort L
+
+#### O2.1 — Federated SQL surface · effort L
+- **Backend:** `POST /api/v1/query/sql` — a **sandboxed** SQL endpoint. Parse with
+  a real SQL parser (not regex); allow `SELECT` only; reject DDL/DML/system
+  tables/`file()`/`url()`/`remote()`; **inject the tenant predicate at the AST
+  level** and reuse the existing `queryScoped` fail-closed guard from F0.3 (the
+  ratchet test `TestNoRawTenantTableReads` must be extended to cover this path);
+  enforce per-role row/byte/time-budget limits; stream results.
+- **Backend:** one virtual catalog across stores — `logs` (Quickwit), `traces`,
+  `metrics`, `rum`, `synthetics` (ClickHouse), so a user writes one dialect and
+  the planner routes/joins. Start with single-store queries; cross-store joins in
+  a second slice.
+- **Frontend:** a **Query** screen — editor with schema-aware autocomplete,
+  result grid, one-click "visualize" (feeds O3), save-as (extends `saved_searches`),
+  and a shareable URL. Also embed it as the "Advanced" mode of Explorer and Metrics.
+- **Tests:** an injection/escape suite (the security-critical one), a cross-tenant
+  denial suite, budget-limit enforcement, golden-result tests per store.
+- **DoD:** every question the 17 screens can answer is also expressible in SQL,
+  and no SQL can read another tenant's row. **Effort L, security-critical — this
+  epic gets a dedicated security review.**
+
+#### O2.2 — PromQL for metrics · effort M
+- **Backend:** `GET /api/v1/query` + `/query_range` implementing the Prometheus
+  HTTP API over our ClickHouse `otel_metrics` (selector → SQL, then the PromQL
+  function/operator layer). This also makes PulseTrace a **drop-in Grafana
+  datasource**, which is a migration wedge OpenObserve already has.
+- **Frontend:** PromQL mode in Metrics alongside the builder; the existing
+  `rate`/quantile functions become a builder that *emits PromQL*.
+- **DoD:** point Grafana at PulseTrace as a Prometheus datasource; existing
+  dashboards render.
+
+#### O2.3 — Query acceleration · effort M
+- **Backend:** result cache + histogram/aggregation cache keyed by
+  (tenant, query, time-bucket) in the **Redis already in compose but barely used**;
+  query partitioning across time so long ranges stream progressively; a `search
+  around` API (we have `/logs/{id}/context` — generalize it to any store).
+- **Frontend:** progressive result rendering with a partial-results indicator.
+- **DoD:** repeat-query p95 drops ≥5×; the histogram no longer re-scans.
+
+---
+
+### Wave O3 — Dashboards & reports (closes G4, G8) · effort L
+
+#### O3.1 — Dashboard subsystem · effort L
+- **Backend:** `dashboards`, `dashboard_folders`, `dashboard_panels`,
+  `dashboard_variables` tables (tenant-scoped, RBAC'd); CRUD + versioning +
+  JSON import/export; a panel-query executor built on O2.1.
+- **Frontend:** new `/dashboards` route — folders + tabs, drag-resize grid,
+  panel editor (query → viz → options), **template variables with dependencies**,
+  dashboard-level filters, time-range + **time comparison** (vs previous period),
+  panel drilldown to Explorer/Traces with context carried, annotations (deploy
+  markers from F5 reused as the first annotation source).
+- **Panels (target ≥20, beating their 19):** time series, bar, stacked bar,
+  horizontal bar, area, line, scatter, pie, donut, gauge, stat/single-value,
+  heatmap, table, log stream, top-list, histogram, sankey, geomap, treemap,
+  service map, flame graph (reuse F12), trace waterfall (reuse F7).
+- **DoD:** a user builds a 6-panel dashboard with two variables, shares a URL,
+  exports and re-imports the JSON.
+
+#### O3.2 — Migration importers · effort M
+- **Backend:** Grafana dashboard JSON → PulseTrace dashboard (panel + PromQL
+  translation, feasible once O2.2 lands); Datadog dashboard JSON → same.
+- **Frontend:** Onboarding → "Import from Grafana / Datadog", with a per-panel
+  translation report (what converted, what needs hand-fixing — honest, not silent).
+- **DoD:** a real Grafana dashboard imports with ≥80% of panels rendering.
+
+#### O3.3 — Scheduled reports · effort M
+- **Backend:** a scheduler (correlation-service already runs workers) that renders
+  a dashboard headlessly to PDF/PNG on a cron and dispatches through the existing
+  F3 notification channels; report definitions tenant-scoped.
+- **Frontend:** Dashboards → Schedule report (cadence, recipients, time range,
+  format) + a run history with the last artifact.
+- **DoD:** a weekly PDF lands in email and Slack.
+
+---
+
+### Wave O4 — Streams & pipelines (closes G5, G6, G8-adjacent) · effort L
+
+#### O4.1 — Streams as a first-class object · effort M
+- **Backend:** a stream registry (`streams` table + a schema-inference reader over
+  Quickwit's dynamic mapping and ClickHouse columns): list streams, doc count,
+  ingested bytes, time range, inferred fields + types; per-stream settings —
+  **retention** (replaces the hardcoded 7-day TTLs, enforced by the O1.2
+  compactor), full-text-search keys, partition keys, user-defined schema,
+  extended retention for specific fields.
+- **Frontend:** Settings → **Streams**: the list, the schema explorer, per-stream
+  settings, per-stream cost. Retention becomes self-serve.
+- **DoD:** a tenant sets 400-day retention on `audit` and 14-day on `app`, and it
+  is enforced and billed correctly.
+
+#### O4.2 — Ingest pipelines · effort L
+- **Backend:** a pipeline engine on the ingest path (gateway → before Kafka
+  publish) with a node graph: source (stream) → condition → transform (VRL) →
+  enrichment (lookup table) → destination (stream / remote HTTP / S3 / Kafka).
+  Embed a VRL runtime (`vrl` is a Rust crate — either shell out to a sidecar or
+  implement a Go-native subset; **recommend a compatible subset first**, chosen so
+  OpenObserve VRL snippets mostly paste in). Real-time pipelines run inline;
+  scheduled pipelines run as a worker over stored data.
+- **Backend:** enrichment tables (CSV/JSON upload, tenant-scoped, cached).
+- **Frontend:** `/pipelines` — a visual node editor with a **live preview panel**
+  (paste a sample event, see it flow through each node). This is where we can beat
+  them outright: their editor is a graph; ours is a graph **with a debugger**.
+- **DoD:** a user drops a noisy field, routes 5xx to a separate stream, enriches
+  with a service→team lookup, and previews it on a real event before saving.
+
+#### O4.3 — Real Sensitive Data Redaction (closes G8) · effort M
+- **Backend:** replace the global 4-regex middleware with per-stream, per-field
+  redaction rules (mask / hash / drop / tokenize), evaluated in the O4.2 pipeline;
+  named detector library (email, card + Luhn check, SSN, IBAN, JWT, private key,
+  cloud creds); every redaction emits an audit event; **fail-closed** — a stream
+  marked `sensitive` refuses ingest if its rule set fails to compile.
+- **Frontend:** Settings → Data Protection: rules, a tester (paste → see the
+  redaction), and a coverage report per stream.
+- **DoD:** the current `{13,19}`-digit regex that corrupts payloads is gone, and
+  redaction is configurable, testable, and audited.
+
+---
+
+### Wave O5 — Ingestion breadth (closes G7) · effort M
+
+Each is a decoder in the existing `gateway-service/internal/ingestproxy/` pattern,
+converging on the same Kafka topic — the Datadog/Splunk work already proved it.
+
+| Epic | Protocol | Why it matters | Effort |
+| --- | --- | --- | :---: |
+| **O5.1** | **Elasticsearch `_bulk` + `_search` (subset)** | The single largest displacement pool; Filebeat/Logstash/Fluent Bit `es` output all speak it. `_search` subset lets existing Kibana-ish tooling read us. | M |
+| **O5.2** | **Prometheus `remote_write`** (+ `remote_read`) | Every Prometheus in the world can dual-write to us with three lines of YAML. Pairs with O2.2 to make us a Prometheus drop-in on both ends. | M |
+| **O5.3** | **Fluent Bit / Fluentd / Filebeat / Vector / Telegraf** recipes | Mostly config + docs on top of O5.1/native; ships as copy-paste blocks in Onboarding (the F-onboarding snippet system already exists). | S |
+| **O5.4** | **AWS Kinesis Firehose + CloudWatch Logs subscription** | The default AWS log path; unlocks accounts that never install an agent. | M |
+| **O5.5** | **Syslog (RFC 3164/5424, TCP/UDP/TLS) + journald** | Network gear, appliances, legacy fleets. The Quickwit source already grok-parses syslog — surface it as a real listener. | S |
+| **O5.6** | **Loki push API** | Cheap; catches Grafana-stack migrations mid-flight. | S |
+| **O5.7** | **OTLP/Arrow + gzip/zstd everywhere** | Cost per GB shipped — an efficiency win they do not advertise. | S |
+
+**DoD:** Onboarding lists ≥12 ingestion sources, each with a tested copy-paste
+config and an e2e proving data lands and is queryable.
+
+---
+
+### Wave O6 — Enterprise & scale (closes G9, G10, G11, G12) · effort L
+
+- **O6.1 · Federated search (M→L).** A `LEADER`/`WORKER` query mode: fan a query
+  to peer clusters over gRPC, merge, attribute per-cluster latency and partial
+  failures **honestly in the UI** (never silently drop a region). Region-pinned
+  storage per tenant for data residency.
+- **O6.2 · Query & workload management (M).** Per-role/per-tenant query
+  concurrency, byte/row/time budgets, a queue with priority, a **kill-query**
+  control, and a slow-query log. (Their enterprise has this; ours can be in OSS.)
+- **O6.3 · LDAP/AD (S).** One more provider behind the existing auth interface
+  that OIDC and SAML already share.
+- **O6.4 · BYOK / customer-managed keys (M).** Extend the existing AES-256-GCM
+  posture (channels, MFA secrets) to a tenant-scoped KEK from KMS/Vault, with
+  rotation and a re-wrap job.
+- **O6.5 · Compliance program (L, non-code).** SOC 2 Type II readiness pack: the
+  hash-chained audit (F20), the tenant-isolation ratchet (F0.3), DR (F21) and the
+  parity/security gates are already the evidence — assemble the control mapping,
+  pick an auditor, set a date. HIPAA BAA and ISO 27001 follow the same evidence.
+- **O6.6 · Multi-region active/standby (L).** The deferred item in
+  [DISASTER_RECOVERY.md](../DISASTER_RECOVERY.md); O6.1 makes it worth doing.
+
+---
+
+### Wave O7 — Widen the moat: be *better*, not equal · effort L
+
+Parity is not the goal. For each dimension we are about to tie on, ship the delta
+that makes tying impossible.
+
+| Epic | Delta over OpenObserve | Effort |
+| --- | --- | :---: |
+| **O7.1 · Pipeline debugger** | Their pipeline editor saves and hopes. Ours previews a real event through every node, shows per-node drop counts and error rates in production, and supports **replay of a rejected batch** after a fix. | M |
+| **O7.2 · AI dashboard authoring** | Their AI generates a *query*. Ours generates a **whole dashboard** from a question ("show me checkout health"), grounded in the real schema from O4.1 and the service catalog, with every panel's SQL shown and editable — reusing the F15 hallucination guardrail so it can't invent a field. | M |
+| **O7.3 · Full-fidelity session replay** | rrweb-grade DOM replay, but linked: replay ↔ RUM session ↔ backend trace ↔ logs ↔ profile, scrubbing one scrubs all. They have replay; nobody has replay wired to a flame graph. | L |
+| **O7.4 · LLM observability, done properly** | Their LLM monitoring is prompts/tokens/latency/cost. Ours adds OTel GenAI semconv ingest + **cost attribution per feature/tenant**, eval-score tracking, guardrail-violation alerting, prompt-version regression diffs, and RCA over LLM incidents via the existing causal engine. | L |
+| **O7.5 · Closed-loop remediation** | Today: dry-run → approve → execute. Add **post-execution verification against the SLO** and **auto-revert on failure**, with the whole loop in the incident timeline. Nothing else on the market closes the loop with a verification gate. | M |
+| **O7.6 · One-click pivot matrix** | Make every pillar reachable from every other in one click with time+service context preserved: log→trace→profile→RUM session→deploy→incident→SLO. We have the pieces (F6/F7/F12); make it a guaranteed invariant with an e2e test per edge. | M |
+| **O7.7 · Deletability as a headline** | Their docs concede data is immutable. Ship **per-record and per-subject deletion** (GDPR Art. 17) with a signed deletion certificate, and put it on the comparison page. This is a compliance capability they architecturally cannot match quickly. | M |
+| **O7.8 · Cost intelligence** | Per-stream, per-team, per-query cost attribution, a "top 10 most expensive queries/streams" view, and pipeline-based volume-reduction suggestions with projected savings. They compete on being cheap; we compete on **showing you why you're spending**. | M |
+
+---
+
+## 5. Dimension-by-dimension: how we end up strictly better
+
+| # | Dimension | After which wave | Why PulseTrace then wins outright |
+| --- | --- | --- | --- |
+| D1 | Deployability | O1.1 | One container like theirs, **plus** the same artifact scales to the cluster topology with role flags and a data-compatible upgrade path |
+| D2 | Storage economics | O1.2 + O0.1 | Object-store-primary + compaction, **plus** O7.8 cost attribution — cheap *and* explains the bill |
+| D3 | Query power | O2.1–O2.3 | SQL + PromQL like theirs, **plus** cross-store joins (logs ⋈ traces ⋈ deploys) they cannot do across separate stores |
+| D4 | Dashboards | O3.1 | ≥20 panel types vs 19, **plus** flame-graph and trace-waterfall panels no log tool has, **plus** O7.2 AI authoring |
+| D5 | Streams/schema | O4.1 | Same self-serve stream settings, **plus** per-stream cost attribution |
+| D6 | Pipelines | O4.2 | Same node graph and VRL, **plus** O7.1 live debugger and production per-node telemetry |
+| D7 | Ingestion breadth | O5 | Their sources **plus** Datadog + Splunk HEC ingest we already have and they do not |
+| D8 | Reports | O3.3 | Scheduled reports **plus** delivery through the existing multi-channel (Slack/PD/Opsgenie/webhook) fabric, not just email |
+| D9 | Session replay | O7.3 | Replay wired to traces, profiles, and logs |
+| D10 | LLM observability | O7.4 | Their four metrics **plus** cost attribution, eval scores, guardrails, and causal RCA on LLM incidents |
+| D11 | Data controls | O4.3 | Configurable per-field SDR **plus** audited redaction events **plus** actual deletion (D19) |
+| D12 | Federation | O6.1 | Federated search **plus** honest partial-failure reporting and region-pinned residency |
+| D13 | Auth | O6.3 | OIDC + SAML + SCIM + MFA + ABAC + LDAP — a superset |
+| D14 | Compliance | O6.5 | Same certifications **plus** tamper-evident audit and a provable tenant-isolation ratchet as evidence |
+| D15 | Proven scale | O0.3 + O1 | A published, reproducible ceiling with the harness in-repo — verifiable, not a marketing number |
+| D16–D21 | Incident intelligence, SLOs, APM depth, deletability, audit, discipline | already | Widened by O7.5, O7.6, O7.7 |
+
+**Two honest exceptions** (say so out loud rather than bluffing):
+
+1. **D14 certifications are time-bound, not effort-bound.** SOC 2 Type II needs an
+   observation window. Earliest credible date is ~9 months after O6.5 starts.
+   Start it in parallel with O1, not after O6.
+2. **D15 "2+ PB/day" is a customer-scale artifact.** We can publish a reproducible
+   per-node ceiling and a linear-scaling proof; we cannot manufacture a petabyte
+   reference customer. Compete on *reproducibility* of the number instead.
+
+---
+
+## 6. Sequencing
+
+| Wave | Theme | Gate to exit |
+| :---: | --- | --- |
+| **O0** | Measure | `BENCHMARK.md` generated; README diagram corrected; throughput ceiling published |
+| **O1** | Deployability + economics | `docker run` → data in <60 s; bytes/GB ≤ OpenObserve at ≤1.2× query p95 |
+| **O2** | Query power | SQL + PromQL shipped; Grafana points at us; zero cross-tenant SQL escapes in the security suite |
+| **O3** | Dashboards + reports | 20 panel types; Grafana import ≥80%; scheduled PDF delivered |
+| **O4** | Streams + pipelines | Self-serve retention; pipeline with live preview; configurable SDR replaces the regex middleware |
+| **O5** | Ingestion breadth | ≥12 sources, each e2e-proven |
+| **O6** | Enterprise + scale | Federated query across 2 clusters; LDAP; BYOK; SOC 2 observation window open |
+| **O7** | Moat | Every row of §5 demonstrable in a live demo |
+
+**Recommended first six slices**, in order — highest evaluation-impact per unit of
+effort:
+
+1. **O0.1 + O0.2** — the benchmark harness. Everything else is guesswork without it.
+2. **O0.4** — fix the README diagram (one hour, disproportionate credibility).
+3. **O1.1** — single-container mode. This is the one that changes the evaluation
+   outcome most, and it is the hardest; start it early and let it run long.
+4. **O2.1** — the SQL surface. Unblocks O3 entirely; nothing else raises the
+   capability ceiling as much.
+5. **O3.1** — dashboards. The missing daily habit.
+6. **O5.2** — Prometheus `remote_write`. Cheapest large migration wedge in the plan.
+
+Waves O1 and O2 can run in parallel by different tracks; O3 depends on O2.1;
+O4.3 depends on O4.2; O6.5 (compliance) should start on day one because it is
+calendar-bound.
+
+---
+
+## 7. Risks
+
+- **O1.1 is a re-architecture wearing a costume.** Four ports (bus, db dialect,
+  graph store, blob) touch every service. Mitigation: land the ports one at a time
+  behind interfaces with the cluster path as the default implementation, so
+  cluster mode is never destabilized while lite is built.
+- **O2.1 is the highest-severity security surface we will ever add.** A SQL
+  endpoint on a multi-tenant store is exactly how tenant isolation dies.
+  Mitigation: AST-level tenant injection (never string concatenation), reuse the
+  F0.3 fail-closed guard, extend `TestNoRawTenantTableReads` to cover it, and a
+  dedicated `/security-review` before merge. If it cannot be made provably safe,
+  ship it single-tenant/on-prem only and say so.
+- **VRL compatibility is a promise that is easy to half-keep.** A "compatible
+  subset" that silently mis-evaluates an OpenObserve snippet is worse than no
+  compatibility. Mitigation: publish the supported function list, and make
+  unsupported constructs a **hard compile error**, never a silent no-op.
+- **Scope: this plan is roughly the size of ROAD_TO_100 again.** Mitigation: the
+  parity gate and the per-slice green-gates already in place; do not start a wave
+  before its predecessor's exit gate is green.
+- **Chasing their roadmap.** Waves O1–O5 are catch-up. If O7 keeps getting
+  deferred, we win a substrate race against a Rust team with a head start and lose
+  the intelligence lead that is actually defensible. Mitigation: **one O7 epic
+  ships in parallel with every catch-up wave.**
+
+---
+
+### One-line summary
+
+Measure first (**O0**), then buy back the evaluation with a single-container,
+object-store-primary substrate (**O1**), a real query language (**O2**), and
+dashboards (**O3**) — then take the ingest path (**O4–O5**) and the enterprise
+floor (**O6**), while shipping one moat epic (**O7**) alongside each wave so the
+incident-intelligence lead we already hold keeps widening.

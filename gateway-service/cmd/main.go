@@ -387,6 +387,7 @@ func main() {
 	mux.HandleFunc("POST /api/v1/deployments", deploymentHandler.RecordDeployment)
 	mux.HandleFunc("GET /api/v1/deployments", deploymentHandler.ListDeployments)
 	mux.HandleFunc("GET /api/v1/deployments/dora", deploymentHandler.GetDORA)
+	mux.HandleFunc("GET /api/v1/deployments/for-incident", deploymentHandler.GetDeployForIncident)
 
 	// RUM APIs (powered by ClickHouse)
 	mux.HandleFunc("POST /api/v1/rum/ingest", rumHandler.Ingest)

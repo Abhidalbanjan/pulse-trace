@@ -78,3 +78,23 @@ func TestDORARatings(t *testing.T) {
 		t.Error("MTTR rating bands wrong")
 	}
 }
+
+func TestNearestPrecedingDeploy(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	deploys := []incidentDeploy{
+		{Version: "v1", DeployedAt: base.Add(-3 * time.Hour)},
+		{Version: "v2", DeployedAt: base.Add(-30 * time.Minute)}, // nearest before
+		{Version: "v3", DeployedAt: base.Add(10 * time.Minute)},  // after — ignored
+	}
+	got := nearestPrecedingDeploy(base, deploys)
+	if got == nil || got.Version != "v2" {
+		t.Fatalf("expected v2 (nearest preceding), got %+v", got)
+	}
+	// Nothing before → nil.
+	if nearestPrecedingDeploy(base, []incidentDeploy{{Version: "future", DeployedAt: base.Add(time.Hour)}}) != nil {
+		t.Error("a deploy after the incident must not be linked")
+	}
+	if nearestPrecedingDeploy(base, nil) != nil {
+		t.Error("no deploys → nil")
+	}
+}

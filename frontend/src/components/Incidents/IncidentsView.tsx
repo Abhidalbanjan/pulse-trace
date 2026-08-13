@@ -73,6 +73,19 @@ export function IncidentsView() {
   const titleOf = (i: Incident) => i.title || `Incident in ${i.services?.[0] || 'Unknown'}`;
   const primaryService = (i?: Incident | null) => i?.causal?.chain?.[0]?.from_service || i?.services?.[0] || '';
 
+  // Change-failure linking (Deploy Gates · E4): the deploy most likely to have
+  // triggered this incident — the last deploy of the service at or before it.
+  const incService = primaryService(inc);
+  const linkedDeploy = useApiResource<{ version: string; deployed_at: string; minutes_before: number } | null>(
+    () =>
+      api
+        .get<{ deploy: { version: string; deployed_at: string } | null; minutes_before?: number }>(
+          `/api/v1/deployments/for-incident?service=${encodeURIComponent(incService)}&at=${encodeURIComponent(new Date(inc!.started_at!).toISOString())}`,
+        )
+        .then((d) => (d?.deploy ? { version: d.deploy.version, deployed_at: d.deploy.deployed_at, minutes_before: d.minutes_before ?? 0 } : null)),
+    { key: inc?.id ?? '', enabled: !!(inc && incService && inc.started_at) },
+  );
+
   const panelStyle: React.CSSProperties = {
     background: t.panelBg,
     border: `1px solid ${t.panelBorder}`,
@@ -212,6 +225,14 @@ export function IncidentsView() {
                     <span style={{ color: t.text2, fontSize: '13.5px' }}>ID: {inc.id}</span>
                     <span style={{ color: t.text2, fontSize: '13.5px' }}>Status: {inc.status}</span>
                     {inc.started_at && <span style={{ color: t.text2, fontSize: '13.5px' }}>Started: {new Date(inc.started_at).toLocaleString()}</span>}
+                    {linkedDeploy.data && (
+                      <span
+                        title={`${incService} deployed ${linkedDeploy.data.version} ${linkedDeploy.data.minutes_before} min before this incident started`}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', background: t.dark ? 'rgba(224,146,58,0.14)' : 'rgba(217,143,30,0.1)', color: t.amber, border: '1px solid ' + t.amber, padding: '4px 11px', borderRadius: '100px', fontSize: '11.5px', fontWeight: 600 }}
+                      >
+                        ⧗ Likely caused by deploy {linkedDeploy.data.version} · {linkedDeploy.data.minutes_before}m before
+                      </span>
+                    )}
                   </div>
                   <h2 style={{ fontSize: '26px', fontWeight: 700, margin: 0, color: t.text1 }}>{titleOf(inc)}</h2>
                 </div>

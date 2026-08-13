@@ -6,23 +6,17 @@ import { errMessage } from '@/lib/errMessage';
 import { CodeSnippet } from './CodeSnippet';
 import { useTheme } from '@/context/ThemeContext';
 import { fetchWithAuth } from '@/lib/api';
-
-type Platform = 'Kubernetes' | 'Docker' | 'Node.js' | 'Go' | null;
+import { PLATFORMS, buildInstrumentationSnippet, type Platform } from '@/lib/instrumentationSnippets';
 
 export function Wizard() {
   const { tokens: t } = useTheme();
   const [step, setStep] = useState(1);
-  const [platform, setPlatform] = useState<Platform>(null);
+  const [platform, setPlatform] = useState<Platform | null>(null);
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const platforms = [
-    { name: 'Kubernetes', desc: 'Helm chart & DaemonSet', icon: 'deployed_code' },
-    { name: 'Docker', desc: 'Container logs & metrics', icon: 'inventory_2' },
-    { name: 'Node.js', desc: 'OTel JS Auto-instrumentation', icon: 'terminal' },
-    { name: 'Go', desc: 'Native Go agent & Profiling', icon: 'memory' },
-  ];
+  const platforms = PLATFORMS;
 
   const generateKey = async () => {
     // Mint a REAL per-tenant ingestion key via the admin API. The plaintext is
@@ -48,21 +42,10 @@ export function Wizard() {
     }
   };
 
-  const getScriptForPlatform = () => {
-    if (!apiKey) return '';
-    switch (platform) {
-      case 'Kubernetes':
-        return `helm repo add pulsetrace https://charts.pulsetrace.com\nhelm install pt-agent pulsetrace/agent \\\n  --set apiKey=${apiKey} \\\n  --namespace pulsetrace-system --create-namespace`;
-      case 'Docker':
-        return `docker run -d --name pulsetrace-agent \\\n  -e PT_API_KEY=${apiKey} \\\n  -v /var/run/docker.sock:/var/run/docker.sock \\\n  pulsetrace/agent:latest`;
-      case 'Node.js':
-        return `npm install @pulsetrace/agent\n\n// Add to top of your entry file (index.js):\nrequire('@pulsetrace/agent').init({ apiKey: '${apiKey}' });`;
-      case 'Go':
-        return `go get github.com/pulsetrace/agent-go\n\n// Add to main.go:\nimport "github.com/pulsetrace/agent-go"\n\nfunc main() {\n    agent.Init("${apiKey}")\n    defer agent.Flush()\n}`;
-      default:
-        return '';
-    }
-  };
+  // The tenant's OTLP endpoint is this same host (the gateway terminates
+  // /v1/traces|logs|metrics); fall back to a placeholder during SSR.
+  const endpoint = typeof window !== 'undefined' ? window.location.origin : 'https://app.pulsetrace.com';
+  const snippet = platform && apiKey ? buildInstrumentationSnippet(platform, { endpoint, apiKey }) : null;
 
   return (
     <div style={{ flex: 1, padding: '40px 28px', display: 'flex', justifyContent: 'center' }}>
@@ -189,11 +172,18 @@ export function Wizard() {
         {step === 3 && (
           <div style={{ animation: 'fadeIn 0.5s ease' }}>
             <h2 style={{ fontSize: '28px', fontWeight: 700, margin: '0 0 8px' }}>You&apos;re all set!</h2>
-            <p style={{ color: t.text2, margin: '0 0 32px', fontSize: '14.5px', lineHeight: 1.6 }}>
-              Run this command in your {platform} environment to start streaming telemetry.
+            <p style={{ color: t.text2, margin: '0 0 28px', fontSize: '14.5px', lineHeight: 1.6 }}>
+              Wire up OpenTelemetry in your {platform} environment — no proprietary agent, just the
+              open standard pointed at your PulseTrace endpoint.
             </p>
 
-            <CodeSnippet code={getScriptForPlatform()} language={platform === 'Node.js' || platform === 'Go' ? 'javascript' : 'bash'} />
+            {snippet && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+                <SnippetBlock label={snippet.installLabel} code={snippet.install} language={snippet.language} t={t} />
+                <SnippetBlock label={snippet.runLabel} code={snippet.run} language={snippet.language} t={t} />
+                <SnippetBlock label={snippet.testLabel} code={snippet.test} language="bash" t={t} />
+              </div>
+            )}
 
             <div style={{
               background: t.dark ? 'rgba(52,199,126,0.12)' : 'rgba(37,169,107,0.08)',
@@ -230,6 +220,17 @@ export function Wizard() {
         )}
 
       </div>
+    </div>
+  );
+}
+
+// SnippetBlock is a labeled code block for one onboarding step (install / run /
+// test), reusing the copy-enabled CodeSnippet.
+function SnippetBlock({ label, code, language, t }: { label: string; code: string; language: string; t: ReturnType<typeof useTheme>['tokens'] }) {
+  return (
+    <div>
+      <div style={{ fontSize: '12px', fontWeight: 700, letterSpacing: '0.03em', color: t.text2, marginBottom: '8px', textTransform: 'uppercase' }}>{label}</div>
+      <CodeSnippet code={code} language={language} />
     </div>
   );
 }

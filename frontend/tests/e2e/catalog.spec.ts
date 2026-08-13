@@ -18,6 +18,24 @@ test.describe('Service Catalog', () => {
     await expect(row).toContainText(/%|No SLO/, { timeout: 10000 });
   });
 
+  test('edit rich metadata (lifecycle / tier / links) persists', async ({ page }) => {
+    await page.goto('/catalog');
+    await expect(page.getByRole('columnheader', { name: 'Lifecycle / Tier' })).toBeVisible({ timeout: 10000 });
+
+    const row = page.locator('table tbody tr', { hasText: 'payment-service' }).first();
+    // The lifecycle/tier cell is an edit button; open the metadata modal.
+    await row.getByRole('button', { name: /Edit lifecycle, tier & links/ }).click();
+    await expect(page.getByRole('heading', { name: 'Service Metadata' })).toBeVisible();
+
+    await page.getByLabel('Lifecycle').selectOption('production');
+    await page.getByLabel('Tier').selectOption('tier-1');
+    await page.getByRole('button', { name: 'Save Metadata' }).click();
+
+    // Modal closes and the row now reflects the production lifecycle badge.
+    await expect(page.getByRole('heading', { name: 'Service Metadata' })).toHaveCount(0, { timeout: 10000 });
+    await expect(row.getByText('Production')).toBeVisible({ timeout: 10000 });
+  });
+
   test('search filters the catalog', async ({ page }) => {
     await page.goto('/catalog');
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });

@@ -107,6 +107,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/topology/agent-config/", a.handleGetAgentConfig)
 	mux.HandleFunc("POST /api/v1/topology/state", a.handleUpdateState)
 	mux.HandleFunc("POST /api/v1/topology/catalog", a.handleUpdateCatalog)
+	mux.HandleFunc("PATCH /api/v1/topology/catalog/{service}", a.handlePatchCatalogMetadata)
 	mux.HandleFunc("POST /api/v1/topology/causal-path", a.handleUpdateCausalPath)
 	mux.HandleFunc("DELETE /api/v1/topology/tenant", a.handleDeleteTenant)
 	mux.HandleFunc("POST /v1/traces", a.handleReceiveTraces)
@@ -240,6 +241,92 @@ func (a *API) handleUpdateCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// Catalog · E3 metadata vocabularies. Empty is always allowed (a field left
+// unset). Kept as closed sets so lifecycle/tier stay meaningful enums and the
+// structured links can't accumulate arbitrary keys.
+var (
+	validLifecycles = map[string]bool{"": true, "experimental": true, "production": true, "deprecated": true}
+	validTiers      = map[string]bool{"": true, "tier-1": true, "tier-2": true, "tier-3": true}
+	validLinkKeys   = map[string]bool{"repo": true, "dashboards": true, "runbooks": true, "docs": true}
+)
+
+// validateCatalogMetadata rejects out-of-vocabulary tier/lifecycle values. Pure
+// and unit-tested so the contract is enforced independently of Neo4j.
+func validateCatalogMetadata(tier, lifecycle string) error {
+	if !validTiers[tier] {
+		return fmt.Errorf("invalid tier %q (want tier-1|tier-2|tier-3)", tier)
+	}
+	if !validLifecycles[lifecycle] {
+		return fmt.Errorf("invalid lifecycle %q (want experimental|production|deprecated)", lifecycle)
+	}
+	return nil
+}
+
+// sanitizeLinks keeps only known link keys with non-empty (trimmed) values,
+// rejecting unknown keys so the structured-links contract holds. A nil/empty map
+// is valid (no links). Pure and unit-tested.
+func sanitizeLinks(in map[string]string) (map[string]string, error) {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if !validLinkKeys[k] {
+			return nil, fmt.Errorf("unknown link key %q (want repo|dashboards|runbooks|docs)", k)
+		}
+		if tv := strings.TrimSpace(v); tv != "" {
+			out[k] = tv
+		}
+	}
+	return out, nil
+}
+
+type PatchCatalogMetadataRequest struct {
+	Tier      string            `json:"tier"`
+	Lifecycle string            `json:"lifecycle"`
+	Links     map[string]string `json:"links"`
+}
+
+// handlePatchCatalogMetadata sets a service's rich metadata (tier, lifecycle,
+// structured links). Tenant is resolved from the gateway-verified header, never
+// the body, so one tenant can't write another's catalog. Distinct from the
+// team/repo/slack POST so the two edit surfaces don't clobber each other.
+//
+//	PATCH /api/v1/topology/catalog/{service}
+func (a *API) handlePatchCatalogMetadata(w http.ResponseWriter, r *http.Request) {
+	service := r.PathValue("service")
+	if service == "" {
+		http.Error(w, "missing service name", http.StatusBadRequest)
+		return
+	}
+
+	var req PatchCatalogMetadataRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := validateCatalogMetadata(req.Tier, req.Lifecycle); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	links, err := sanitizeLinks(req.Links)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := a.repo.UpsertServiceMetadata(r.Context(), tenantOf(r), service, req.Tier, req.Lifecycle, links); err != nil {
+		log.Printf("failed to patch catalog metadata for %s: %v", service, err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"service":   service,
+		"tier":      req.Tier,
+		"lifecycle": req.Lifecycle,
+		"links":     links,
+	})
 }
 
 type UpdateCausalPathRequest struct {

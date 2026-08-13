@@ -5,8 +5,24 @@ import { errMessage } from '@/lib/errMessage';
 import { fetchWithAuth } from '@/lib/api';
 import { useTheme } from '@/context/ThemeContext';
 
-interface CatalogNode { id: string; state: string; team?: string; repo?: string; slack?: string; }
+type Lifecycle = '' | 'experimental' | 'production' | 'deprecated';
+type Tier = '' | 'tier-1' | 'tier-2' | 'tier-3';
+type LinkKey = 'repo' | 'dashboards' | 'runbooks' | 'docs';
+
+interface CatalogNode {
+  id: string; state: string; team?: string; repo?: string; slack?: string;
+  tier?: Tier; lifecycle?: Lifecycle; links?: Partial<Record<LinkKey, string>>;
+}
 interface SLOInfo { budgetRemainingPct: number; status: string }
+
+const LIFECYCLES: Lifecycle[] = ['', 'experimental', 'production', 'deprecated'];
+const TIERS: Tier[] = ['', 'tier-1', 'tier-2', 'tier-3'];
+const LINK_KEYS: Array<{ key: LinkKey; label: string; icon: string }> = [
+  { key: 'repo', label: 'Repository', icon: '📦' },
+  { key: 'dashboards', label: 'Dashboards', icon: '📊' },
+  { key: 'runbooks', label: 'Runbooks', icon: '📘' },
+  { key: 'docs', label: 'Docs', icon: '📄' },
+];
 
 export function ServiceCatalog() {
   const { tokens: t } = useTheme();
@@ -16,6 +32,12 @@ export function ServiceCatalog() {
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({ service_name: '', team: '', repo: '', slack: '' });
+
+  // Rich-metadata editor (Catalog · E3): the service being edited + its draft.
+  const [metaNode, setMetaNode] = useState<CatalogNode | null>(null);
+  const [metaForm, setMetaForm] = useState<{ tier: Tier; lifecycle: Lifecycle; links: Record<LinkKey, string> }>({
+    tier: '', lifecycle: '', links: { repo: '', dashboards: '', runbooks: '', docs: '' },
+  });
 
   const fetchCatalog = () => {
     setLoading(true);
@@ -69,6 +91,52 @@ export function ServiceCatalog() {
     } catch (err) {
       alert(`Failed to register service: ${errMessage(err)}`);
     }
+  };
+
+  const openMetaModal = (node: CatalogNode) => {
+    setMetaNode(node);
+    setMetaForm({
+      tier: node.tier ?? '',
+      lifecycle: node.lifecycle ?? '',
+      links: {
+        repo: node.links?.repo ?? '',
+        dashboards: node.links?.dashboards ?? '',
+        runbooks: node.links?.runbooks ?? '',
+        docs: node.links?.docs ?? '',
+      },
+    });
+  };
+
+  const handleSaveMetadata = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!metaNode) return;
+    // Send only non-empty links so we don't persist blank keys.
+    const links: Partial<Record<LinkKey, string>> = {};
+    (Object.keys(metaForm.links) as LinkKey[]).forEach(k => {
+      const v = metaForm.links[k].trim();
+      if (v) links[k] = v;
+    });
+    try {
+      const res = await fetchWithAuth(`/api/v1/topology/catalog/${encodeURIComponent(metaNode.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tier: metaForm.tier, lifecycle: metaForm.lifecycle, links }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setMetaNode(null);
+      fetchCatalog();
+    } catch (err) {
+      alert(`Failed to save metadata: ${errMessage(err)}`);
+    }
+  };
+
+  // Lifecycle badge palette: production is trusted-green, experimental is
+  // caution-amber, deprecated is muted (on its way out), unset is neutral.
+  const lifecycleStyle = (lc?: Lifecycle): { color: string; label: string } => {
+    if (lc === 'production') return { color: t.green, label: 'Production' };
+    if (lc === 'experimental') return { color: t.amber, label: 'Experimental' };
+    if (lc === 'deprecated') return { color: t.red, label: 'Deprecated' };
+    return { color: t.text2, label: 'Unset' };
   };
 
   const stateColor = (state: string) => {
@@ -184,6 +252,47 @@ export function ServiceCatalog() {
         </div>
       )}
 
+      {metaNode && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(6px)' }}>
+          <div style={{ background: t.panelBg, padding: '32px', borderRadius: '20px', width: '440px', maxHeight: '86vh', overflowY: 'auto', border: '1px solid ' + t.panelBorder, backdropFilter: 'blur(30px) saturate(180%)', boxShadow: t.shadow }}>
+            <h3 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '6px', color: t.text1 }}>Service Metadata</h3>
+            <p style={{ color: t.text2, fontSize: '13px', marginBottom: '20px' }}>{metaNode.id}</p>
+            <form onSubmit={handleSaveMetadata} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>Lifecycle</label>
+                  <select aria-label="Lifecycle" value={metaForm.lifecycle} onChange={e => setMetaForm({ ...metaForm, lifecycle: e.target.value as Lifecycle })} style={inputStyle}>
+                    {LIFECYCLES.map(lc => <option key={lc || 'unset'} value={lc}>{lc ? lc[0].toUpperCase() + lc.slice(1) : 'Unset'}</option>)}
+                  </select>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>Tier</label>
+                  <select aria-label="Tier" value={metaForm.tier} onChange={e => setMetaForm({ ...metaForm, tier: e.target.value as Tier })} style={inputStyle}>
+                    {TIERS.map(tr => <option key={tr || 'unset'} value={tr}>{tr ? tr.toUpperCase() : 'Unset'}</option>)}
+                  </select>
+                </div>
+              </div>
+              {LINK_KEYS.map(({ key, label, icon }) => (
+                <div key={key}>
+                  <label style={labelStyle}>{icon} {label}</label>
+                  <input
+                    type="text"
+                    placeholder={`https://… (${key})`}
+                    value={metaForm.links[key]}
+                    onChange={e => setMetaForm({ ...metaForm, links: { ...metaForm.links, [key]: e.target.value } })}
+                    style={inputStyle}
+                  />
+                </div>
+              ))}
+              <div style={{ display: 'flex', gap: '12px', marginTop: '8px' }}>
+                <button type="button" onClick={() => setMetaNode(null)} style={{ flex: 1, padding: '10px 20px', borderRadius: '10px', border: '1px solid ' + t.panelBorder, background: 'transparent', color: t.text1, fontWeight: 600, fontSize: '13.5px', cursor: 'pointer' }}>Cancel</button>
+                <button type="submit" style={{ flex: 1, padding: '10px 20px', borderRadius: '10px', border: 'none', background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, color: '#fff', fontWeight: 600, fontSize: '13.5px', cursor: 'pointer' }}>Save Metadata</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '20px', gap: '16px', flexWrap: 'wrap' }}>
         <div>
           <h2 style={{ fontSize: '26px', fontWeight: 700, margin: '0 0 8px', color: t.text1 }}>Service Catalog</h2>
@@ -236,6 +345,7 @@ export function ServiceCatalog() {
             <tr style={{ background: t.panelTop, borderBottom: '1px solid ' + t.panelBorder, color: t.text2, fontSize: '13px', textAlign: 'left' }}>
               <th style={{ padding: '16px 24px', fontWeight: 500 }}>Service Name</th>
               <th style={{ padding: '16px 24px', fontWeight: 500 }}>Health</th>
+              <th style={{ padding: '16px 24px', fontWeight: 500 }}>Lifecycle / Tier</th>
               <th style={{ padding: '16px 24px', fontWeight: 500 }}>SLO Budget</th>
               <th style={{ padding: '16px 24px', fontWeight: 500 }}>Owning Team</th>
               <th style={{ padding: '16px 24px', fontWeight: 500 }}>Repository</th>
@@ -245,11 +355,11 @@ export function ServiceCatalog() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={6} style={{ padding: '40px', textAlign: 'center', color: t.text2 }}>Loading catalog...</td>
+                <td colSpan={7} style={{ padding: '40px', textAlign: 'center', color: t.text2 }}>Loading catalog...</td>
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={6} style={{ padding: '40px', textAlign: 'center', color: t.text2 }}>{nodes.length === 0 ? 'No services discovered yet.' : 'No services match your search.'}</td>
+                <td colSpan={7} style={{ padding: '40px', textAlign: 'center', color: t.text2 }}>{nodes.length === 0 ? 'No services discovered yet.' : 'No services match your search.'}</td>
               </tr>
             ) : (
               filtered.map(node => {
@@ -276,6 +386,30 @@ export function ServiceCatalog() {
                       }}>
                         {node.state.replace('_', ' ')}
                       </span>
+                    </td>
+                    <td style={{ padding: '16px 24px', fontSize: '13px' }}>
+                      {(() => {
+                        const lc = lifecycleStyle(node.lifecycle);
+                        const linkCount = node.links ? Object.keys(node.links).length : 0;
+                        return (
+                          <button
+                            onClick={() => openMetaModal(node)}
+                            title="Edit lifecycle, tier & links"
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
+                          >
+                            <span style={{ fontSize: '11.5px', padding: '4px 10px', borderRadius: '100px', border: '1px solid ' + lc.color, color: lc.color, fontWeight: 600 }}>
+                              {lc.label}
+                            </span>
+                            {node.tier && (
+                              <span style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '6px', background: t.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)', color: t.text1, textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+                                {node.tier}
+                              </span>
+                            )}
+                            {linkCount > 0 && <span style={{ fontSize: '11px', color: t.text2 }}>🔗 {linkCount}</span>}
+                            <span style={{ fontSize: '11px', color: t.accent, opacity: 0.7 }}>✎</span>
+                          </button>
+                        );
+                      })()}
                     </td>
                     <td style={{ padding: '16px 24px', fontSize: '13px' }}>
                       {slo ? (

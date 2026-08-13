@@ -279,3 +279,55 @@ func TestRunPlaybook_UnknownPlaybookFailsEvenInDryRun(t *testing.T) {
 		t.Errorf("output should name the unknown playbook: %q", output)
 	}
 }
+
+func TestValidateCatalogMetadata(t *testing.T) {
+	valid := []struct{ tier, lifecycle string }{
+		{"", ""},
+		{"tier-1", "production"},
+		{"tier-3", "deprecated"},
+		{"tier-2", "experimental"},
+		{"", "production"}, // tier optional
+		{"tier-1", ""},     // lifecycle optional
+	}
+	for _, c := range valid {
+		if err := validateCatalogMetadata(c.tier, c.lifecycle); err != nil {
+			t.Errorf("validateCatalogMetadata(%q,%q) = %v, want nil", c.tier, c.lifecycle, err)
+		}
+	}
+	invalid := []struct{ tier, lifecycle string }{
+		{"tier-4", "production"},
+		{"critical", "production"},
+		{"tier-1", "prod"},
+		{"tier-1", "retired"},
+	}
+	for _, c := range invalid {
+		if err := validateCatalogMetadata(c.tier, c.lifecycle); err == nil {
+			t.Errorf("validateCatalogMetadata(%q,%q) = nil, want error", c.tier, c.lifecycle)
+		}
+	}
+}
+
+func TestSanitizeLinks(t *testing.T) {
+	// Known keys with values are kept; blanks are dropped.
+	out, err := sanitizeLinks(map[string]string{"repo": "github.com/o/r", "docs": "  ", "runbooks": " rb "})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out["repo"] != "github.com/o/r" {
+		t.Errorf("repo not preserved: %v", out)
+	}
+	if _, ok := out["docs"]; ok {
+		t.Errorf("blank docs should be dropped: %v", out)
+	}
+	if out["runbooks"] != "rb" {
+		t.Errorf("runbooks should be trimmed to %q, got %q", "rb", out["runbooks"])
+	}
+	// Unknown key is rejected.
+	if _, err := sanitizeLinks(map[string]string{"wiki": "x"}); err == nil {
+		t.Error("unknown link key must be rejected")
+	}
+	// Empty/nil is valid.
+	if _, err := sanitizeLinks(nil); err != nil {
+		t.Errorf("nil links should be valid, got %v", err)
+	}
+}

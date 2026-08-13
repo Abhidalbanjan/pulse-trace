@@ -223,6 +223,61 @@ func (r *Neo4jRepository) UpsertServiceCatalog(ctx context.Context, tenant, serv
 	return err
 }
 
+// UpsertServiceMetadata sets a service's rich catalog metadata (Catalog · E3):
+// tier, lifecycle, and structured links. Links are stored as a JSON string
+// property because Neo4j node properties can't hold nested maps. Any of the three
+// may be empty; the caller decides what to set. Distinct from UpsertServiceCatalog
+// (team/repo/slack) so the two edit surfaces never clobber each other's fields.
+func (r *Neo4jRepository) UpsertServiceMetadata(ctx context.Context, tenant, serviceName, tier, lifecycle string, links map[string]string) error {
+	linksJSON := "{}"
+	if len(links) > 0 {
+		if b, err := json.Marshal(links); err == nil {
+			linksJSON = string(b)
+		}
+	}
+	query := `
+		MERGE (s:Service {name: $serviceName, tenant: $tenant})
+		SET s.tier = $tier, s.lifecycle = $lifecycle, s.links = $links
+	`
+	_, err := neo4j.ExecuteQuery(ctx, r.driver, query, map[string]any{
+		"serviceName": serviceName,
+		"tier":        tier,
+		"lifecycle":   lifecycle,
+		"links":       linksJSON,
+		"tenant":      tenant,
+	}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
+	if err == nil {
+		r.invalidateCache(ctx, tenant, serviceName)
+	}
+	return err
+}
+
+// strProp reads a string property from a Neo4j record, tolerating a nil/missing
+// value (unmanaged services won't have these props) by returning "".
+func strProp(record *neo4j.Record, key string) string {
+	if v, ok := record.Get(key); ok && v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// linksProp reads the JSON-encoded links property back into a map. A missing or
+// malformed value yields nil (no links), never an error — metadata is best-effort
+// enrichment and must not fail the whole graph read.
+func linksProp(record *neo4j.Record, key string) map[string]string {
+	raw := strProp(record, key)
+	if raw == "" || raw == "{}" {
+		return nil
+	}
+	var out map[string]string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil || len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // GetUpstreamDependencies returns the services this service depends on, within a tenant.
 func (r *Neo4jRepository) GetUpstreamDependencies(ctx context.Context, tenant, serviceName string) ([]string, error) {
 	cacheKey := "topo:upstream:" + tenant + ":" + serviceName
@@ -297,6 +352,13 @@ type Node struct {
 	Team  string `json:"team"`
 	Repo  string `json:"repo"`
 	Slack string `json:"slack"`
+	// Rich metadata (Catalog · E3). Tier drives blast-radius/prioritization;
+	// Lifecycle (experimental|production|deprecated) signals maturity; Links holds
+	// structured pointers (repo/dashboards/runbooks/docs) an on-call reaches for
+	// first. All optional — an unmanaged service simply carries zero values.
+	Tier      string            `json:"tier,omitempty"`
+	Lifecycle string            `json:"lifecycle,omitempty"`
+	Links     map[string]string `json:"links,omitempty"`
 }
 
 type Edge struct {
@@ -380,7 +442,7 @@ func (r *Neo4jRepository) GetGraph(ctx context.Context, tenant string) (*Graph, 
 	}
 
 	nodesRes, err := neo4j.ExecuteQuery(ctx, r.driver,
-		`MATCH (n:Service {tenant: $tenant}) RETURN n.name AS id, n.state AS state, n.team AS team, n.repo AS repo, n.slack AS slack`,
+		`MATCH (n:Service {tenant: $tenant}) RETURN n.name AS id, n.state AS state, n.team AS team, n.repo AS repo, n.slack AS slack, n.tier AS tier, n.lifecycle AS lifecycle, n.links AS links`,
 		map[string]any{"tenant": tenant}, neo4j.EagerResultTransformer, neo4j.ExecuteQueryWithDatabase("neo4j"))
 	if err != nil {
 		return nil, err
@@ -412,11 +474,14 @@ func (r *Neo4jRepository) GetGraph(ctx context.Context, tenant string) (*Graph, 
 		}
 
 		nodes = append(nodes, Node{
-			Id:    id.(string),
-			State: s,
-			Team:  t,
-			Repo:  rStr,
-			Slack: sl,
+			Id:        id.(string),
+			State:     s,
+			Team:      t,
+			Repo:      rStr,
+			Slack:     sl,
+			Tier:      strProp(record, "tier"),
+			Lifecycle: strProp(record, "lifecycle"),
+			Links:     linksProp(record, "links"),
 		})
 	}
 

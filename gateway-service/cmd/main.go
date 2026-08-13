@@ -361,6 +361,7 @@ func main() {
 	// and full-span fetch for the waterfall.
 	tracesHandler := handler.NewTracesHandler(clickhouseURL)
 	mux.HandleFunc("GET /api/v1/traces", tracesHandler.Search)
+	mux.HandleFunc("GET /api/v1/traces/latency", tracesHandler.GetLatency)
 	mux.HandleFunc("GET /api/v1/traces/{id}", tracesHandler.GetTrace)
 
 	// Native Metrics APIs (powered by ClickHouse otel_metrics_* tables, populated

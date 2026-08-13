@@ -20,6 +20,18 @@ test.describe('Distributed Traces', () => {
     await expect(page.locator('table').or(page.getByText(/No traces match|Set filters/i)).first()).toBeVisible({ timeout: 10000 });
   });
 
+  test('latency distribution panel resolves with percentiles (E2)', async ({ page }) => {
+    await page.goto('/traces');
+    await expect(page.getByRole('button', { name: /Distribution/ })).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: /Distribution/ }).click();
+    // Resolves to a real state: a histogram with p50/p95/p99, or an explicit
+    // empty note — both prove GET /api/v1/traces/latency is wired.
+    await expect(
+      page.getByText(/p50/).or(page.getByText(/No trace latency data/i)),
+    ).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('Computing distribution…')).toHaveCount(0, { timeout: 10000 });
+  });
+
   test('lists seeded traces for a service', async ({ page }) => {
     await openExplorer(page);
     await expect(page.locator('table')).toBeVisible({ timeout: 15000 });

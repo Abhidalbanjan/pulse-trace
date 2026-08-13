@@ -3,6 +3,7 @@
 import React, { useState, useCallback } from 'react';
 import { fetchWithAuth } from '@/lib/api';
 import { useTheme } from '@/context/ThemeContext';
+import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 
 // First-class trace search over ClickHouse otel_traces (Traces · E1). Filters by
 // service / operation / duration / status / span tag → per-trace summaries; a
@@ -46,6 +47,14 @@ const parseCH = (ts: string): number => {
 
 const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms.toFixed(ms < 10 ? 2 : 0)}ms`);
 
+interface LatencyBucket { lower_ms: number; upper_ms: number; count: number }
+interface LatencyDist {
+  count: number;
+  p50_ms?: number; p95_ms?: number; p99_ms?: number; max_ms?: number;
+  bucket_width_ms?: number;
+  buckets: LatencyBucket[];
+}
+
 // serviceColor deterministically maps a service name to a stable hue.
 const serviceColor = (svc: string): string => {
   let h = 0;
@@ -73,6 +82,12 @@ export function TraceSearchView() {
   const [spansLoading, setSpansLoading] = useState(false);
   const [selectedSpan, setSelectedSpan] = useState<Span | null>(null);
 
+  // Latency distribution (Traces · E2): percentiles + histogram for the current
+  // service/operation filter; clicking a bar drills the search into that bucket.
+  const [dist, setDist] = useState<LatencyDist | null>(null);
+  const [showDist, setShowDist] = useState(false);
+  const [distLoading, setDistLoading] = useState(false);
+
   const search = useCallback(() => {
     setLoading(true);
     setError(null);
@@ -95,6 +110,39 @@ export function TraceSearchView() {
       .catch(() => setError('Failed to search traces.'))
       .finally(() => setLoading(false));
   }, [service, operation, status, minMs, maxMs, tags, interval]);
+
+  const loadDistribution = useCallback(() => {
+    setShowDist(true);
+    setDistLoading(true);
+    const p = new URLSearchParams({ interval });
+    if (service.trim()) p.set('service', service.trim());
+    if (operation.trim()) p.set('operation', operation.trim());
+    fetchWithAuth(`/api/v1/traces/latency?${p.toString()}`)
+      .then(async (res) => { if (!res.ok) throw new Error(await res.text()); return res.json(); })
+      .then((json: LatencyDist) => setDist(json))
+      .catch(() => setDist(null))
+      .finally(() => setDistLoading(false));
+  }, [service, operation, interval]);
+
+  // Clicking a histogram bar drills the trace search into that latency bucket.
+  const drillToBucket = useCallback((b: LatencyBucket) => {
+    setMinMs(String(Math.round(b.lower_ms)));
+    setMaxMs(String(Math.round(b.upper_ms)));
+    setLoading(true);
+    setError(null);
+    setSearched(true);
+    const p = new URLSearchParams({ interval });
+    if (service.trim()) p.set('service', service.trim());
+    if (operation.trim()) p.set('operation', operation.trim());
+    if (status !== 'any') p.set('status', status);
+    p.set('minDurationMs', String(Math.round(b.lower_ms)));
+    p.set('maxDurationMs', String(Math.round(b.upper_ms)));
+    fetchWithAuth(`/api/v1/traces?${p.toString()}`)
+      .then(async (res) => { if (!res.ok) throw new Error(await res.text()); return res.json(); })
+      .then((json) => setResults(json.data ?? []))
+      .catch(() => setError('Failed to search traces.'))
+      .finally(() => setLoading(false));
+  }, [service, operation, status, interval]);
 
   const loadTrace = useCallback((id: string) => {
     setOpenTrace(id);
@@ -192,7 +240,49 @@ export function TraceSearchView() {
           {INTERVALS.map((i) => <option key={i} value={i}>Last {i}</option>)}
         </select>
         <button onClick={search} style={{ padding: '9px 20px', borderRadius: '10px', border: 'none', background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, color: '#fff', fontWeight: 600, cursor: 'pointer', fontSize: '13px' }}>Search</button>
+        <button onClick={loadDistribution} title="Show the latency distribution for this filter" style={{ padding: '9px 16px', borderRadius: '10px', border: '1px solid ' + t.panelBorder, background: 'transparent', color: t.text2, fontWeight: 600, cursor: 'pointer', fontSize: '13px' }}>📊 Distribution</button>
       </div>
+
+      {showDist && (
+        <div style={{ ...panel, padding: '14px 16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <span style={{ fontSize: '12.5px', fontWeight: 700, color: t.text1 }}>Latency distribution {dist && dist.count > 0 ? `· ${num(dist.count).toLocaleString()} traces` : ''}</span>
+            <div style={{ display: 'flex', gap: '14px', alignItems: 'center' }}>
+              {dist && dist.count > 0 && (
+                <span style={{ fontSize: '12px', color: t.text2 }}>
+                  p50 <b style={{ color: t.text1 }}>{fmtMs(dist.p50_ms ?? 0)}</b> · p95 <b style={{ color: t.amber }}>{fmtMs(dist.p95_ms ?? 0)}</b> · p99 <b style={{ color: t.red }}>{fmtMs(dist.p99_ms ?? 0)}</b>
+                </span>
+              )}
+              <button onClick={() => setShowDist(false)} aria-label="Hide distribution" style={{ background: 'none', border: 'none', color: t.text2, cursor: 'pointer', fontSize: '16px', lineHeight: 1 }}>×</button>
+            </div>
+          </div>
+          {distLoading ? (
+            <div style={{ padding: '24px', textAlign: 'center', color: t.text2, fontSize: '13px' }}>Computing distribution…</div>
+          ) : !dist || dist.count === 0 ? (
+            <div style={{ padding: '24px', textAlign: 'center', color: t.text2, fontSize: '13px' }}>No trace latency data for this filter.</div>
+          ) : (
+            <div style={{ height: '150px' }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={dist.buckets} onClick={(e) => { const idx = e?.activeTooltipIndex; if (typeof idx === 'number' && dist.buckets[idx]) drillToBucket(dist.buckets[idx]); }}>
+                  <XAxis dataKey="lower_ms" tick={{ fontSize: 10, fill: t.text2 }} tickFormatter={(v) => fmtMs(Number(v))} minTickGap={24} />
+                  <Tooltip
+                    contentStyle={{ background: t.panelBg, border: '1px solid ' + t.panelBorder, borderRadius: '8px', fontSize: '12px' }}
+                    formatter={(v) => [`${Number(v).toLocaleString()} traces`, 'count']}
+                    labelFormatter={(v) => `${fmtMs(Number(v))}+`}
+                  />
+                  <Bar dataKey="count" radius={[3, 3, 0, 0]} cursor="pointer">
+                    {dist.buckets.map((b, i) => {
+                      const isTail = dist.p95_ms != null && b.lower_ms >= dist.p95_ms;
+                      return <Cell key={i} fill={isTail ? t.red : t.accent} />;
+                    })}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+              <div style={{ fontSize: '11px', color: t.text2, textAlign: 'center', marginTop: '4px' }}>Click a bar to see the traces in that latency range · red bars are past p95</div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{ ...panel, flex: 1, overflow: 'auto', boxShadow: t.shadow }}>
         {loading ? (

@@ -10,6 +10,10 @@ interface RUMMetric { MetricName?: string; Type?: string; p75_value?: number; av
 interface RUMError { timestamp?: string | number; path?: string; error_msg?: string; user_agent?: string; trace_id?: string; }
 interface RUMTrendRow { time_bucket?: string; metric?: string; p75?: number; }
 interface RUMSession { session_id?: string; entry_path?: string; page_views?: number | string; errors?: number | string; duration_seconds?: number | string; last_seen?: string; browser?: string; os?: string; device?: string; }
+
+// Session timeline (RUM · E1): ordered events reconstructing one visit.
+interface TimelineEvent { at?: string; offset_ms: number; kind: string; label: string; path?: string; trace_id?: string }
+interface SessionTimeline { session_id: string; started_at?: string; ended_at?: string; duration_ms: number; page_views: number; errors: number; event_count: number; events: TimelineEvent[] }
 interface Breakdown { name: string; count: number }
 interface RUMDevices { browsers: Breakdown[]; os: Breakdown[]; devices: Breakdown[] }
 // A Core Web Vitals breakdown row (RUM · E4): p75 of one metric for one
@@ -29,6 +33,21 @@ export function RUMView() {
   const [errors, setErrors] = useState<RUMError[]>([]);
   const [trends, setTrends] = useState<RUMTrendRow[]>([]);
   const [sessions, setSessions] = useState<RUMSession[]>([]);
+  const [openSession, setOpenSession] = useState<string | null>(null);
+  const [timeline, setTimeline] = useState<SessionTimeline | null>(null);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+
+  const openTimeline = (id?: string) => {
+    if (!id) return;
+    setOpenSession(id);
+    setTimeline(null);
+    setTimelineLoading(true);
+    fetchWithAuth(`/api/v1/rum/sessions/${encodeURIComponent(id)}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then((data: SessionTimeline | null) => setTimeline(data))
+      .catch(() => setTimeline(null))
+      .finally(() => setTimelineLoading(false));
+  };
   const [devices, setDevices] = useState<RUMDevices>({ browsers: [], os: [], devices: [] });
   const [range, setRange] = useState('24h');
   const [loading, setLoading] = useState(true);
@@ -356,7 +375,9 @@ export function RUMView() {
                   </thead>
                   <tbody>
                     {sessions.map((s, i) => (
-                      <tr key={s.session_id || i} style={{ borderTop: '1px solid ' + t.panelBorder }}>
+                      <tr key={s.session_id || i} onClick={() => openTimeline(s.session_id)} style={{ borderTop: '1px solid ' + t.panelBorder, cursor: s.session_id ? 'pointer' : 'default' }}
+                          onMouseEnter={(e) => (e.currentTarget.style.background = t.dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)')}
+                          onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
                         <td style={{ padding: '13px 24px', fontSize: '13px', fontFamily: 'monospace' }}>{s.entry_path || '—'}</td>
                         <td style={{ padding: '13px 24px', fontSize: '12.5px', color: t.text2 }}>{[s.browser, s.os, s.device].filter(Boolean).join(' · ') || '—'}</td>
                         <td style={{ padding: '13px 24px', fontSize: '13px' }}>{Number(s.page_views ?? 0)}</td>
@@ -445,6 +466,48 @@ export function RUMView() {
             </div>
           </div>
 
+        </div>
+      )}
+
+      {openSession && (
+        <div onClick={() => setOpenSession(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000, display: 'flex', justifyContent: 'flex-end', backdropFilter: 'blur(4px)' }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: 'min(520px, 92vw)', height: '100%', background: t.panelBg, borderLeft: '1px solid ' + t.panelBorder, boxShadow: t.shadow, overflowY: 'auto', padding: '24px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '4px' }}>
+              <h3 style={{ fontSize: '17px', fontWeight: 700, margin: 0, color: t.text1 }}>Session timeline</h3>
+              <button onClick={() => setOpenSession(null)} aria-label="Close session timeline" style={{ background: 'none', border: 'none', color: t.text2, cursor: 'pointer', fontSize: '20px', lineHeight: 1 }}>×</button>
+            </div>
+            <div style={{ fontSize: '12px', color: t.text2, fontFamily: 'monospace', marginBottom: '16px', wordBreak: 'break-all' }}>{openSession}</div>
+
+            {timelineLoading ? (
+              <div style={{ color: t.text2, fontSize: '13px', padding: '20px 0' }}>Loading timeline…</div>
+            ) : !timeline || timeline.event_count === 0 ? (
+              <div style={{ color: t.text2, fontSize: '13px', padding: '20px 0' }}>No events recorded for this session.</div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', gap: '18px', marginBottom: '18px', fontSize: '12.5px', color: t.text2 }}>
+                  <span>{timeline.page_views} views</span>
+                  <span style={{ color: timeline.errors > 0 ? t.red : t.text2 }}>{timeline.errors} errors</span>
+                  <span>{(timeline.duration_ms / 1000).toFixed(1)}s</span>
+                </div>
+                <div style={{ position: 'relative', paddingLeft: '18px' }}>
+                  <div style={{ position: 'absolute', left: '5px', top: '4px', bottom: '4px', width: '2px', background: t.panelBorder }} />
+                  {timeline.events.map((ev, i) => {
+                    const col = ev.kind === 'error' ? t.red : ev.kind === 'page_view' ? t.accent : ev.kind === 'web_vitals' ? t.amber : t.text2;
+                    return (
+                      <div key={i} style={{ position: 'relative', marginBottom: '14px' }}>
+                        <span style={{ position: 'absolute', left: '-16px', top: '3px', width: '9px', height: '9px', borderRadius: '50%', background: col, border: '2px solid ' + t.panelBg }} />
+                        <div style={{ fontSize: '13px', color: t.text1 }}>{ev.label}</div>
+                        <div style={{ fontSize: '11px', color: t.text2, marginTop: '2px', display: 'flex', gap: '10px' }}>
+                          <span>+{(ev.offset_ms / 1000).toFixed(1)}s</span>
+                          {ev.trace_id && <a href={`/traces?trace=${encodeURIComponent(ev.trace_id)}`} style={{ color: t.accent, textDecoration: 'none' }}>view backend trace →</a>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
         </div>
       )}
 

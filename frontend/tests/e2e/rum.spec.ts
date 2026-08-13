@@ -23,6 +23,21 @@ test.describe('Real User Monitoring', () => {
     await expect(page.getByText('Entry Path')).toBeVisible({ timeout: 10000 });
   });
 
+  test('clicking a session opens its event timeline (E1)', async ({ page }) => {
+    await page.goto('/rum');
+    await expect(page.getByText('Entry Path')).toBeVisible({ timeout: 10000 });
+    // Scope to the User Sessions table (the one with the "Entry Path" header).
+    const sessionsTable = page.locator('table', { has: page.getByText('Entry Path') });
+    const rows = sessionsTable.locator('tbody tr');
+    // Only exercise the drill-in when seeded sessions exist.
+    if (await rows.count() > 0) {
+      await rows.first().click();
+      await expect(page.getByRole('heading', { name: 'Session timeline' })).toBeVisible({ timeout: 10000 });
+      await expect(page.getByText('Loading timeline…')).toHaveCount(0, { timeout: 10000 });
+      await page.getByLabel('Close session timeline').click();
+    }
+  });
+
   test('time-range selector re-scopes the windowed panels', async ({ page }) => {
     await page.goto('/rum');
     const rangeSelect = page.getByLabel('Time range');

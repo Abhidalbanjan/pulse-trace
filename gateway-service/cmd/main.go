@@ -396,6 +396,7 @@ func main() {
 	mux.HandleFunc("GET /api/v1/profiler/diff", profilerHandler.GetDiff)
 	mux.HandleFunc("GET /api/v1/rum/trends", rumHandler.GetTrends)
 	mux.HandleFunc("GET /api/v1/rum/sessions", rumHandler.GetSessions)
+	mux.HandleFunc("GET /api/v1/rum/sessions/{id}", rumHandler.GetSession)
 	mux.HandleFunc("GET /api/v1/rum/devices", rumHandler.GetDevices)
 	// Core Web Vitals by page/device with good/needs-improvement/poor ratings (E4).
 	mux.HandleFunc("GET /api/v1/rum/web-vitals", rumHandler.GetWebVitals)

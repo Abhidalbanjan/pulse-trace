@@ -19,10 +19,19 @@ const serviceName = "alert-service"
 // AlertHandler exposes HTTP endpoints for querying alerts.
 type AlertHandler struct {
 	repo *repository.AlertRepository
+	// silences is optional; when set, listed alerts are annotated (and optionally
+	// filtered) against active silences (Alerts · E2).
+	silences *repository.SilenceRepository
 }
 
 func NewAlertHandler(repo *repository.AlertRepository) *AlertHandler {
 	return &AlertHandler{repo: repo}
+}
+
+// WithSilences enables silence annotation on the alert listings.
+func (h *AlertHandler) WithSilences(sr *repository.SilenceRepository) *AlertHandler {
+	h.silences = sr
+	return h
 }
 
 // RegisterRoutes wires up all alert-service routes onto the given mux.
@@ -65,6 +74,9 @@ func (h *AlertHandler) ListAlerts(w http.ResponseWriter, r *http.Request) {
 	// single page the repository allows (capped at 200) so a storm collapses into
 	// a handful of rows the operator can actually scan, rather than grouping only
 	// the current small page.
+	// A silence can be shown-but-dimmed (default) or hidden entirely.
+	hideSilenced := q.Get("include_silenced") == "false"
+
 	if q.Get("group") == "true" {
 		params.Page = 1
 		params.PageSize = 200
@@ -75,7 +87,8 @@ func (h *AlertHandler) ListAlerts(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, models.Fail("query failed: "+err.Error()))
 			return
 		}
-		groups := GroupAlerts(result.Alerts)
+		alerts := annotateSilenced(ctx, h.silences, params.TenantID, result.Alerts, hideSilenced)
+		groups := GroupAlerts(alerts)
 		span.SetAttributes(attribute.Int("alert.groups", len(groups)))
 		writeJSON(w, http.StatusOK, models.OK(groups))
 		return
@@ -89,6 +102,8 @@ func (h *AlertHandler) ListAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	alerts := annotateSilenced(ctx, h.silences, params.TenantID, result.Alerts, hideSilenced)
+
 	meta := &models.PaginationMeta{
 		Page:       result.Page,
 		PageSize:   result.PageSize,
@@ -96,7 +111,7 @@ func (h *AlertHandler) ListAlerts(w http.ResponseWriter, r *http.Request) {
 		TotalPages: repository.TotalPages(result.Total, result.PageSize),
 	}
 
-	writeJSON(w, http.StatusOK, models.OKPaginated(result.Alerts, meta))
+	writeJSON(w, http.StatusOK, models.OKPaginated(alerts, meta))
 }
 
 // GetAlert fetches a single alert by ID.

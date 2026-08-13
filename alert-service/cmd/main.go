@@ -91,8 +91,10 @@ func main() {
 
 	// ── Wire up dependencies ──────────────────────────────────────────────────
 	repo := repository.NewAlertRepository(pool)
+	silenceRepo := repository.NewSilenceRepository(pool)
 	logConsumer := consumer.NewLogConsumer(repo, producer)
-	alertHandler := handler.NewAlertHandler(repo)
+	alertHandler := handler.NewAlertHandler(repo).WithSilences(silenceRepo)
+	silenceHandler := handler.NewSilenceHandler(silenceRepo)
 
 	// ── Kafka consumer (logs topic) ───────────────────────────────────────────
 	cg, err := kafka.NewConsumerGroup(groupID, []string{logsTopic}, logConsumer.Handle)
@@ -111,6 +113,7 @@ func main() {
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	alertHandler.RegisterRoutes(mux)
+	silenceHandler.RegisterRoutes(mux)
 	mux.Handle("/debug/pprof/", http.DefaultServeMux)
 
 	chain := middleware.CORS(middleware.Tracing(serviceName)(middleware.RequestLogger(mux)))

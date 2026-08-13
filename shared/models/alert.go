@@ -13,6 +13,29 @@ type Alert struct {
 	TraceID     string    `json:"trace_id,omitempty" db:"trace_id"`
 	TriggeredAt time.Time `json:"triggered_at" db:"triggered_at"`
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	// Silenced is computed at read time (Alerts · E2): true when an active
+	// silence matches this alert. Not stored on the alert row.
+	Silenced bool `json:"silenced,omitempty" db:"-"`
+}
+
+// SilenceMatcher selects which alerts a silence suppresses. An empty field is a
+// wildcard; all-empty is a blanket maintenance window. MessageContains is a
+// case-insensitive substring test.
+type SilenceMatcher struct {
+	Service         string `json:"service,omitempty"`
+	Level           string `json:"level,omitempty"`
+	MessageContains string `json:"message_contains,omitempty"`
+}
+
+// AlertSilence suppresses matching alerts during [StartsAt, EndsAt).
+type AlertSilence struct {
+	ID        string         `json:"id"`
+	TenantID  string         `json:"tenant_id,omitempty"`
+	Matcher   SilenceMatcher `json:"matcher"`
+	StartsAt  time.Time      `json:"starts_at"`
+	EndsAt    time.Time      `json:"ends_at"`
+	CreatedBy string         `json:"created_by,omitempty"`
+	CreatedAt time.Time      `json:"created_at,omitempty"`
 }
 
 // AlertGroup is a set of near-identical alerts collapsed into one row, so a

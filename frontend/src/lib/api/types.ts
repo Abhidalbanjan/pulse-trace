@@ -255,6 +255,22 @@ export interface Alert {
   trace_id?: string;
   triggered_at: string;
   created_at?: string;
+  silenced?: boolean; // computed: an active silence matches (Alerts · E2)
+}
+
+// A silence / maintenance window suppressing matching alerts (Alerts · E2).
+export interface SilenceMatcher {
+  service?: string;
+  level?: string;
+  message_contains?: string;
+}
+export interface AlertSilence {
+  id: string;
+  matcher: SilenceMatcher;
+  starts_at: string;
+  ends_at: string;
+  created_by?: string;
+  created_at?: string;
 }
 
 // A set of near-identical alerts collapsed into one row (Alerts · E1). Members

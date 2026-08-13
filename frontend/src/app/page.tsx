@@ -155,11 +155,24 @@ export default function ConversationalSRE() {
     }
   };
 
-  const suggestionChips = [
-    'Rollback gateway-service',
-    'Restart postgres connection pool',
-    'Show me slow queries',
-  ];
+  // Grounded suggested prompts (AI-SRE · E4): seeded from live tenant state
+  // (open incidents first) via the backend, with a static fallback so the empty
+  // state always has chips even if the suggestions call fails.
+  const [suggestionChips, setSuggestionChips] = useState<string[]>([
+    'Which services have the highest error rate in the last hour?',
+    'Were there any deploys in the last 24 hours?',
+    'Give me a health summary of all services',
+  ]);
+
+  useEffect(() => {
+    fetchWithAuth('/api/v1/chat/suggestions')
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        const s: string[] = data?.suggestions || [];
+        if (s.length > 0) setSuggestionChips(s);
+      })
+      .catch(() => { /* keep the static fallback chips */ });
+  }, []);
 
   const sendSuggestion = (text: string) => {
     setInputValue(text);
@@ -338,10 +351,11 @@ export default function ConversationalSRE() {
               Send
             </button>
           </form>
-          <div style={{ display: 'flex', gap: '12px', marginTop: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
+          <div data-testid="suggestion-chips" style={{ display: 'flex', gap: '12px', marginTop: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
             {suggestionChips.map(chip => (
-              <span
+              <button
                 key={chip}
+                type="button"
                 onClick={() => sendSuggestion(chip)}
                 style={{
                   fontSize: '12.5px',
@@ -354,7 +368,7 @@ export default function ConversationalSRE() {
                 }}
               >
                 &quot;{chip}&quot;
-              </span>
+              </button>
             ))}
           </div>
         </div>

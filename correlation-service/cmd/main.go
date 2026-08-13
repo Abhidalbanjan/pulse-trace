@@ -220,6 +220,8 @@ func main() {
 	}
 	queryExecutor := query.NewExecutor(gatewayURL)
 	chatHandler := handler.NewChatHandler(chatProvider, queryExecutor)
+	// Grounded chat starter prompts (AI-SRE · E4), seeded from open incidents.
+	suggestionsHandler := handler.NewSuggestionsHandler(repo)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
@@ -229,6 +231,7 @@ func main() {
 	sloHandler.RegisterRoutes(mux)
 	anomalyHandler.RegisterRoutes(mux)
 	chatHandler.RegisterRoutes(mux)
+	suggestionsHandler.RegisterRoutes(mux)
 	causalHealthHandler.RegisterRoutes(mux)
 	mux.Handle("/debug/pprof/", http.DefaultServeMux)
 

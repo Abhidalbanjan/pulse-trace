@@ -17,11 +17,16 @@ test.describe('Home / AI SRE chat', () => {
     await expect(page.locator('main')).toContainText(/thinking|analy|error|service/i, { timeout: 15000 });
   });
 
-  test('suggestion chips populate and send a message', async ({ page }) => {
+  test('grounded suggestion chips populate the input', async ({ page }) => {
     await page.goto('/');
-    const chip = page.getByText('"Show me slow queries"');
-    await expect(chip).toBeVisible();
+    // Chips are grounded prompts fetched from /api/v1/chat/suggestions (with a
+    // static fallback), so we assert on whichever chip renders, not fixed text.
+    const chip = page.locator('[data-testid="suggestion-chips"] button').first();
+    await expect(chip).toBeVisible({ timeout: 10000 });
+    const raw = (await chip.textContent()) || '';
+    const text = raw.replace(/^"|"$/g, '').trim();
+    expect(text.length).toBeGreaterThan(0);
     await chip.click();
-    await expect(page.getByText('Show me slow queries', { exact: false }).first()).toBeVisible();
+    await expect(page.getByPlaceholder(/ask a question/i)).toHaveValue(text);
   });
 });

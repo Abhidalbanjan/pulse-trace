@@ -372,6 +372,7 @@ func main() {
 	// show what a series can be sliced by.
 	mux.HandleFunc("GET /api/v1/metrics/catalog", metricsHandler.MetricCatalog)
 	mux.HandleFunc("GET /api/v1/metrics/query", metricsHandler.QueryMetric)
+	mux.HandleFunc("GET /api/v1/metrics/formula", metricsHandler.QueryFormula)
 
 	// Error Tracking APIs (ClickHouse grouping + Postgres triage workflow)
 	mux.HandleFunc("GET /api/v1/errors/groups", errorTrackingHandler.ListErrorGroups)

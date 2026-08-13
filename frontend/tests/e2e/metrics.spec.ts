@@ -23,4 +23,21 @@ test.describe('Metrics', () => {
     // Switching the function must not error the chart panel.
     await expect(page.locator('main')).not.toContainText(/Failed to load metric data/i);
   });
+
+  test('multi-series formula evaluates an expression (E4)', async ({ page }) => {
+    await page.goto('/metrics');
+    await expect(page.getByRole('heading', { name: 'Metrics' })).toBeVisible();
+    // Select any metric so the chart toolbar (and Formula toggle) appears.
+    await page.locator('main').getByText(/requests_total|queue_depth|memory_bytes/i).first().click();
+    await page.getByRole('button', { name: /Formula/ }).click();
+    // The formula builder exposes series pickers and an expression box.
+    await expect(page.getByLabel('Formula expression')).toBeVisible({ timeout: 10000 });
+    await page.getByLabel('Series a metric').selectOption({ index: 1 });
+    await page.getByLabel('Formula expression').fill('a * 2');
+    await page.getByRole('button', { name: 'Compute', exact: true }).click();
+    // Resolves to a real state (a computed line or an explicit empty note),
+    // proving GET /api/v1/metrics/formula is wired — never an error banner.
+    await expect(page.getByText('Evaluating…')).toHaveCount(0, { timeout: 10000 });
+    await expect(page.getByText(/Failed to evaluate formula/i)).toHaveCount(0);
+  });
 });

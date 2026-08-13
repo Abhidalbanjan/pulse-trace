@@ -74,6 +74,7 @@ export function MetricsView() {
   const [search, setSearch] = useState('');
   const [labels, setLabels] = useState<MetricLabel[]>([]);
   const [deployments, setDeployments] = useState<{ deployed_at: string; version: string }[]>([]);
+  const [showFormula, setShowFormula] = useState(false); // Multi-series math (Metrics · E4)
 
   // Deploy markers (Deploy Gates · E1): fetch the selected service's deploys
   // inside the chart window so the "what changed" lines can overlay the metric.
@@ -267,8 +268,17 @@ export function MetricsView() {
                     {opt.label}
                   </button>
                 ))}
+                <button
+                  onClick={() => setShowFormula(v => !v)}
+                  title="Combine multiple series with a math expression"
+                  style={{ ...primaryBtnStyle, background: showFormula ? t.accentSoft : primaryBtnStyle.background, fontWeight: showFormula ? 600 : 400 }}
+                >
+                  ƒ Formula
+                </button>
               </div>
             </div>
+
+            {showFormula && <FormulaPanel names={names} interval={interval} t={t} />}
 
             {/* Label dimensions (Metrics · E1 explorer) */}
             {labels.length > 0 && (() => {
@@ -337,6 +347,98 @@ export function MetricsView() {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// FormulaPanel evaluates a math expression over two chosen metric series
+// (Metrics · E4). The a/b series are picked from the catalog; the backend aligns
+// them by time bucket and runs the expression through its safe evaluator.
+function FormulaPanel({ names, interval, t }: { names: MetricName[]; interval: string; t: ReturnType<typeof useTheme>['tokens'] }) {
+  const [aName, setAName] = useState('');
+  const [aFn, setAFn] = useState('avg');
+  const [bName, setBName] = useState('');
+  const [bFn, setBFn] = useState('avg');
+  const [expr, setExpr] = useState('a / b');
+  const [result, setResult] = useState<{ time_bucket: string; value: number }[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const key = (n: MetricName) => `${n.name}|${n.type}|${n.service}`;
+  const find = (k: string) => names.find(n => key(n) === k);
+
+  const compute = () => {
+    const a = find(aName), b = find(bName);
+    if (!a) { setError('Pick series a.'); return; }
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    const p = new URLSearchParams({ expr, interval });
+    p.set('a_metric', a.name); p.set('a_type', a.type); p.set('a_fn', aFn);
+    if (b && expr.includes('b')) { p.set('b_metric', b.name); p.set('b_type', b.type); p.set('b_fn', bFn); }
+    fetchWithAuth(`/api/v1/metrics/formula?${p.toString()}`)
+      .then(async res => { if (!res.ok) throw new Error(await res.text()); return res.json(); })
+      .then(json => setResult((json.series || []).map((r: { time_bucket: string; value: number }) => ({ time_bucket: r.time_bucket, value: Number(r.value) }))))
+      .catch(err => setError(err.message || 'Failed to evaluate formula'))
+      .finally(() => setLoading(false));
+  };
+
+  const sel: React.CSSProperties = { padding: '7px 9px', fontSize: '12px', background: t.dark ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.7)', border: '1px solid ' + t.panelBorder, borderRadius: '8px', color: t.text1, maxWidth: '220px' };
+
+  return (
+    <div style={{ marginBottom: '16px', padding: '14px 16px', borderRadius: '12px', background: t.dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', border: '1px solid ' + t.panelBorder }}>
+      <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+        <span style={{ fontSize: '12px', fontWeight: 700, color: t.accent }}>a</span>
+        <select aria-label="Series a metric" value={aName} onChange={e => setAName(e.target.value)} style={sel}>
+          <option value="">Select series a…</option>
+          {names.map((n, i) => <option key={`a${i}`} value={key(n)}>{n.name} · {n.service}</option>)}
+        </select>
+        <select aria-label="Series a function" value={aFn} onChange={e => setAFn(e.target.value)} style={sel}>
+          {FN_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+        <span style={{ fontSize: '12px', fontWeight: 700, color: t.accent, marginLeft: '8px' }}>b</span>
+        <select aria-label="Series b metric" value={bName} onChange={e => setBName(e.target.value)} style={sel}>
+          <option value="">Select series b…</option>
+          {names.map((n, i) => <option key={`b${i}`} value={key(n)}>{n.name} · {n.service}</option>)}
+        </select>
+        <select aria-label="Series b function" value={bFn} onChange={e => setBFn(e.target.value)} style={sel}>
+          {FN_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </div>
+      <div style={{ display: 'flex', gap: '10px', marginTop: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: '12px', color: t.text2 }}>Expression</span>
+        <input
+          aria-label="Formula expression"
+          value={expr}
+          onChange={e => setExpr(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && compute()}
+          placeholder="e.g. a / b * 100"
+          style={{ ...sel, maxWidth: '260px', fontFamily: 'monospace' }}
+        />
+        <button onClick={compute} style={{ padding: '7px 16px', borderRadius: '8px', border: 'none', background: t.accent, color: '#fff', fontWeight: 600, fontSize: '12.5px', cursor: 'pointer' }}>Compute</button>
+        <span style={{ fontSize: '11.5px', color: t.text2 }}>Vars a, b · operators + − × ÷ and ( )</span>
+      </div>
+
+      {error && <div style={{ marginTop: '10px', color: t.red, fontSize: '12.5px' }}>{error}</div>}
+      {loading ? (
+        <div style={{ marginTop: '12px', color: t.text2, fontSize: '12.5px' }}>Evaluating…</div>
+      ) : result && (
+        result.length === 0 ? (
+          <div style={{ marginTop: '12px', color: t.text2, fontSize: '12.5px' }}>No overlapping data points for these series in this window.</div>
+        ) : (
+          <div style={{ height: '200px', marginTop: '12px' }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={result} margin={{ top: 5, right: 20, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={t.panelBorder} />
+                <XAxis dataKey="time_bucket" tick={{ fontSize: 10, fill: t.text2 }} minTickGap={40} />
+                <YAxis tick={{ fontSize: 10, fill: t.text2 }} tickFormatter={formatMetricValue} width={48} />
+                <Tooltip contentStyle={{ background: t.panelBg, border: '1px solid ' + t.panelBorder, borderRadius: '8px', fontSize: '12px' }} formatter={(v) => [formatMetricValue(Number(v)), expr]} />
+                <Line type="monotone" dataKey="value" name={expr} stroke={t.accent} strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )
+      )}
     </div>
   );
 }

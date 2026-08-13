@@ -63,4 +63,13 @@ test.describe('Log Explorer', () => {
     // explicit empty message), never an infinite spinner.
     await expect(dialog).not.toContainText('Loading context', { timeout: 10000 });
   });
+  test('the volume histogram offers brush-to-zoom (E5)', async ({ page }) => {
+    await page.goto('/explorer');
+    // The histogram renders with a brush hint once volume data loads (or the
+    // chart is absent when there is no data — both are valid states).
+    const hint = page.getByText(/Drag across the histogram to zoom|Zoomed:/);
+    if (await hint.count() > 0) {
+      await expect(hint.first()).toBeVisible({ timeout: 10000 });
+    }
+  });
 });

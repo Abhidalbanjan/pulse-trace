@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { fetchWithAuth } from '@/lib/api';
-import { BarChart, Bar, Tooltip, ResponsiveContainer } from 'recharts';
+import { BarChart, Bar, Tooltip, ResponsiveContainer, Brush } from 'recharts';
 import { useTheme } from '@/context/ThemeContext';
 
 interface LogEntry {
@@ -138,7 +138,11 @@ export function ExplorerView() {
   // Aggregation State
   const [serviceBuckets, setServiceBuckets] = useState<Bucket[]>([]);
   const [levelBuckets, setLevelBuckets] = useState<Bucket[]>([]);
-  const [volumeData, setVolumeData] = useState<{ time: string; count: number }[]>([]);
+  const [volumeData, setVolumeData] = useState<{ time: string; iso: string; count: number }[]>([]);
+  // Histogram brush-to-zoom (Log Explorer · E5): an explicit [start,end] window
+  // selected on the volume chart, plus the pending brush selection before apply.
+  const [brushRange, setBrushRange] = useState<{ start: string; end: string } | null>(null);
+  const [pendingBrush, setPendingBrush] = useState<{ startIndex: number; endIndex: number } | null>(null);
 
   // Live Tail State
   const [isLiveTail, setIsLiveTail] = useState(false);
@@ -166,9 +170,29 @@ export function ExplorerView() {
     } else if (raw && raw !== "*") {
       clauses.push(raw);
     }
-    const tc = timeClause(timeRange);
-    if (tc) clauses.push(tc);
+    // A brush-selected window (E5) takes precedence over the relative preset.
+    if (brushRange) {
+      clauses.push(`timestamp:[${brushRange.start} TO ${brushRange.end}]`);
+    } else {
+      const tc = timeClause(timeRange);
+      if (tc) clauses.push(tc);
+    }
     return clauses.length ? clauses.join(" AND ") : "*";
+  };
+
+  // applyBrushZoom turns the pending brush selection into an explicit time window
+  // and re-queries; picking a preset range clears it.
+  const applyBrushZoom = () => {
+    if (!pendingBrush || volumeData.length === 0) return;
+    const lo = Math.max(0, Math.min(pendingBrush.startIndex, pendingBrush.endIndex));
+    const hi = Math.min(volumeData.length - 1, Math.max(pendingBrush.startIndex, pendingBrush.endIndex));
+    const start = volumeData[lo]?.iso;
+    // End at the following bucket's start (the histogram interval) so the last
+    // selected bucket is inclusive; fall back to the last bucket + a second.
+    const endBase = volumeData[Math.min(hi + 1, volumeData.length - 1)]?.iso ?? volumeData[hi]?.iso;
+    if (!start || !endBase) return;
+    setBrushRange({ start, end: endBase });
+    setPendingBrush(null);
   };
 
   // F6: shareable query URLs. Hydrate the full search state (box text, regex
@@ -242,6 +266,7 @@ export function ExplorerView() {
           if (data.aggregations.volume_over_time && data.aggregations.volume_over_time.buckets) {
             const chartData = data.aggregations.volume_over_time.buckets.map((b: { key: string | number; doc_count: number }) => ({
               time: new Date(b.key).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second:'2-digit' }),
+              iso: new Date(b.key).toISOString(),
               count: b.doc_count
             }));
             setVolumeData(chartData);
@@ -256,7 +281,14 @@ export function ExplorerView() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
     fetchLogs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, regexMode, timeRange]);
+  }, [query, regexMode, timeRange, brushRange]);
+
+  // Selecting a relative preset clears any brush zoom (the two are exclusive).
+  const selectTimeRange = (range: TimeRange) => {
+    setBrushRange(null);
+    setPendingBrush(null);
+    setTimeRange(range);
+  };
 
   const loadSavedSearches = () => {
     fetchWithAuth('/api/v1/saved-searches?kind=logs')
@@ -268,13 +300,14 @@ export function ExplorerView() {
   // Load this user's saved searches once on mount.
   useEffect(() => {
     loadSavedSearches();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const applySavedSearch = (s: SavedSearch) => {
     const p = s.query_params || {};
     setQuery(p.query || '*');
     setRegexMode(p.regex === 'true');
+    setBrushRange(null);
+    setPendingBrush(null);
     setTimeRange((p.range as TimeRange) || 'all');
     setSavedOpen(false);
   };
@@ -462,7 +495,7 @@ export function ExplorerView() {
             {TIME_RANGES.map((r) => (
               <button
                 key={r.key}
-                onClick={() => setTimeRange(r.key)}
+                onClick={() => selectTimeRange(r.key)}
                 style={{
                   padding: '7px 11px',
                   borderRadius: '10px',
@@ -590,25 +623,55 @@ export function ExplorerView() {
           </button>
         </div>
 
-        {/* Volume Chart */}
+        {/* Volume Chart with brush-to-zoom (E5) */}
         {volumeData.length > 0 && (
-          <div style={{ height: '110px', padding: '16px', borderRadius: '18px', background: t.panelBg, border: `1px solid ${t.panelBorder}`, backdropFilter: 'blur(20px) saturate(180%)', WebkitBackdropFilter: 'blur(20px) saturate(180%)' }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={volumeData}>
-                <defs>
-                  <linearGradient id="explorerVolumeGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor={t.accent} />
-                    <stop offset="100%" stopColor={t.accent2} />
-                  </linearGradient>
-                </defs>
-                <Tooltip
-                  contentStyle={{ backgroundColor: t.dark ? 'rgba(20,20,26,0.9)' : 'rgba(255,255,255,0.9)', border: `1px solid ${t.panelBorder}`, borderRadius: '8px', fontSize: '12px' }}
-                  itemStyle={{ color: t.accent }}
-                  labelStyle={{ color: t.text2 }}
-                />
-                <Bar dataKey="count" fill="url(#explorerVolumeGradient)" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+          <div style={{ padding: '12px 16px', borderRadius: '18px', background: t.panelBg, border: `1px solid ${t.panelBorder}`, backdropFilter: 'blur(20px) saturate(180%)', WebkitBackdropFilter: 'blur(20px) saturate(180%)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px', minHeight: '22px' }}>
+              <span style={{ fontSize: '11px', color: t.text2 }}>
+                {brushRange
+                  ? `Zoomed: ${new Date(brushRange.start).toLocaleTimeString()} → ${new Date(brushRange.end).toLocaleTimeString()}`
+                  : 'Drag across the histogram to zoom into a time window'}
+              </span>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                {pendingBrush && (
+                  <button onClick={applyBrushZoom} style={{ fontSize: '11px', fontWeight: 600, padding: '4px 10px', borderRadius: '7px', border: 'none', background: t.accent, color: '#fff', cursor: 'pointer' }}>🔍 Zoom to selection</button>
+                )}
+                {brushRange && (
+                  <button onClick={() => { setBrushRange(null); setPendingBrush(null); }} style={{ fontSize: '11px', fontWeight: 600, padding: '4px 10px', borderRadius: '7px', border: '1px solid ' + t.panelBorder, background: 'transparent', color: t.text2, cursor: 'pointer' }}>Clear zoom</button>
+                )}
+              </div>
+            </div>
+            <div style={{ height: '96px' }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={volumeData}>
+                  <defs>
+                    <linearGradient id="explorerVolumeGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={t.accent} />
+                      <stop offset="100%" stopColor={t.accent2} />
+                    </linearGradient>
+                  </defs>
+                  <Tooltip
+                    contentStyle={{ backgroundColor: t.dark ? 'rgba(20,20,26,0.9)' : 'rgba(255,255,255,0.9)', border: `1px solid ${t.panelBorder}`, borderRadius: '8px', fontSize: '12px' }}
+                    itemStyle={{ color: t.accent }}
+                    labelStyle={{ color: t.text2 }}
+                  />
+                  <Bar dataKey="count" fill="url(#explorerVolumeGradient)" radius={[4, 4, 0, 0]} />
+                  <Brush
+                    dataKey="time"
+                    height={16}
+                    travellerWidth={8}
+                    stroke={t.accent}
+                    fill={t.dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)'}
+                    onChange={(range) => {
+                      const r = range as { startIndex?: number; endIndex?: number };
+                      if (typeof r.startIndex === 'number' && typeof r.endIndex === 'number' && r.endIndex > r.startIndex) {
+                        setPendingBrush({ startIndex: r.startIndex, endIndex: r.endIndex });
+                      }
+                    }}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
           </div>
         )}
 

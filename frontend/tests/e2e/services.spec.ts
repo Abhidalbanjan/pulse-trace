@@ -8,6 +8,16 @@ test.describe('Services', () => {
     expect(rowCount).toBeGreaterThan(0);
   });
 
+  test('health column renders scores and sorts', async ({ page }) => {
+    await page.goto('/services');
+    await expect(page.getByRole('columnheader', { name: /Health/ })).toBeVisible({ timeout: 10000 });
+    // Each service shows a health band badge (healthy/degraded/unhealthy/critical).
+    await expect(page.locator('table tbody tr').first().getByText(/healthy|degraded|unhealthy|critical/i)).toBeVisible({ timeout: 10000 });
+    // The Health header is a sort toggle.
+    await page.getByRole('columnheader', { name: /Health/ }).click();
+    await expect(page.getByRole('columnheader', { name: /Health ▲/ })).toBeVisible();
+  });
+
   test('clicking a service navigates to its detail page', async ({ page }) => {
     await page.goto('/services');
     const firstRow = page.locator('table tbody tr').first();

@@ -72,7 +72,67 @@ func (h *ServiceHandler) ListServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	io.Copy(w, resp.Body)
+
+	// Annotate each service with a health score (Services · E2) derived from its
+	// RED signals, so the list can rank and colour services by health at a glance.
+	// On any decode hiccup we fall back to streaming the raw payload unchanged.
+	var parsed struct {
+		Data []map[string]interface{} `json:"data"`
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil || json.Unmarshal(body, &parsed) != nil {
+		w.Write(body)
+		return
+	}
+	for _, row := range parsed.Data {
+		requests := toFloat64(row["requests"])
+		errors := toFloat64(row["errors"])
+		errorRatePct := 0.0
+		if requests > 0 {
+			errorRatePct = errors / requests * 100
+		}
+		score, band := healthScore(errorRatePct, toFloat64(row["p99_ms"]), defaultLatencyBudgetMs)
+		row["health_score"] = score
+		row["health_band"] = band
+	}
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": parsed.Data})
+}
+
+// defaultLatencyBudgetMs is the p99 a service is expected to stay under before
+// latency starts eroding its health score. A pragmatic default in the absence of
+// a per-service SLO; the scorer degrades smoothly past it rather than cliff-edging.
+const defaultLatencyBudgetMs = 500.0
+
+// healthScore condenses a service's RED posture into a 0–100 score and a band.
+// It starts from a perfect 100 and deducts for the two things that actually hurt
+// users: error rate (each 1% of failed requests costs ~10 points) and tail
+// latency over budget (each full multiple of the budget over 1× costs 40). Pure
+// and unit-tested so the scoring contract is stable and explainable.
+func healthScore(errorRatePct, p99Ms, latencyBudgetMs float64) (int, string) {
+	score := 100.0
+	if errorRatePct > 0 {
+		score -= errorRatePct * 10
+	}
+	if latencyBudgetMs > 0 && p99Ms > latencyBudgetMs {
+		score -= (p99Ms/latencyBudgetMs - 1) * 40
+	}
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+	s := int(score + 0.5)
+	switch {
+	case s >= 90:
+		return s, "healthy"
+	case s >= 70:
+		return s, "degraded"
+	case s >= 40:
+		return s, "unhealthy"
+	default:
+		return s, "critical"
+	}
 }
 
 // GetServiceDetail returns the RED time series and per-resource (operation) breakdown

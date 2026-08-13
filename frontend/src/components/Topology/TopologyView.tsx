@@ -21,7 +21,7 @@ import { useTheme } from '@/context/ThemeContext';
 // Custom Node matching the Enterprise UI Redesign glass-node style
 interface NodeData { label: string; state: string; highlighted?: boolean; }
 interface TopoNode { id: string; state: string; }
-interface TopoEdge { source: string; target: string; request_count?: number; error_count?: number; avg_latency_ms?: number; }
+interface TopoEdge { source: string; target: string; request_count?: number; error_count?: number; avg_latency_ms?: number; is_causal?: boolean; reason?: string; }
 const CustomNode = ({ data }: { data: NodeData }) => {
   const { tokens: t } = useTheme();
 
@@ -36,6 +36,10 @@ const CustomNode = ({ data }: { data: NodeData }) => {
 
   const isHighlighted = !!data.highlighted;
   const stateColor = getStateColor(data.state);
+  // Anomaly overlay (Topology · E2): a service in a warning/unhealthy state
+  // pulses so it draws the eye on a large map, distinct from the gold root-cause
+  // highlight applied to the causal chain.
+  const isAnomalous = data.state === 'DEGRADED' || data.state === 'UNHEALTHY' || data.state === 'PREDICTIVE_WARNING';
 
   return (
     <div style={{
@@ -50,7 +54,8 @@ const CustomNode = ({ data }: { data: NodeData }) => {
       boxShadow: isHighlighted ? `0 0 26px ${t.gold}80` : t.shadow,
       color: t.text1,
       textAlign: 'center',
-      transition: 'all 0.3s ease'
+      transition: 'all 0.3s ease',
+      ...(isAnomalous && !isHighlighted ? { ['--pulse-color' as string]: stateColor + '99', animation: 'topoPulse 1.8s ease-in-out infinite' } : {}),
     }}>
       <Handle type="target" position={Position.Top} style={{ background: t.text2 }} />
       <div style={{ fontWeight: 700, fontSize: '13.5px', marginBottom: '6px' }}>{data.label}</div>
@@ -200,19 +205,24 @@ export function TopologyView() {
             const requests: number = e.request_count || 0;
             const errors: number = e.error_count || 0;
             const errorRate = requests > 0 ? errors / requests : 0;
-            const strokeColor = errorRate > 0.1 ? t.red : errorRate > 0 ? t.amber : t.accent;
+            // Incident overlay (Topology · E2): an edge on the causal path of a
+            // live incident (from Neo4j causal_entries) is highlighted gold and
+            // labeled with the inferred reason — the "this is how the failure
+            // propagated" story drawn straight on the map.
+            const isCausal = !!e.is_causal;
+            const strokeColor = isCausal ? t.gold : errorRate > 0.1 ? t.red : errorRate > 0 ? t.amber : t.accent;
             // Width scales with recent traffic so a busy dependency reads as a
             // thicker line, not visually identical to a quiet one.
-            const strokeWidth = requests === 0 ? 1.5 : Math.min(2 + Math.log10(requests + 1) * 1.5, 8);
+            const strokeWidth = isCausal ? 3.5 : requests === 0 ? 1.5 : Math.min(2 + Math.log10(requests + 1) * 1.5, 8);
 
             return {
               id: `e${idx}`,
               source: e.source,
               target: e.target,
-              animated: requests > 0,
-              label: requests > 0 ? `${requests}${errors > 0 ? ` (${errors} err)` : ''}` : undefined,
-              labelStyle: { fill: t.text2, fontSize: 10 },
-              style: { stroke: strokeColor, strokeWidth },
+              animated: isCausal || requests > 0,
+              label: isCausal ? `⚠ ${e.reason || 'causal path'}` : requests > 0 ? `${requests}${errors > 0 ? ` (${errors} err)` : ''}` : undefined,
+              labelStyle: { fill: isCausal ? t.gold : t.text2, fontSize: isCausal ? 11 : 10, fontWeight: isCausal ? 700 : 400 },
+              style: { stroke: strokeColor, strokeWidth, ...(isCausal ? { strokeDasharray: '6 3' } : {}) },
               data: { requestCount: requests, errorCount: errors, avgLatencyMs: e.avg_latency_ms || 0 },
             };
           }) : [];
@@ -371,6 +381,8 @@ export function TopologyView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 124px)' }}>
+      {/* Anomaly-node pulse keyframes (Topology · E2). */}
+      <style>{`@keyframes topoPulse { 0%,100% { box-shadow: 0 0 0 0 var(--pulse-color); } 50% { box-shadow: 0 0 15px 3px var(--pulse-color); } }`}</style>
 
       {/* Toolbar */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '18px' }}>

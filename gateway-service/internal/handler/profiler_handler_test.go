@@ -90,3 +90,35 @@ func TestBuildProfilerQuery(t *testing.T) {
 		t.Errorf("span-filtered query wrong: %q", got)
 	}
 }
+
+func TestFlattenFlamebearer(t *testing.T) {
+	names, levels := sampleFlame()
+	frames := flattenFlamebearer(names, levels, 100)
+	if len(frames) != 3 {
+		t.Fatalf("expected 3 frames (root + 2 children), got %d: %+v", len(frames), frames)
+	}
+	// Root spans the whole width.
+	root := frames[0]
+	if root.Name != "total" || root.Depth != 0 || root.X != 0 || root.Width != 1.0 {
+		t.Errorf("root frame wrong: %+v", root)
+	}
+	// hotFn: depth 1, left-aligned, 60% wide.
+	hot := frames[1]
+	if hot.Name != "hotFn" || hot.Depth != 1 || hot.X != 0 || hot.Width != 0.6 || hot.Self != 60 {
+		t.Errorf("hotFn frame wrong: %+v", hot)
+	}
+	// coldFn: sits immediately right of hotFn at x=0.6, 40% wide.
+	cold := frames[2]
+	if cold.Name != "coldFn" || cold.X != 0.6 || cold.Width != 0.4 {
+		t.Errorf("coldFn frame wrong (should start at 0.6): %+v", cold)
+	}
+}
+
+func TestFlattenFlamebearer_ZeroTotalIsSafe(t *testing.T) {
+	if got := flattenFlamebearer([]string{"a"}, [][]int{{0, 0, 0, 0}}, 0); len(got) != 0 {
+		t.Errorf("zero-total profile should yield no frames, got %+v", got)
+	}
+	if got := flattenFlamebearer(nil, nil, 0); len(got) != 0 {
+		t.Errorf("empty profile should yield no frames, got %+v", got)
+	}
+}

@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { fetchWithAuth } from '@/lib/api';
 import { PROFILED_SERVICES } from '@/lib/profiledServices';
 import { useTheme } from '@/context/ThemeContext';
+import { FlameGraph, type FlameFrame } from './FlameGraph';
 
 const TIME_RANGE_SECONDS: Record<string, number> = {
   'Last 15 minutes': 15 * 60,
@@ -35,6 +36,9 @@ export function ContinuousProfilerView() {
   const [compareMode, setCompareMode] = useState(false);
 
   const [functions, setFunctions] = useState<FuncStat[]>([]);
+  const [flame, setFlame] = useState<FlameFrame[]>([]);
+  const [total, setTotal] = useState(0);
+  const [flatView, setFlatView] = useState<'flame' | 'list'>('flame');
   const [diffs, setDiffs] = useState<FuncDiff[]>([]);
   const [regressionCount, setRegressionCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -55,6 +59,8 @@ export function ContinuousProfilerView() {
           setRegressionCount(data.regression_count || 0);
         } else {
           setFunctions(data.functions || []);
+          setFlame(data.flame || []);
+          setTotal(data.total || 0);
         }
       })
       .catch(err => setError(err.message || 'Failed to load profile'))
@@ -132,10 +138,27 @@ export function ContinuousProfilerView() {
 
       {/* Data panel */}
       <div style={panelStyle}>
-        <div style={{ padding: '16px 24px', borderBottom: '1px solid ' + t.panelBorder, fontSize: '14px', fontWeight: 700 }}>
-          {compareMode
-            ? `Regression diff — ${service} (${profileType}): ${timeRange} vs. preceding period`
-            : `Top functions by self time — ${service} (${profileType})`}
+        <div style={{ padding: '16px 24px', borderBottom: '1px solid ' + t.panelBorder, fontSize: '14px', fontWeight: 700, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+          <span>
+            {compareMode
+              ? `Regression diff — ${service} (${profileType}): ${timeRange} vs. preceding period`
+              : flatView === 'flame'
+                ? `Flame graph — ${service} (${profileType})`
+                : `Top functions by self time — ${service} (${profileType})`}
+          </span>
+          {!compareMode && (
+            <div style={{ display: 'flex', gap: '2px', background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', borderRadius: '9px', padding: '2px' }}>
+              {(['flame', 'list'] as const).map(v => (
+                <button
+                  key={v}
+                  onClick={() => setFlatView(v)}
+                  style={{ padding: '6px 14px', borderRadius: '7px', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: 600, textTransform: 'capitalize', background: flatView === v ? t.accent : 'transparent', color: flatView === v ? '#fff' : t.text2 }}
+                >
+                  {v === 'flame' ? '🔥 Flame' : '☰ List'}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div style={{ flex: 1, overflow: 'auto' }}>
@@ -176,6 +199,10 @@ export function ContinuousProfilerView() {
             )
           ) : functions.length === 0 ? (
             <div style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>No profile samples in this window yet. Profiling data appears once the selected service reports to Pyroscope.</div>
+          ) : flatView === 'flame' ? (
+            <div style={{ padding: '16px 24px' }}>
+              <FlameGraph frames={flame} rootTotal={total} t={t} />
+            </div>
           ) : (
             <div style={{ padding: '12px 24px' }}>
               {functions.map((f, i) => (

@@ -41,6 +41,11 @@ export function ContinuousProfilerView() {
   const [flatView, setFlatView] = useState<'flame' | 'list'>('flame');
   const [diffs, setDiffs] = useState<FuncDiff[]>([]);
   const [regressionCount, setRegressionCount] = useState(0);
+  // Diff flame graph (Profiler · E2).
+  const [diffFlame, setDiffFlame] = useState<FlameFrame[]>([]);
+  const [deltaByName, setDeltaByName] = useState<Record<string, number>>({});
+  const [compTotal, setCompTotal] = useState(0);
+  const [compareView, setCompareView] = useState<'flame' | 'table'>('flame');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,6 +62,9 @@ export function ContinuousProfilerView() {
         if (compareMode) {
           setDiffs(data.functions || []);
           setRegressionCount(data.regression_count || 0);
+          setDiffFlame(data.flame || []);
+          setDeltaByName(data.delta_by_name || {});
+          setCompTotal(data.comparison_total || 0);
         } else {
           setFunctions(data.functions || []);
           setFlame(data.flame || []);
@@ -146,7 +154,7 @@ export function ContinuousProfilerView() {
                 ? `Flame graph — ${service} (${profileType})`
                 : `Top functions by self time — ${service} (${profileType})`}
           </span>
-          {!compareMode && (
+          {!compareMode ? (
             <div style={{ display: 'flex', gap: '2px', background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', borderRadius: '9px', padding: '2px' }}>
               {(['flame', 'list'] as const).map(v => (
                 <button
@@ -158,6 +166,18 @@ export function ContinuousProfilerView() {
                 </button>
               ))}
             </div>
+          ) : (
+            <div style={{ display: 'flex', gap: '2px', background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', borderRadius: '9px', padding: '2px' }}>
+              {(['flame', 'table'] as const).map(v => (
+                <button
+                  key={v}
+                  onClick={() => setCompareView(v)}
+                  style={{ padding: '6px 14px', borderRadius: '7px', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: 600, textTransform: 'capitalize', background: compareView === v ? t.accent : 'transparent', color: compareView === v ? '#fff' : t.text2 }}
+                >
+                  {v === 'flame' ? '🔥 Diff flame' : '☰ Table'}
+                </button>
+              ))}
+            </div>
           )}
         </div>
 
@@ -166,6 +186,19 @@ export function ContinuousProfilerView() {
             <div style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>Loading profile…</div>
           ) : error ? (
             <div style={{ padding: '48px', textAlign: 'center', color: t.red }}>{error}</div>
+          ) : compareMode && compareView === 'flame' ? (
+            diffFlame.length === 0 ? (
+              <div style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>No profile samples in either window yet.</div>
+            ) : (
+              <div style={{ padding: '16px 24px' }}>
+                <div style={{ display: 'flex', gap: '16px', marginBottom: '12px', fontSize: '12px', color: t.text2, alignItems: 'center' }}>
+                  <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: 'rgba(224,82,75,0.7)', marginRight: 5 }} />grew vs baseline</span>
+                  <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: 'rgba(37,169,107,0.7)', marginRight: 5 }} />shrank</span>
+                  <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: t.dark ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.14)', marginRight: 5 }} />unchanged</span>
+                </div>
+                <FlameGraph frames={diffFlame} rootTotal={compTotal} t={t} deltaByName={deltaByName} />
+              </div>
+            )
           ) : compareMode ? (
             diffs.length === 0 ? (
               <div style={{ padding: '48px', textAlign: 'center', color: t.text2 }}>No profile samples in either window yet.</div>

@@ -29,7 +29,17 @@ function frameColor(name: string): string {
   return `hsl(${hue}, 68%, 52%)`;
 }
 
-export function FlameGraph({ frames, rootTotal, t }: { frames: FlameFrame[]; rootTotal: number; t: ThemeTokens }) {
+// diffColor paints a frame by how its share of the profile moved vs baseline
+// (Profiler · E2): red grew, green shrank, neutral if flat. The ± band avoids
+// lighting up every frame over profiling noise.
+function diffColor(delta: number | undefined, t: ThemeTokens): string {
+  if (delta == null || Math.abs(delta) < 0.5) return t.dark ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.14)';
+  const mag = Math.min(1, Math.abs(delta) / 10); // saturate by 10pp
+  const alpha = 0.35 + mag * 0.5;
+  return delta > 0 ? `rgba(224,82,75,${alpha})` : `rgba(37,169,107,${alpha})`;
+}
+
+export function FlameGraph({ frames, rootTotal, t, deltaByName }: { frames: FlameFrame[]; rootTotal: number; t: ThemeTokens; deltaByName?: Record<string, number> }) {
   // focus is the currently zoomed x-domain [x, x+width]; clicking a frame zooms
   // to it, and the root frame (or the Reset button) zooms back out.
   const [focus, setFocus] = useState<{ x: number; width: number }>({ x: 0, width: 1 });
@@ -40,6 +50,7 @@ export function FlameGraph({ frames, rootTotal, t }: { frames: FlameFrame[]; roo
   const height = (maxDepth + 1) * ROW_H;
   const isZoomed = focus.x !== 0 || focus.width !== 1;
   const q = search.trim().toLowerCase();
+  const isDiff = deltaByName != null;
 
   if (frames.length === 0) {
     return <div style={{ padding: '32px', textAlign: 'center', color: t.text2, fontSize: '13px' }}>No flame data in this window.</div>;
@@ -91,7 +102,7 @@ export function FlameGraph({ frames, rootTotal, t }: { frames: FlameFrame[]; roo
                 width: `${clampedW * 100}%`,
                 top: f.depth * ROW_H,
                 height: ROW_H - 1,
-                background: frameColor(f.name),
+                background: isDiff ? diffColor(deltaByName?.[f.name], t) : frameColor(f.name),
                 opacity: matched ? 1 : 0.22,
                 border: '1px solid rgba(0,0,0,0.18)',
                 borderRadius: '2px',
@@ -124,6 +135,11 @@ export function FlameGraph({ frames, rootTotal, t }: { frames: FlameFrame[]; roo
           <div style={{ color: t.text2 }}>
             {rootTotal > 0 ? ((hover.f.total / rootTotal) * 100).toFixed(2) : '0'}% of total · {hover.f.total.toLocaleString()} samples · {hover.f.self.toLocaleString()} self
           </div>
+          {isDiff && deltaByName?.[hover.f.name] != null && (
+            <div style={{ marginTop: '3px', fontWeight: 700, color: deltaByName[hover.f.name] > 0 ? '#e0524b' : deltaByName[hover.f.name] < 0 ? '#25a96b' : t.text2 }}>
+              {deltaByName[hover.f.name] > 0 ? '▲ +' : deltaByName[hover.f.name] < 0 ? '▼ ' : ''}{deltaByName[hover.f.name].toFixed(2)} pp vs baseline
+            </div>
+          )}
         </div>
       )}
     </div>

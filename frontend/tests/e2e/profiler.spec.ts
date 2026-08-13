@@ -33,4 +33,18 @@ test.describe('Continuous Profiler', () => {
     // A verdict banner renders (either N regressed or no regressions).
     await expect(page.getByText(/regress|No profile regressions/i).first()).toBeVisible({ timeout: 10000 });
   });
+
+  test('regression mode offers a red/green diff flame (E2)', async ({ page }) => {
+    await page.goto('/profiler');
+    await page.getByRole('button', { name: /detect regressions/i }).click();
+    await expect(page.getByText(/Regression diff/i)).toBeVisible({ timeout: 10000 });
+    // Diff flame is the default compare view; its legend explains the coloring,
+    // or an explicit empty state renders — both prove the diff-flame path is wired.
+    await expect(
+      page.getByText('grew vs baseline').or(page.getByText(/No profile samples in either window/i)),
+    ).toBeVisible({ timeout: 10000 });
+    // The Table toggle switches back to the per-function diff table.
+    await page.getByRole('button', { name: /Table/ }).click();
+    await expect(page.getByText(/Δ \(share\)|No profile samples/).first()).toBeVisible({ timeout: 10000 });
+  });
 });

@@ -348,7 +348,11 @@ func (h *ProfilerHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
 
 	query := buildProfilerQuery(service, profileType, r.URL.Query().Get("span_id"))
 	baseSelf, baseTotal := h.fetchProfile(query, baseFrom, baseUntil)
-	compSelf, compTotal := h.fetchProfile(query, compFrom, compUntil)
+	// Fetch the comparison window's full tree (not just the flat map) so we can
+	// render a diff flame graph (Profiler · E2), coloring each frame by how its
+	// share of the profile moved vs the baseline.
+	compNames, compLevels, compTotal := h.fetchFlame(query, compFrom, compUntil)
+	compSelf := aggregateSelf(compNames, compLevels)
 
 	diffs := diffProfiles(baseSelf, compSelf, baseTotal, compTotal, profilerRegressionThresholdPP, profilerTopN)
 	regressions := make([]funcDiff, 0)
@@ -365,5 +369,35 @@ func (h *ProfilerHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
 		"regression_count": len(regressions),
 		"functions":        diffs,
 		"regressions":      regressions,
+		// Diff flame (Profiler · E2): the comparison tree plus every function's
+		// share-point delta vs baseline, so the FE can paint frames red (grew) /
+		// green (shrank).
+		"flame":         flattenFlamebearer(compNames, compLevels, compTotal),
+		"delta_by_name": funcShareDeltas(baseSelf, compSelf, baseTotal, compTotal),
 	})
+}
+
+// funcShareDeltas returns, for every function seen in either window, the change
+// in its share of total self-time (comparison − baseline, in percentage points).
+// Same share basis as diffProfiles, but for ALL functions (not just the top N)
+// so a diff flame can be colored frame-for-frame. Pure.
+func funcShareDeltas(baseSelf, compSelf map[string]int64, baseTotal, compTotal int64) map[string]float64 {
+	share := func(v, total int64) float64 {
+		if total <= 0 {
+			return 0
+		}
+		return float64(v) / float64(total) * 100
+	}
+	names := make(map[string]struct{}, len(baseSelf)+len(compSelf))
+	for n := range baseSelf {
+		names[n] = struct{}{}
+	}
+	for n := range compSelf {
+		names[n] = struct{}{}
+	}
+	out := make(map[string]float64, len(names))
+	for n := range names {
+		out[n] = share(compSelf[n], compTotal) - share(baseSelf[n], baseTotal)
+	}
+	return out
 }

@@ -122,3 +122,20 @@ func TestFlattenFlamebearer_ZeroTotalIsSafe(t *testing.T) {
 		t.Errorf("empty profile should yield no frames, got %+v", got)
 	}
 }
+
+func TestFuncShareDeltas(t *testing.T) {
+	base := map[string]int64{"hot": 20, "cold": 80} // shares: hot 20%, cold 80%
+	comp := map[string]int64{"hot": 60, "cold": 40} // shares: hot 60%, cold 40%
+	d := funcShareDeltas(base, comp, 100, 100)
+	if d["hot"] != 40 { // grew by 40 points
+		t.Errorf("hot delta = %v, want +40", d["hot"])
+	}
+	if d["cold"] != -40 { // shrank by 40 points
+		t.Errorf("cold delta = %v, want -40", d["cold"])
+	}
+	// A function only in the comparison window counts its full new share.
+	d2 := funcShareDeltas(map[string]int64{}, map[string]int64{"new": 50}, 0, 100)
+	if d2["new"] != 50 {
+		t.Errorf("new-only func delta = %v, want +50", d2["new"])
+	}
+}

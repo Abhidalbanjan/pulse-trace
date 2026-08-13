@@ -36,6 +36,19 @@ test.describe('Service Catalog', () => {
     await expect(row.getByText('Production')).toBeVisible({ timeout: 10000 });
   });
 
+  test('expanding a service shows its dependencies (E4)', async ({ page }) => {
+    await page.goto('/catalog');
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
+    // The service name is a toggle that reveals upstream/downstream deps.
+    const row = page.locator('table tbody tr', { hasText: 'payment-service' }).first();
+    await row.getByRole('button', { name: /payment-service/ }).click();
+    await expect(
+      page.getByText('Depends on (upstream)').or(page.getByText('Loading dependencies…')),
+    ).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('Depends on (upstream)')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('Depended on by (downstream)')).toBeVisible();
+  });
+
   test('search filters the catalog', async ({ page }) => {
     await page.goto('/catalog');
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });

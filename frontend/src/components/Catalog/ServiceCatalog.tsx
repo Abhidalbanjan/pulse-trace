@@ -33,6 +33,24 @@ export function ServiceCatalog() {
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({ service_name: '', team: '', repo: '', slack: '' });
 
+  // Dependencies drill-in (Catalog · E4): which service's deps are expanded.
+  const [depsOpen, setDepsOpen] = useState<string | null>(null);
+  const [deps, setDeps] = useState<{ upstream: string[]; downstream: string[] }>({ upstream: [], downstream: [] });
+  const [depsLoading, setDepsLoading] = useState(false);
+
+  const toggleDeps = (id: string) => {
+    if (depsOpen === id) { setDepsOpen(null); return; }
+    setDepsOpen(id);
+    setDeps({ upstream: [], downstream: [] });
+    setDepsLoading(true);
+    Promise.all([
+      fetchWithAuth(`/api/v1/topology/dependencies/upstream/${encodeURIComponent(id)}`).then(r => (r.ok ? r.json() : [])).catch(() => []),
+      fetchWithAuth(`/api/v1/topology/dependencies/downstream/${encodeURIComponent(id)}`).then(r => (r.ok ? r.json() : [])).catch(() => []),
+    ])
+      .then(([up, down]) => setDeps({ upstream: Array.isArray(up) ? up : [], downstream: Array.isArray(down) ? down : [] }))
+      .finally(() => setDepsLoading(false));
+  };
+
   // Rich-metadata editor (Catalog · E3): the service being edited + its draft.
   const [metaNode, setMetaNode] = useState<CatalogNode | null>(null);
   const [metaForm, setMetaForm] = useState<{ tier: Tier; lifecycle: Lifecycle; links: Record<LinkKey, string> }>({
@@ -366,15 +384,18 @@ export function ServiceCatalog() {
                 const color = stateColor(node.state);
                 const slo = slos.get(node.id);
                 return (
+                  <React.Fragment key={node.id}>
                   <tr
-                    key={node.id}
-                    style={{ borderBottom: '1px solid ' + t.panelBorder, transition: 'background 0.2s' }}
+                    style={{ borderBottom: depsOpen === node.id ? 'none' : '1px solid ' + t.panelBorder, transition: 'background 0.2s' }}
                     onMouseEnter={(e) => e.currentTarget.style.background = t.dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)'}
                     onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
                   >
-                    <td style={{ padding: '16px 24px', fontWeight: 500, display: 'flex', alignItems: 'center', color: t.text1 }}>
-                      <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: color, marginRight: '10px' }}></div>
-                      {node.id}
+                    <td style={{ padding: '16px 24px', fontWeight: 500, color: t.text1 }}>
+                      <button onClick={() => toggleDeps(node.id)} title="Show dependencies" style={{ display: 'inline-flex', alignItems: 'center', background: 'transparent', border: 'none', cursor: 'pointer', color: t.text1, fontWeight: 500, fontSize: '13.5px', padding: 0 }}>
+                        <span style={{ color: t.text2, fontSize: '10px', marginRight: '8px' }}>{depsOpen === node.id ? '▾' : '▸'}</span>
+                        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: color, marginRight: '10px' }}></div>
+                        {node.id}
+                      </button>
                     </td>
                     <td style={{ padding: '16px 24px' }}>
                       <span style={{
@@ -431,12 +452,46 @@ export function ServiceCatalog() {
                        </span>
                     </td>
                   </tr>
+                  {depsOpen === node.id && (
+                    <tr style={{ borderBottom: '1px solid ' + t.panelBorder }}>
+                      <td colSpan={7} style={{ padding: '4px 24px 18px 56px' }}>
+                        {depsLoading ? (
+                          <div style={{ color: t.text2, fontSize: '12.5px', padding: '8px 0' }}>Loading dependencies…</div>
+                        ) : (
+                          <div style={{ display: 'flex', gap: '32px', flexWrap: 'wrap' }}>
+                            <DepColumn title="Depends on (upstream)" services={deps.upstream} empty="No upstream dependencies observed." t={t} />
+                            <DepColumn title="Depended on by (downstream)" services={deps.downstream} empty="No downstream dependents observed." t={t} />
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                  </React.Fragment>
                 );
               })
             )}
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// DepColumn renders one side of a service's dependency graph (Catalog · E4) as
+// a labeled list of chips, reusing the topology dependency endpoints.
+function DepColumn({ title, services, empty, t }: { title: string; services: string[]; empty: string; t: ReturnType<typeof useTheme>['tokens'] }) {
+  return (
+    <div style={{ minWidth: '240px' }}>
+      <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.04em', color: t.text2, textTransform: 'uppercase', marginBottom: '8px' }}>{title}</div>
+      {services.length === 0 ? (
+        <div style={{ fontSize: '12.5px', color: t.text2 }}>{empty}</div>
+      ) : (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+          {services.map((s) => (
+            <span key={s} style={{ fontSize: '12px', fontFamily: 'monospace', padding: '3px 10px', borderRadius: '100px', background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', color: t.text1 }}>{s}</span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

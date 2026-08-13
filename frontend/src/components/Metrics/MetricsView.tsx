@@ -2,7 +2,8 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { fetchWithAuth } from '@/lib/api';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
+import { snapDeploymentsToBuckets, toEpochMs } from '@/lib/deployMarkers';
 import { useTheme } from '@/context/ThemeContext';
 
 const INTERVAL_OPTIONS = [
@@ -72,6 +73,30 @@ export function MetricsView() {
   const [chartError, setChartError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [labels, setLabels] = useState<MetricLabel[]>([]);
+  const [deployments, setDeployments] = useState<{ deployed_at: string; version: string }[]>([]);
+
+  // Deploy markers (Deploy Gates · E1): fetch the selected service's deploys
+  // inside the chart window so the "what changed" lines can overlay the metric.
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const svc = selected?.service;
+      if (!svc) { if (!cancelled) setDeployments([]); return; }
+      const spanMs = interval === '7d' ? 7 * 86400e3 : interval === '24h' ? 86400e3 : 3600e3;
+      const to = new Date();
+      const from = new Date(to.getTime() - spanMs);
+      const p = new URLSearchParams({ service: svc, from: from.toISOString(), to: to.toISOString() });
+      try {
+        const res = await fetchWithAuth(`/api/v1/deployments?${p.toString()}`);
+        const j = res.ok ? await res.json() : null;
+        if (!cancelled) setDeployments(j?.data ?? []);
+      } catch {
+        if (!cancelled) setDeployments([]);
+      }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [selected, interval]);
 
   // Metric explorer (E1): when a metric is selected, discover its label
   // dimensions so the user can see what the series can be sliced by.
@@ -146,6 +171,12 @@ export function MetricsView() {
 
   const serviceKeys = Object.keys(series);
   const filteredNames = names.filter(n => n.name.toLowerCase().includes(search.toLowerCase()));
+
+  // Snap the fetched deployments onto the chart's own bucket labels (E1).
+  const deployMarkers = React.useMemo(() => {
+    const buckets = chartData.map((r) => ({ label: String(r.time_bucket), ms: toEpochMs(String(r.time_bucket)) }));
+    return snapDeploymentsToBuckets(deployments, buckets);
+  }, [chartData, deployments]);
 
   // Unit shown on the Y-axis / tooltip. OTLP uses "1" for dimensionless; rate
   // turns any unit into a per-second rate.
@@ -286,6 +317,16 @@ export function MetricsView() {
                       formatter={(value, name) => [`${formatMetricValue(Number(value))}${unitLabel ? ' ' + unitLabel : ''}`, name]}
                     />
                     <Legend wrapperStyle={{ fontSize: '12px' }} />
+                    {deployMarkers.map((m, i) => (
+                      <ReferenceLine
+                        key={`deploy-${i}-${m.label}`}
+                        x={m.label}
+                        stroke={t.accent}
+                        strokeDasharray="4 3"
+                        strokeOpacity={0.7}
+                        label={{ value: `⧗ ${m.version}`, position: 'top', fill: t.accent, fontSize: 10 }}
+                      />
+                    ))}
                     {serviceKeys.map((svc, i) => (
                       <Line key={svc} type="monotone" dataKey={svc} name={svc} stroke={SERIES_COLORS[i % SERIES_COLORS.length]} strokeWidth={2} dot={false} />
                     ))}

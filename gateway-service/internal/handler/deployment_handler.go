@@ -3,9 +3,25 @@ package handler
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"time"
 )
+
+// parseDeployTime parses an optional RFC3339 timestamp query param. Returns
+// (zero, false) for an empty or malformed value so the caller can treat it as
+// "no bound" rather than failing the whole request. Pure and unit-tested.
+func parseDeployTime(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
 
 // DeploymentHandler records and lists deployment markers (Deployment Tracking):
 // which version of a service went out, when, and by whom.
@@ -85,13 +101,37 @@ func (h *DeploymentHandler) ListDeployments(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	rows, err := h.db.Query(`
+	// Optional [from,to] window so a chart can fetch exactly the deploy markers
+	// inside its visible time range. Both are parameterized; malformed values are
+	// ignored (treated as "no bound") rather than failing the request.
+	args := []interface{}{tenantFromRequest(r), service}
+	where := "tenant_id = $1 AND service = $2"
+	windowed := false
+	if from, ok := parseDeployTime(r.URL.Query().Get("from")); ok {
+		args = append(args, from)
+		where += fmt.Sprintf(" AND deployed_at >= $%d", len(args))
+		windowed = true
+	}
+	if to, ok := parseDeployTime(r.URL.Query().Get("to")); ok {
+		args = append(args, to)
+		where += fmt.Sprintf(" AND deployed_at <= $%d", len(args))
+		windowed = true
+	}
+	// A default (unwindowed) call keeps the small "recent deploys" cap; a windowed
+	// call wants every marker in range (still bounded to a safe ceiling).
+	limit := 20
+	if windowed {
+		limit = 500
+	}
+
+	query := fmt.Sprintf(`
 		SELECT id, service, version, COALESCE(git_sha, ''), environment, COALESCE(deployed_by, ''), COALESCE(notes, ''), deployed_at::text
 		FROM deployments
-		WHERE tenant_id = $1 AND service = $2
+		WHERE %s
 		ORDER BY deployed_at DESC
-		LIMIT 20
-	`, tenantFromRequest(r), service)
+		LIMIT %d
+	`, where, limit)
+	rows, err := h.db.Query(query, args...)
 	if err != nil {
 		log.Printf("[DeploymentHandler] failed to list deployments: %v", err)
 		http.Error(w, "failed to list deployments", http.StatusInternalServerError)

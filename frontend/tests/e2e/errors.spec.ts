@@ -19,6 +19,28 @@ test.describe('Error Tracking', () => {
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
   });
 
+  test('assign an owner to an error group persists', async ({ page }) => {
+    await page.goto('/errors');
+    await page.getByRole('button', { name: 'All' }).click();
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
+
+    const firstRow = page.locator('table tbody tr').first();
+    // Open the inline assignee editor, type an owner, commit with Enter.
+    await firstRow.getByRole('button', { name: '+ Assign' }).click();
+    const input = firstRow.getByLabel('Assignee');
+    await input.fill('oncall-ana');
+    await input.press('Enter');
+    // The PATCH round-trips and the refetched list shows the owner on that group.
+    await expect(page.getByRole('button', { name: 'oncall-ana' }).first()).toBeVisible({ timeout: 10000 });
+  });
+
+  test('snooze control is available on open groups', async ({ page }) => {
+    await page.goto('/errors');
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
+    // The Snooze duration picker renders on non-snoozed groups.
+    await expect(page.getByLabel('Snooze this error group').first()).toBeVisible();
+  });
+
   test('expanding a group shows its occurrence timeline', async ({ page }) => {
     await page.goto('/errors');
     await page.getByRole('button', { name: 'All' }).click();

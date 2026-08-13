@@ -377,6 +377,7 @@ func main() {
 	mux.HandleFunc("POST /api/v1/errors/groups/{fingerprint}/resolve", errorTrackingHandler.ResolveErrorGroup)
 	mux.HandleFunc("POST /api/v1/errors/groups/{fingerprint}/mute", errorTrackingHandler.MuteErrorGroup)
 	mux.HandleFunc("POST /api/v1/errors/groups/{fingerprint}/reopen", errorTrackingHandler.ReopenErrorGroup)
+	mux.HandleFunc("PATCH /api/v1/errors/groups/{fingerprint}", errorTrackingHandler.UpdateErrorGroup)
 
 	// Deployment Tracking APIs (Postgres)
 	mux.HandleFunc("POST /api/v1/deployments", deploymentHandler.RecordDeployment)

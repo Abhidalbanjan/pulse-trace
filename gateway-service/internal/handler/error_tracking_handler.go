@@ -65,6 +65,25 @@ type errorGroupRow struct {
 	Status        string `json:"status"`
 	ResolvedBy    string `json:"resolved_by,omitempty"`
 	ResolvedAt    string `json:"resolved_at,omitempty"`
+	Assignee      string `json:"assignee,omitempty"`
+	SnoozedUntil  string `json:"snoozed_until,omitempty"`
+}
+
+// triageStatuses is the closed set a client may set a group to. Anything else is
+// rejected so the status column stays a small, meaningful enum.
+var triageStatuses = map[string]bool{"open": true, "resolved": true, "muted": true, "snoozed": true}
+
+// effectiveStatus resolves a group's stored status into what it actually is right
+// now. A 'snoozed' group whose snooze window has elapsed (or was never given an
+// expiry) silently reads as 'open' again, so an operator's "remind me later"
+// auto-returns to the queue without a background job flipping the row. Pure so
+// the snooze-expiry rule is unit-tested without a clock or DB. All other statuses
+// pass through unchanged.
+func effectiveStatus(status string, snoozedUntil, now time.Time) string {
+	if status == "snoozed" && (snoozedUntil.IsZero() || !snoozedUntil.After(now)) {
+		return "open"
+	}
+	return status
 }
 
 // normalizedMessageExpr strips high-cardinality dynamic values (UUIDs, quoted literals,
@@ -172,23 +191,54 @@ func (h *ErrorTrackingHandler) ListErrorGroups(w http.ResponseWriter, r *http.Re
 		if err != nil {
 			log.Printf("[ErrorTrackingHandler] failed to load triage status: %v", err)
 		} else {
+			now := time.Now().UTC()
 			for i := range groups {
 				if s, ok := statusByFP[groups[i].Fingerprint]; ok {
-					groups[i].Status = s.status
+					// Present the effective status (an expired snooze reads as open)
+					// so the list and its filters agree with what the operator sees.
+					groups[i].Status = effectiveStatus(s.status, s.snoozedUntil, now)
 					groups[i].ResolvedBy = s.resolvedBy
 					groups[i].ResolvedAt = s.resolvedAt
+					groups[i].Assignee = s.assignee
+					if !s.snoozedUntil.IsZero() {
+						groups[i].SnoozedUntil = s.snoozedUntil.UTC().Format(time.RFC3339)
+					}
 				}
 			}
 		}
 	}
 
+	// Optional triage filters, applied over the effective status so they agree
+	// with what the operator sees (an expired snooze filters as 'open'). Empty
+	// filters are no-ops, keeping the default listing unchanged.
+	if fStatus := r.URL.Query().Get("status"); fStatus != "" {
+		groups = filterGroups(groups, func(g errorGroupRow) bool { return g.Status == fStatus })
+	}
+	if fAssignee := r.URL.Query().Get("assignee"); fAssignee != "" {
+		groups = filterGroups(groups, func(g errorGroupRow) bool { return g.Assignee == fAssignee })
+	}
+
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": groups})
 }
 
+// filterGroups returns the groups satisfying keep, preserving order. Returns a
+// non-nil empty slice so the JSON response stays `[]`, never `null`.
+func filterGroups(groups []errorGroupRow, keep func(errorGroupRow) bool) []errorGroupRow {
+	out := make([]errorGroupRow, 0, len(groups))
+	for _, g := range groups {
+		if keep(g) {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
 type triageState struct {
-	status     string
-	resolvedBy string
-	resolvedAt string
+	status       string
+	resolvedBy   string
+	resolvedAt   string
+	assignee     string
+	snoozedUntil time.Time
 }
 
 func (h *ErrorTrackingHandler) loadTriageStatus(fingerprints []string) (map[string]triageState, error) {
@@ -200,7 +250,7 @@ func (h *ErrorTrackingHandler) loadTriageStatus(fingerprints []string) (map[stri
 	}
 
 	rows, err := h.db.Query(
-		"SELECT fingerprint, status, COALESCE(resolved_by, ''), COALESCE(resolved_at::text, '') FROM error_groups WHERE fingerprint IN ("+strings.Join(placeholders, ",")+")",
+		"SELECT fingerprint, status, COALESCE(resolved_by, ''), COALESCE(resolved_at::text, ''), COALESCE(assignee, ''), snoozed_until FROM error_groups WHERE fingerprint IN ("+strings.Join(placeholders, ",")+")",
 		args...,
 	)
 	if err != nil {
@@ -210,11 +260,12 @@ func (h *ErrorTrackingHandler) loadTriageStatus(fingerprints []string) (map[stri
 
 	out := make(map[string]triageState)
 	for rows.Next() {
-		var fp, status, resolvedBy, resolvedAt string
-		if err := rows.Scan(&fp, &status, &resolvedBy, &resolvedAt); err != nil {
+		var fp, status, resolvedBy, resolvedAt, assignee string
+		var snoozedUntil sql.NullTime
+		if err := rows.Scan(&fp, &status, &resolvedBy, &resolvedAt, &assignee, &snoozedUntil); err != nil {
 			continue
 		}
-		out[fp] = triageState{status: status, resolvedBy: resolvedBy, resolvedAt: resolvedAt}
+		out[fp] = triageState{status: status, resolvedBy: resolvedBy, resolvedAt: resolvedAt, assignee: assignee, snoozedUntil: snoozedUntil.Time}
 	}
 	return out, nil
 }
@@ -291,6 +342,148 @@ func (h *ErrorTrackingHandler) MuteErrorGroup(w http.ResponseWriter, r *http.Req
 
 func (h *ErrorTrackingHandler) ReopenErrorGroup(w http.ResponseWriter, r *http.Request) {
 	h.setStatus(w, r, "open")
+}
+
+type triagePatchRequest struct {
+	Service   string `json:"service"`
+	Operation string `json:"operation"`
+	Message   string `json:"message"`
+	// Only the fields present are applied. Status must be one of triageStatuses.
+	// SnoozedUntil (RFC3339) is required when Status == "snoozed"; ignored
+	// otherwise (and cleared when moving to any non-snoozed status).
+	Status       *string `json:"status,omitempty"`
+	Assignee     *string `json:"assignee,omitempty"`
+	SnoozedUntil *string `json:"snoozed_until,omitempty"`
+	ResolvedBy   string  `json:"resolved_by,omitempty"`
+}
+
+// UpdateErrorGroup is the unified triage mutation: set status, assign an owner,
+// and/or snooze — in one PATCH, only touching the fields the client sends. It
+// completes the workflow the resolve/mute/reopen POSTs started (those remain for
+// backward compatibility). Upserts the row so a first-ever action on a group works.
+//
+//	PATCH /api/v1/errors/groups/{fingerprint}
+func (h *ErrorTrackingHandler) UpdateErrorGroup(w http.ResponseWriter, r *http.Request) {
+	if h.db == nil {
+		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	fp := r.PathValue("fingerprint")
+	if fp == "" {
+		http.Error(w, "missing fingerprint", http.StatusBadRequest)
+		return
+	}
+
+	var req triagePatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Status == nil && req.Assignee == nil && req.SnoozedUntil == nil {
+		http.Error(w, "no fields to update", http.StatusBadRequest)
+		return
+	}
+
+	// Build a targeted UPSERT. The VALUES row seeds a fresh group with sensible
+	// defaults; the ON CONFLICT SET lists ONLY the columns this request touches —
+	// and references the very same bind params ($6..$10) as VALUES, so nothing is
+	// string-interpolated and an assignee change never clobbers status (or vice
+	// versa). Columns absent from SET keep their existing value on an update.
+	now := time.Now().UTC()
+	sets := []string{"updated_at = now()"}
+
+	insStatus := "open"                                              // $6
+	var insResolvedBy, insResolvedAt, insAssignee, insSnooze interface{} // $7 $8 $9 $10
+
+	if req.Status != nil {
+		status := *req.Status
+		if !triageStatuses[status] {
+			http.Error(w, "invalid status", http.StatusBadRequest)
+			return
+		}
+		insStatus = status
+		sets = append(sets, "status = $6")
+
+		switch status {
+		case "resolved":
+			insResolvedAt = now
+			sets = append(sets, "resolved_at = $8", "snoozed_until = $10") // clear snooze ($10 nil)
+			if req.ResolvedBy != "" {
+				insResolvedBy = req.ResolvedBy
+				sets = append(sets, "resolved_by = $7")
+			}
+		case "snoozed":
+			until, ok := parseSnoozeUntil(req.SnoozedUntil, now)
+			if !ok {
+				http.Error(w, "snoozed status requires a future snoozed_until (RFC3339)", http.StatusBadRequest)
+				return
+			}
+			insSnooze = until
+			sets = append(sets, "snoozed_until = $10")
+		default: // open | muted → clear any snooze ($10 nil)
+			sets = append(sets, "snoozed_until = $10")
+		}
+	}
+
+	if req.Assignee != nil {
+		if *req.Assignee != "" {
+			insAssignee = *req.Assignee
+		}
+		sets = append(sets, "assignee = $9") // $9 nil when cleared
+	}
+
+	// Standalone snooze extension without a status change (e.g. "give me one more day").
+	if req.SnoozedUntil != nil && req.Status == nil {
+		until, ok := parseSnoozeUntil(req.SnoozedUntil, now)
+		if !ok {
+			http.Error(w, "snoozed_until must be a future RFC3339 timestamp", http.StatusBadRequest)
+			return
+		}
+		insStatus = "snoozed"
+		insSnooze = until
+		sets = append(sets, "status = $6", "snoozed_until = $10")
+	}
+
+	query := `
+		INSERT INTO error_groups (fingerprint, tenant_id, service, operation, message, status, resolved_by, resolved_at, assignee, snoozed_until, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+		ON CONFLICT (fingerprint) DO UPDATE SET ` + strings.Join(sets, ", ")
+	_, err := h.db.Exec(query,
+		fp, tenantFromRequest(r), req.Service, req.Operation, req.Message,
+		insStatus, insResolvedBy, insResolvedAt, insAssignee, insSnooze)
+	if err != nil {
+		log.Printf("[ErrorTrackingHandler] failed to patch error group: %v", err)
+		http.Error(w, "failed to update error group", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"fingerprint": fp,
+		"status":      effectiveStatus(insStatus, timeOrZero(insSnooze), now),
+	})
+}
+
+// parseSnoozeUntil parses an RFC3339 snooze expiry and requires it to be in the
+// future — a snooze that's already expired is meaningless (it would read as open
+// immediately) and almost certainly a client bug, so we reject it rather than
+// silently no-op.
+func parseSnoozeUntil(raw *string, now time.Time) (time.Time, bool) {
+	if raw == nil || *raw == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, *raw)
+	if err != nil || !t.After(now) {
+		return time.Time{}, false
+	}
+	return t.UTC(), true
+}
+
+func timeOrZero(v interface{}) time.Time {
+	if t, ok := v.(time.Time); ok {
+		return t
+	}
+	return time.Time{}
 }
 
 // GetErrorGroupTimeline returns the time-bucketed occurrence count for one error

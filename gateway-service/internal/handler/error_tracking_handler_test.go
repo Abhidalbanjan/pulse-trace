@@ -88,6 +88,55 @@ func TestFingerprintIsTenantScoped(t *testing.T) {
 	}
 }
 
+func TestEffectiveStatus(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		status  string
+		snooze  time.Time
+		want    string
+	}{
+		{"open passes through", "open", time.Time{}, "open"},
+		{"resolved passes through", "resolved", time.Time{}, "resolved"},
+		{"muted passes through", "muted", time.Time{}, "muted"},
+		{"live snooze stays snoozed", "snoozed", now.Add(2 * time.Hour), "snoozed"},
+		{"expired snooze reads open", "snoozed", now.Add(-2 * time.Hour), "open"},
+		{"snooze exactly now reads open", "snoozed", now, "open"},
+		{"snoozed with no expiry reads open", "snoozed", time.Time{}, "open"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := effectiveStatus(c.status, c.snooze, now); got != c.want {
+				t.Errorf("effectiveStatus(%q, %v) = %q, want %q", c.status, c.snooze, got, c.want)
+			}
+		})
+	}
+}
+
+func TestParseSnoozeUntil(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	future := now.Add(24 * time.Hour).Format(time.RFC3339)
+	past := now.Add(-24 * time.Hour).Format(time.RFC3339)
+
+	if _, ok := parseSnoozeUntil(&future, now); !ok {
+		t.Error("a future RFC3339 timestamp should parse")
+	}
+	if _, ok := parseSnoozeUntil(&past, now); ok {
+		t.Error("a past timestamp must be rejected (would read as open immediately)")
+	}
+	if _, ok := parseSnoozeUntil(nil, now); ok {
+		t.Error("nil must be rejected")
+	}
+	empty := ""
+	if _, ok := parseSnoozeUntil(&empty, now); ok {
+		t.Error("empty must be rejected")
+	}
+	garbage := "next tuesday"
+	if _, ok := parseSnoozeUntil(&garbage, now); ok {
+		t.Error("unparseable must be rejected")
+	}
+}
+
 func TestParseCHTime(t *testing.T) {
 	if got := parseCHTime("2026-08-06 12:00:00.000"); got.IsZero() {
 		t.Error("millisecond form should parse")

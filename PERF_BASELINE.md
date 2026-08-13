@@ -6,8 +6,8 @@ the results block below is machine-written by `run-baseline.sh`, not by hand._
 
 ## Why this exists
 
-Most pillar readiness scores in [FEATURE_READINESS.md](FEATURE_READINESS.md) are
-capped by "scale unproven." The ingestion path — **gateway → log-service queue →
+Most pillar readiness scores were historically capped by "scale unproven." The
+ingestion path — **gateway → log-service queue →
 Kafka → Quickwit/ClickHouse** — is the first thing to fall over under real customer
 traffic, and it is exercised by *five* different decoders (native, OTLP, and the
 Datadog/Splunk "Trojan Horse" migration paths). A regression in any one of them is

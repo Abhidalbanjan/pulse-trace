@@ -25,7 +25,7 @@ receivers:
   # metrics UI). otel-collector:8888 is the collector's own self-telemetry
   # and is always real; the per-service /metrics targets will start
   # returning data once each service registers a promhttp handler (tracked
-  # separately - not yet done, see PulseTrace_Implementation_Roadmap.md).
+  # separately - not yet done).
   prometheus:
     config:
       scrape_configs:

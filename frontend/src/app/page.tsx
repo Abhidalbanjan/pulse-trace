@@ -6,10 +6,19 @@ import { errMessage } from '@/lib/errMessage';
 import { useTheme } from '@/context/ThemeContext';
 import { ConfirmDialog, useToast } from '@/components/ui';
 
+// One backend query the assistant ran (AI-SRE · E2 tool-call transparency).
+interface ToolCall {
+  name: string;
+  args?: Record<string, string>;
+  result_summary: string;
+  deep_link?: string;
+}
+
 interface ChatMessage {
   id: string;
   sender: 'user' | 'ai';
   text: string;
+  toolCalls?: ToolCall[];
   actionCard?: {
     title: string;
     description: string;
@@ -124,6 +133,7 @@ export default function ConversationalSRE() {
         id: (Date.now() + 1).toString(),
         sender: 'ai',
         text: data.text || 'I encountered an issue generating a response.',
+        toolCalls: Array.isArray(data.tool_calls) ? data.tool_calls : undefined,
       };
 
       if (data.actionCard) {
@@ -256,6 +266,29 @@ export default function ConversationalSRE() {
                     }}>
                       {msg.text}
                     </div>
+
+                    {/* Tool-call transparency (AI-SRE · E2): how the answer was sourced */}
+                    {!isUser && msg.toolCalls && msg.toolCalls.length > 0 && (
+                      <details style={{ marginTop: '10px', background: t.dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', border: `1px solid ${t.panelBorder}`, borderRadius: '10px', padding: '8px 12px' }}>
+                        <summary style={{ cursor: 'pointer', fontSize: '12px', color: t.text2, fontWeight: 600 }}>
+                          🔎 How I got this · {msg.toolCalls.length} {msg.toolCalls.length === 1 ? 'query' : 'queries'}
+                        </summary>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
+                          {msg.toolCalls.map((tc, i) => (
+                            <div key={i} style={{ fontSize: '12px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                <span style={{ fontFamily: 'monospace', color: t.accent, fontWeight: 600 }}>{tc.name}</span>
+                                {tc.args && Object.entries(tc.args).map(([k, v]) => (
+                                  <span key={k} style={{ fontSize: '10.5px', color: t.text2, background: t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', padding: '1px 7px', borderRadius: '100px' }}>{k}={v}</span>
+                                ))}
+                                {tc.deep_link && <a href={tc.deep_link} style={{ fontSize: '11px', color: t.accent, textDecoration: 'none' }}>view →</a>}
+                              </div>
+                              <div style={{ color: t.text2, marginTop: '3px', lineHeight: 1.4 }}>{tc.result_summary}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
 
                     {/* Action Card */}
                     {msg.actionCard && (

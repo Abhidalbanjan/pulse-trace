@@ -1,8 +1,16 @@
 # PulseTrace vs OpenObserve — Gap Analysis & Plan to Win Every Dimension
 
 _Author: competitive engineering plan · Created: 2026-08-13_
-_Subject: [openobserve/openobserve](https://github.com/openobserve/openobserve) (AGPL-3.0, Rust) as documented at openobserve.ai/docs as of Aug 2026._
+_Subject: [openobserve/openobserve](https://github.com/openobserve/openobserve) (AGPL-3.0, Rust) — **source-verified** at `main`, Aug 2026, supplemented by openobserve.ai/docs._
 _Implementation plan: [COMPETITIVE_OPENOBSERVE_IMPLEMENTATION.md](COMPETITIVE_OPENOBSERVE_IMPLEMENTATION.md) — the phase-by-phase "how"._
+
+> ⚠️ **Revised 2026-08-13 after a source-verification pass.** The first version of
+> this document was written from five web pages and **overstated PulseTrace's
+> position**: it claimed wins on SLOs, synthetics and anomaly detection that
+> OpenObserve's source disproves. Every verdict below has been re-checked against
+> the actual repository (1,419 Rust files / 576k LOC).
+> **[COMPETITIVE_OPENOBSERVE_VERIFICATION.md](COMPETITIVE_OPENOBSERVE_VERIFICATION.md)
+> carries the evidence with file citations and is the authority where the two disagree.**
 
 This document does three things:
 
@@ -14,7 +22,7 @@ This document does three things:
    then adds a *strictly-better delta* on every dimension, including the ones we
    already win.
 
-It follows the house conventions of [enhancements/README.md](enhancements/README.md):
+It follows the house conventions of enhancements/README.md:
 epics numbered `E1…En`, effort in S/M/L, explicit backend + frontend touchpoints,
 a DoD per epic, and the parity gate stays at 100%.
 
@@ -25,7 +33,7 @@ a DoD per epic, and the parity gate stays at 100%.
 | Side | How it was assessed |
 | --- | --- |
 | PulseTrace | Direct code read: 220 Go files across 8 modules, 66 `.tsx` screens/components, all HTTP routes extracted from the 6 services, `docker-compose.yml` (23 runtime containers), Quickwit index + Kafka source config, ClickHouse table DDL, [ROAD_TO_100.md](../ROAD_TO_100.md), [PARITY_REPORT.md](../PARITY_REPORT.md), [PERF_BASELINE.md](../PERF_BASELINE.md). |
-| OpenObserve | Public repo README + openobserve.ai docs: architecture (router/ingester/querier/compactor/scheduler), streams, pipelines, dashboards, enterprise edition. Performance figures below are **their published claims**, not independently measured — closing that is Wave O0. |
+| OpenObserve | **Source read** of a shallow clone (1,419 Rust files / 576k LOC): structural map of 38 crates, then targeted reads of the module owning each dimension, with file citations recorded in [COMPETITIVE_OPENOBSERVE_VERIFICATION.md](COMPETITIVE_OPENOBSERVE_VERIFICATION.md). Supplemented by the repo README and openobserve.ai docs. **Two limits:** their `src/enterprise/` is four 16-line stubs — the commercial build is closed-source, so SDR, SSO breadth and parts of federation are *not verifiable*; and all performance/cost figures remain **their published claims**, which only Wave O0 can settle. |
 
 ### 0.1 What PulseTrace actually is (correcting the README)
 
@@ -33,10 +41,10 @@ The README's diagram says logs land in ClickHouse. **They do not.** The real
 topology, from the code:
 
 - **Logs** → Kafka `logs` topic → **Quickwit** (`pulsetrace-logs`, `mode: dynamic`,
-  VRL transform in [`quickwit/kafka-source.yaml`](../../quickwit/kafka-source.yaml)).
+  VRL transform in [`quickwit/kafka-source.yaml`](../quickwit/kafka-source.yaml)).
   `log-service/internal/consumer/` is **empty** — there is no ClickHouse log
   consumer. All four log-ingest paths (native, OTLP via
-  [`logbridge`](../../gateway-service/internal/logbridge/logbridge.go), Datadog,
+  [`logbridge`](../gateway-service/internal/logbridge/logbridge.go), Datadog,
   Splunk HEC) converge on that one topic.
 - **Traces / metrics** → OTel Collector → ClickHouse `otel_traces` / `otel_metrics`,
   queried by param-driven handlers that build SQL server-side.
@@ -71,36 +79,50 @@ Verdict is **today**, before any work in this plan.
 | --- | --- | --- | --- | :---: |
 | D1 | Time-to-first-data / deployability | 23 containers, 11 volumes, Kafka+ZK+Neo4j+RabbitMQ+Redis+CH+PG+Quickwit+MinIO+Azurite+Jaeger+Prom+Grafana+Pyroscope | one binary / one container, SQLite + disk, no deps | **OO** |
 | D2 | Storage economics | Quickwit splits (good) + ClickHouse SSD hot for traces/metrics/RUM; S3/Azure/GCS only as *cold* tier | Parquet-on-object-store as the **primary** tier, compaction, 99% search-space pruning | **OO** |
-| D3 | Ad-hoc query power | No user query language. Logs = Quickwit query string; metrics = fixed params → server-built SQL; no joins, no aggregations, no user SQL | SQL over any stream + PromQL for metrics + VRL functions + visual builder | **OO** |
-| D4 | Custom dashboards | **None.** No `/dashboards` route exists | Folders, tabs, 19+ panel types, variables + dependencies, filters, time-comparison, drilldown, import/export, histogram cache | **OO** |
-| D5 | Streams / schema flexibility | Fixed tables; Quickwit index is `mode: dynamic` but nothing surfaces the inferred schema; TTLs hardcoded in DDL; no per-tenant retention | Stream registry, schema inference + evolution, per-stream FTS keys / partition keys / UDS / retention, stream stats | **OO** |
-| D6 | Ingest pipelines / transforms | Vector in compose + one VRL script in the Quickwit source — no user-facing product | Real-time + scheduled pipelines, no-code graph editor, VRL functions, enrichment tables, remote destinations, import/export | **OO** |
-| D7 | Ingestion source breadth | OTLP (gRPC+HTTP), native JSON, Datadog logs + v0.3/0.4/0.5 traces, Splunk HEC | + Elasticsearch `_bulk`, Prometheus remote-write, Fluent Bit/Fluentd/Filebeat/Vector/Telegraf, Kinesis Firehose, syslog, K8s/Docker | **OO** |
+| D3 | Ad-hoc query power | No user query language. Logs = Quickwit query string; metrics = fixed params → server-built SQL; no joins, no aggregations, no user SQL | **DataFusion** SQL engine + a **full PromQL engine** (aggregations/binaries/functions) + tantivy inverted index + bloom pruner + result cache | **OO** |
+| D4 | Custom dashboards | **None.** No `/dashboards` route exists | Folders, tabs, **21 panel types (verified)**, variables + dependencies, filters, time-comparison, drilldown, import/export, timed annotations | **OO** |
+| D5 | Streams / schema flexibility | Fixed tables; Quickwit index is `mode: dynamic` but nothing surfaces the inferred schema; TTLs hardcoded in DDL; no per-tenant retention | Stream registry + schema inference; `StreamSettings` carries **15 fields** — FTS keys, partition keys, bloom-filter fields, UDS, retention, extended retention, `index_all_values`, `store_original_data`, `max_query_range` | **OO** |
+| D6 | Ingest pipelines / transforms | Vector in compose + one VRL script in the Quickwit source — no user-facing product | Real-time + scheduled pipelines, no-code graph editor, **the real `vrl` 0.31 crate**, enrichment tables, remote destinations, import/export | **OO** |
+| D7 | Ingestion source breadth | OTLP (gRPC+HTTP), native JSON, **Datadog** logs + v0.3/0.4/0.5 traces, Splunk HEC | Elasticsearch `_bulk`, **Splunk HEC (`_hec`)**, Prometheus remote-write, Kinesis Firehose, GCP pub/sub, Loki push, OTLP, session-replay. **No Datadog; neither side has a syslog listener** | **OO** |
 | D8 | Scheduled reports | None | Scheduled dashboard reports (email/PDF) | **OO** |
 | D9 | Session replay | Lightweight event timeline (RUM E1) | Full session replay | **OO** |
-| D10 | LLM/AI observability *of the customer's apps* | None (we use AI, we don't monitor theirs) | LLM monitoring: prompts, tokens, latency, cost | **OO** |
-| D11 | Data controls at ingest | 4-regex global PII middleware ([`pii/sanitizer.go`](../../gateway-service/internal/pii/sanitizer.go)) | Sensitive Data Redaction (configurable), cipher keys, AES-256-SIV | **OO** |
-| D12 | Multi-region / federation | Single region (admitted in [DISASTER_RECOVERY.md](../DISASTER_RECOVERY.md)) | Super Cluster: federated search across clusters/regions | **OO** |
-| D13 | Auth breadth | OIDC, SAML 2.0, SCIM 2.0, TOTP MFA, RBAC + ABAC, session revocation, password lifecycle | OIDC, OAuth, SAML, **LDAP/AD**, custom roles | **OO** (LDAP only) |
+| D10 | LLM/AI observability *of the customer's apps* | None (we use AI, we don't monitor theirs) | LLM monitoring + `llm_evaluations/` (eval jobs, evaluator trace exporter) + an MCP tool server | **OO** |
+| D11 | Data controls at ingest | 4-regex global PII middleware ([`pii/sanitizer.go`](../gateway-service/internal/pii/sanitizer.go)) | Cipher-key registry in OSS; **SDR itself is behind a 16-line enterprise stub — unverifiable** | **OO** (unverified) |
+| D12 | Multi-region / federation | Single region (admitted in DISASTER_RECOVERY.md) | Super Cluster: federated search across clusters/regions | **OO** |
+| D13 | Auth breadth | OIDC, SAML 2.0, SCIM 2.0, TOTP MFA, RBAC + ABAC, session revocation, password lifecycle | OSS has JWT only; OIDC/SAML/LDAP live in the 16-line `o2_dex` stub — **unverifiable** | **OO** (unverified) |
 | D14 | Compliance certifications | None claimed | SOC 2 Type II, ISO 27001, GDPR, HIPAA-ready | **OO** |
 | D15 | Proven scale | Published p50/p95/p99 for the ingest path at a *permitted* rate; ceiling undocumented | 2+ PB/day claimed at largest deployment | **OO** (claimed) |
-| D16 | Incident lifecycle & RCA | Correlation → incidents → causal RCA with a **CI-gated eval harness at 90.9%** → AI postmortems → **self-healing playbooks** (dry-run / approve / reject, risk-tier authz, hallucination guardrail) | Alerts + incident tracking + AI query assistant | **PT** |
-| D17 | SLO engineering | Multi-window multi-burn-rate, budget forecasting, PR-time SLO evaluation, deploy gates + DORA + change-failure linking | Basic alerting; no SLO/error-budget product | **PT** |
-| D18 | APM pillar depth | Continuous profiling (flat + diff flame graph), synthetics (multi-step + assertions + uptime SLA), error tracking (clustering, regression alerting, assignment), Neo4j topology (blast radius, anomaly overlay), Backstage-style catalog | Traces + service map + RUM; none of profiling / synthetics / catalog / deploy intelligence | **PT** |
-| D19 | Deletability & GDPR | Tenant purge across every store + deletion certificate + closed account | **Documented limitation: data is immutable, only whole retention periods can be dropped** | **PT** |
-| D20 | Audit integrity | Hash-chained tamper-evident audit + server-side verify + NDJSON export | "Immutable audit logging" | **PT** |
+| D16 | Incident lifecycle & RCA | Correlation → incidents → causal RCA with a **CI-gated eval harness at 90.9%** → AI postmortems → self-healing playbooks (dry-run / approve / reject, risk-tier authz, hallucination guardrail) | Incidents + incident-event tables, an **810-line workflow engine**, action scripts, an MCP tool server, a `sys_rca_agent` service account | **contested** — our delta is the approval gate + eval harness, not automation itself |
+| D17 | SLO engineering | Multi-window multi-burn-rate, budget forecasting, PR-time SLO evaluation | **Full SLO subsystem** — evaluate / reconcile / **backfill** / writer, `slo_budget_charges`, burndown + PromQL-preview + time-slice UI | **OO** — they have backfill and reconciliation we lack |
+| D17b | Deploy intelligence | Deploy gates, DORA, change-failure linking, PR-time SLO evaluation | No counterpart found in source | **PT** |
+| D18 | APM pillar depth | **Continuous profiling** (flat + diff flame graph), error tracking (clustering, regression alerting), Neo4j topology (blast radius), Backstage-style catalog | Traces + service map + RUM + **synthetics** + **anomaly detection (2,283 L)**; their flame graph renders trace spans — **no profiling pillar** | **PT on profiling, catalog, topology** |
+| D19 | Deletability & GDPR | Tenant purge across every store + deletion certificate + closed account | Confirmed in source: file-level GC only (`compaction/deleted.rs`, `pending_delete.rs`); **no user-facing record deletion, no erasure path** | **PT** |
+| D20 | Audit integrity | Hash-chained tamper-evident audit + server-side verify + NDJSON export | `src/audit/src/lib.rs` is **105 lines** — a publisher to a stream. No hash chain, no verify | **PT** |
 | D21 | Engineering discipline | Parity CI gate at 100% (164 routes, 0 orphans), causal eval gate, k6 perf gate, govulncheck at zero | Not published | **PT** |
 
-**Score: OpenObserve leads 15, PulseTrace leads 6.** The 15 are not all equal —
-D1–D6 are the ones a buyer hits in the first 20 minutes, and they are the ones
-that decide the evaluation.
+**Score after verification: OpenObserve leads ~14, PulseTrace leads 4 confirmed
+(D17b, D18-profiling/catalog/topology, D19, D20) plus D21, with D16 contested.**
+The pre-verification draft claimed 15–6; three of those six were wrong. Two
+dimensions (D11, D13) are *unverifiable* from the OSS repo because the enterprise
+crates are stubs.
+
+The 14 are not equal — D1–D6 are what a buyer hits in the first 20 minutes, and
+they decide the evaluation.
 
 ### 1.1 The strategic read
 
 PulseTrace is a **deep incident-intelligence platform on a heavyweight stack**.
-OpenObserve is a **light, cheap, flexible telemetry substrate**. We win once a
-buyer is already ingesting data and doing incident work; they win *before that*,
-in evaluation, on install time, storage bill, and "can I just ask it a question."
+OpenObserve is a **light, cheap, flexible telemetry substrate — that has also
+been quietly building the intelligence layer** (SLOs, synthetics, anomaly
+detection, workflows, an MCP tool server, LLM evaluations). That is the real
+finding of the verification pass, and it is worse news than the original draft:
+the window in which "they're just a log tool" is true has closed.
+
+We still win once a buyer is doing incident work *the way we do it* — approval-
+gated remediation, measured RCA, deploy intelligence. They win before that, in
+evaluation, on install time, storage bill, and "can I just ask it a question."
+The strategy is unchanged; the urgency is higher and the moat is narrower than
+§3 originally claimed.
 
 So the plan is not "add their features." It is: **make our substrate as cheap,
 fast and self-serve as theirs, then keep the incident-intelligence layer they
@@ -147,27 +169,41 @@ audit logs 400 days, app logs 14."
 
 **G6 · Pipelines are where competitors capture the ingest path.** Whoever owns
 the transform/route/enrich step owns the data. OpenObserve has real-time and
-scheduled pipelines with a visual editor, VRL, enrichment tables, and remote
-destinations. We have a VRL snippet buried in a Quickwit source file that no user
-will ever see.
+scheduled pipelines with a visual editor, enrichment tables, remote destinations,
+and — verified in `Cargo.toml:612` — **the real `vrl = 0.31` crate**, not a
+dialect of their own. We have a VRL snippet buried in a Quickwit source file that
+no user will ever see.
 
-**G7 · Ingestion breadth is the migration moat.** Our Datadog + Splunk "Trojan
-Horse" endpoints are exactly the right idea — but we stop three protocols short.
-`_bulk` (Elasticsearch) and Prometheus `remote_write` are the two that unlock the
-largest installed bases, and Fluent Bit / Filebeat / Telegraf are what actually
-runs on customer fleets.
+> ⚠️ This is worse for us than it looks. They embed Vector's actual VRL
+> implementation. A Go-native "VRL-compatible subset" (the original P6.3 plan)
+> will *always* lag it, and a subset that silently mis-evaluates a pasted snippet
+> is worse than no compatibility. Either run VRL in a sidecar or stop claiming
+> compatibility — see the correction in [the verification appendix](COMPETITIVE_OPENOBSERVE_VERIFICATION.md).
 
-**G8 · SDR vs four regexes.** [`pii/sanitizer.go`](../../gateway-service/internal/pii/sanitizer.go)
+**G7 · Ingestion breadth is the migration moat.** Verified: they ship `_bulk`,
+**`_hec` (Splunk HEC)**, `_kinesis_firehose`, GCP pub/sub, Loki push, OTLP and
+Prometheus `remote_write`. So Splunk is **not** the differentiator the first
+draft claimed — **Datadog is the only migration path unique to us**, and it is
+worth defending. The gaps to close are `_bulk` and `remote_write`, which unlock
+the two largest installed bases; Fluent Bit / Filebeat / Telegraf are what
+actually runs on customer fleets. Neither product has a syslog listener — that
+one is open for us to take.
+
+**G8 · SDR vs four regexes.** [`pii/sanitizer.go`](../gateway-service/internal/pii/sanitizer.go)
 runs 4 hardcoded patterns on every request body, globally, unconfigurable, and
 one of them (`{13,19}` digits) will corrupt legitimate numeric payloads. A
-regulated buyer needs per-field, per-stream, configurable, auditable redaction.
+regulated buyer needs per-field, per-stream, configurable, auditable redaction —
+so this remains a real gap for us **regardless** of what they ship. Their SDR
+itself sits behind a 16-line enterprise stub and could not be verified.
 
 **G9 · Federated search.** Their Super Cluster answers one query across regions.
 Our DR doc honestly says single-region. Any buyer with EU + US data residency
 requirements is currently unservable.
 
 **G10 · LDAP/AD.** We have OIDC + SAML + SCIM, which covers modern IdPs, but a
-large slice of on-prem enterprise is still LDAP-bound.
+large slice of on-prem enterprise is still LDAP-bound. (Their SSO federation
+lives in the 16-line `o2_dex` stub, so the OSS repo proves nothing here — this
+gap is real for us on its own merits, not because they beat us to it.)
 
 **G11 · Certifications.** SOC 2 Type II / ISO 27001 / HIPAA BAA gate procurement
 regardless of how good the code is. Not a code task — a program with a start date.
@@ -180,23 +216,37 @@ not a scale claim. We have no published throughput ceiling.
 
 ## 3. Where PulseTrace already wins — protect and widen
 
-Do not trade any of these away while chasing G1–G12.
+Do not trade any of these away while chasing G1–G12. **This list is half the
+length of the pre-verification draft** — everything below survived a source read.
 
-- **Autonomous remediation** with policy-aware dry-run/approve/reject and
-  risk-tier authz. OpenObserve has nothing comparable.
-- **Causal RCA with a published, CI-enforced accuracy gate** (90.9%, one
-  deliberately-unsolvable fixture). "AI RCA" that is *measured* is rare.
-- **SLO/error-budget engineering**, including PR-time evaluation and deploy gates
-  with DORA + change-failure linking.
-- **Profiling, synthetics, error tracking, catalog, Neo4j topology** — four
-  pillars and a graph they do not have at all.
-- **Deletability.** Their own docs state data is immutable and only whole
-  retention periods can be dropped. We ship a per-tenant purge with a deletion
-  certificate. Against GDPR Art. 17 this is not a feature difference, it is a
-  compliance difference. **Make it a headline.**
-- **Tamper-evident audit chain** — stronger than "immutable logging".
-- **The parity gate.** 164 routes, 0 orphans, enforced in CI. It is why every
-  wave below can be trusted to actually ship UI.
+**Confirmed, citable:**
+
+- **Continuous profiling.** No profiling pillar on their side; their only
+  `profiling.rs` is server self-instrumentation and their flame graph renders
+  trace spans. Flat profile + diff flame graph are ours alone.
+- **Deletability.** Verified in source: their deletion paths are internal
+  compacted-file GC, with no user-facing record deletion and no erasure path. We
+  ship a per-tenant purge with a deletion certificate. Against GDPR Art. 17 this
+  is not a feature difference, it is a compliance difference. **Make it a headline.**
+- **Tamper-evident audit chain.** Their `src/audit/src/lib.rs` is 105 lines — a
+  publisher to a stream, no hash chain, no verify endpoint.
+- **Deploy intelligence.** Deploy gates, DORA, change-failure linking, PR-time
+  SLO evaluation — no counterpart found.
+- **Service catalog and the Neo4j dependency graph** (blast radius, causal paths).
+- **The parity gate.** 164 routes, 0 orphans, enforced in CI. Internal, but it is
+  why every wave below can be trusted to actually ship UI.
+
+**Contested — narrower than we thought:**
+
+- **Remediation.** We have the approval gate, risk-tier authz and dry-run. They
+  have an 810-line workflow engine, action scripts and an MCP tool server. The
+  moat is *governance*, not automation. Do not claim "they have nothing."
+- **Causal RCA with a CI-enforced accuracy gate** (90.9%). The measurement
+  discipline still looks unique — but they ship `llm_evaluations/` and a
+  `sys_rca_agent`, so lead with **"measured RCA"**, not "RCA."
+
+**Deleted from this list after verification — they have these:** SLOs and error
+budgets (deeper than ours), synthetics, anomaly detection.
 
 ---
 
@@ -205,7 +255,7 @@ Do not trade any of these away while chasing G1–G12.
 Eight waves. O0 is a prerequisite for honest claims; O1–O2 are the hard ones and
 carry the most value; O3–O5 are large but mechanical; O6–O7 make the lead durable.
 
-Cross-cutting rules (per [enhancements/README.md](enhancements/README.md)):
+Cross-cutting rules (per enhancements/README.md):
 tenant-scoped server-side, admin surfaces RBAC-gated, every new route gets a UI
 consumer or a `uiNone` registration, pure logic unit-tested, one e2e per flow,
 fail-closed, all gates green per slice.
@@ -440,7 +490,7 @@ config and an e2e proving data lands and is queryable.
   parity/security gates are already the evidence — assemble the control mapping,
   pick an auditor, set a date. HIPAA BAA and ISO 27001 follow the same evidence.
 - **O6.6 · Multi-region active/standby (L).** The deferred item in
-  [DISASTER_RECOVERY.md](../DISASTER_RECOVERY.md); O6.1 makes it worth doing.
+  DISASTER_RECOVERY.md; O6.1 makes it worth doing.
 
 ---
 
@@ -469,19 +519,21 @@ that makes tying impossible.
 | D1 | Deployability | O1.1 | One container like theirs, **plus** the same artifact scales to the cluster topology with role flags and a data-compatible upgrade path |
 | D2 | Storage economics | O1.2 + O0.1 | Object-store-primary + compaction, **plus** O7.8 cost attribution — cheap *and* explains the bill |
 | D3 | Query power | O2.1–O2.3 | SQL + PromQL like theirs, **plus** cross-store joins (logs ⋈ traces ⋈ deploys) they cannot do across separate stores |
-| D4 | Dashboards | O3.1 | ≥20 panel types vs 19, **plus** flame-graph and trace-waterfall panels no log tool has, **plus** O7.2 AI authoring |
+| D4 | Dashboards | O3.1 | **≥22 panel types (they have 21, verified — not 19)**, plus flame-graph and trace-waterfall panels no log tool has, plus O7.2 AI authoring. Compete on *kind*, not count |
 | D5 | Streams/schema | O4.1 | Same self-serve stream settings, **plus** per-stream cost attribution |
 | D6 | Pipelines | O4.2 | Same node graph and VRL, **plus** O7.1 live debugger and production per-node telemetry |
-| D7 | Ingestion breadth | O5 | Their sources **plus** Datadog + Splunk HEC ingest we already have and they do not |
+| D7 | Ingestion breadth | O5 | Their sources **plus Datadog** (verified unique to us) **plus syslog** (neither side has it). Splunk HEC is *not* a differentiator — they ship `_hec` |
 | D8 | Reports | O3.3 | Scheduled reports **plus** delivery through the existing multi-channel (Slack/PD/Opsgenie/webhook) fabric, not just email |
 | D9 | Session replay | O7.3 | Replay wired to traces, profiles, and logs |
-| D10 | LLM observability | O7.4 | Their four metrics **plus** cost attribution, eval scores, guardrails, and causal RCA on LLM incidents |
+| D10 | LLM observability | O7.4 | They already ship `llm_evaluations/` — so **drop "eval scores" as the delta**. The delta is per-feature/per-tenant **cost attribution** and causal RCA over LLM incidents |
 | D11 | Data controls | O4.3 | Configurable per-field SDR **plus** audited redaction events **plus** actual deletion (D19) |
 | D12 | Federation | O6.1 | Federated search **plus** honest partial-failure reporting and region-pinned residency |
-| D13 | Auth | O6.3 | OIDC + SAML + SCIM + MFA + ABAC + LDAP — a superset |
+| D13 | Auth | O6.3 | OIDC + SAML + SCIM + MFA + ABAC + LDAP — a superset of what we can *see*; their federation is closed-source, so verify against the paid product before claiming |
 | D14 | Compliance | O6.5 | Same certifications **plus** tamper-evident audit and a provable tenant-isolation ratchet as evidence |
 | D15 | Proven scale | O0.3 + O1 | A published, reproducible ceiling with the harness in-repo — verifiable, not a marketing number |
-| D16–D21 | Incident intelligence, SLOs, APM depth, deletability, audit, discipline | already | Widened by O7.5, O7.6, O7.7 |
+| D16 | Incident intelligence | O7.5 | Contested, not won. The delta is **governance** — approval gate, risk-tier authz, SLO verification, auto-revert — plus measured RCA. Not "they have nothing" |
+| D17 | SLOs | — | **We are behind.** They have backfill + reconciliation + budget charges. Either close it or stop selling SLOs as a strength |
+| D17b, D18–D21 | Deploy intelligence, profiling, catalog, topology, deletability, audit, discipline | already | Confirmed wins; widened by O7.6, O7.7 |
 
 **Two honest exceptions** (say so out loud rather than bluffing):
 

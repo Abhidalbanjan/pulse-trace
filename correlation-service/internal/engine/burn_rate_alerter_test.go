@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestComputeBurnRate covers the Google SRE Handbook burn-rate math directly.
 // This is the actual "is SLO alerting real" logic — burn rate determines
@@ -123,4 +126,68 @@ func floatsClose(a, b float64) bool {
 		diff = -diff
 	}
 	return diff < epsilon
+}
+
+func TestWindowBurnRate(t *testing.T) {
+	// 99% SLO → 1% budget. An SLI of 93% over a window means 7% errors = 7× burn.
+	br, ok := windowBurnRate(93.0, 99.0)
+	if !ok || br < 6.99 || br > 7.01 {
+		t.Errorf("windowBurnRate(93,99) = %v (ok=%v), want ~7", br, ok)
+	}
+	// A 100% SLO leaves no budget → not evaluable.
+	if _, ok := windowBurnRate(99.0, 100.0); ok {
+		t.Error("100% SLO target should be not-ok (no budget to burn)")
+	}
+}
+
+func TestEvaluateMultiWindow(t *testing.T) {
+	const target = 99.0 // 1% budget
+	th := DefaultMultiWindowThresholds
+
+	// Severe burn over BOTH the 1h and 5m windows → CRITICAL fires.
+	// 14.4× on a 1% budget = 14.4% errors → SLI 85.6.
+	fire := evaluateMultiWindow(map[time.Duration]float64{
+		1 * time.Hour:   85.0, // 15× > 14.4
+		5 * time.Minute: 85.0, // 15×
+	}, target, th)
+	if fire == nil || fire.Severity != "CRITICAL" {
+		t.Fatalf("both windows breaching should fire CRITICAL, got %+v", fire)
+	}
+
+	// Long window breaches but the short window has recovered → NO page (the
+	// whole point of multi-window).
+	fire = evaluateMultiWindow(map[time.Duration]float64{
+		1 * time.Hour:   85.0, // 15× (severe)
+		5 * time.Minute: 99.9, // recovered, ~0×
+	}, target, th)
+	if fire != nil {
+		t.Errorf("recovered short window must suppress the page, got %+v", fire)
+	}
+
+	// Only the short window breaches (a brand-new spike, long window still fine) →
+	// NO page yet.
+	fire = evaluateMultiWindow(map[time.Duration]float64{
+		1 * time.Hour:   99.9,
+		5 * time.Minute: 85.0,
+	}, target, th)
+	if fire != nil {
+		t.Errorf("short-only breach must not page, got %+v", fire)
+	}
+
+	// A slow burn confirmed over 24h + 2h → WARNING (3× multiplier: 3% errors, SLI 97).
+	fire = evaluateMultiWindow(map[time.Duration]float64{
+		24 * time.Hour: 96.0, // 4× > 3
+		2 * time.Hour:  96.0,
+	}, target, th)
+	if fire == nil || fire.Severity != "WARNING" {
+		t.Fatalf("sustained slow burn should fire WARNING, got %+v", fire)
+	}
+
+	// Missing a window's SLI → that threshold can't confirm → no fire.
+	fire = evaluateMultiWindow(map[time.Duration]float64{
+		1 * time.Hour: 85.0, // 5m window absent
+	}, target, th)
+	if fire != nil {
+		t.Errorf("missing short-window SLI must not fire, got %+v", fire)
+	}
 }

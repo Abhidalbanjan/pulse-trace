@@ -22,6 +22,16 @@ function errMsg(err: unknown, fallback: string): string {
 const SLI_TYPES: SLIType[] = ['availability', 'latency'];
 const WINDOW_OPTIONS = [7, 14, 30, 90];
 
+// Multi-window burn-rate alert policy (SLOs · E1). Mirrors the backend
+// DefaultMultiWindowThresholds — each tier pages only when the burn rate breaches
+// over BOTH windows, so a recovered spike stops paging immediately.
+const BURN_POLICY: Array<{ long: string; short: string; rate: string; severity: string }> = [
+  { long: '1h', short: '5m', rate: '14.4×', severity: 'CRITICAL' },
+  { long: '6h', short: '30m', rate: '6×', severity: 'CRITICAL' },
+  { long: '1d', short: '2h', rate: '3×', severity: 'WARNING' },
+  { long: '3d', short: '6h', rate: '1×', severity: 'INFO' },
+];
+
 // Sparkline over the SLI trend — pure SVG, no dependency.
 function Sparkline({ points, color }: { points: number[]; color: string }) {
   if (points.length < 2) return <div style={{ height: '32px' }} />;
@@ -146,6 +156,26 @@ export function SLOView() {
           </p>
         </div>
         <button onClick={() => setShowForm((v) => !v)} style={primaryBtnStyle}>{showForm ? 'Cancel' : '+ New SLO'}</button>
+      </div>
+
+      {/* Multi-window burn-rate alert policy (SLOs · E1) */}
+      <div style={{ background: t.panelBg, border: '1px solid ' + t.panelBorder, borderRadius: '14px', padding: '14px 16px', marginBottom: '24px' }}>
+        <div style={{ fontSize: '12.5px', fontWeight: 700, color: t.text1, marginBottom: '4px' }}>Alerting policy · multi-window burn rate</div>
+        <div style={{ fontSize: '12px', color: t.text2, marginBottom: '10px', lineHeight: 1.5 }}>
+          Each tier pages only when the error-budget burn rate exceeds its multiplier over <em>both</em> a long and a short window (Google SRE) — so a spike that has already recovered stops paging immediately.
+        </div>
+        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+          {BURN_POLICY.map((p) => {
+            const col = p.severity === 'CRITICAL' ? t.red : p.severity === 'WARNING' ? t.amber : t.text2;
+            return (
+              <span key={p.long} style={{ display: 'inline-flex', alignItems: 'center', gap: '7px', border: '1px solid ' + col, borderRadius: '100px', padding: '4px 11px', fontSize: '11.5px' }}>
+                <b style={{ color: col }}>{p.rate}</b>
+                <span style={{ color: t.text2 }}>{p.long} + {p.short}</span>
+                <span style={{ color: col, fontWeight: 700 }}>{p.severity}</span>
+              </span>
+            );
+          })}
+        </div>
       </div>
 
       {showForm && (

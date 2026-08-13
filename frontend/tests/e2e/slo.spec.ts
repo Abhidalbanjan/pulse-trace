@@ -8,6 +8,9 @@ test.describe('SLOs', () => {
     await expect(page.getByText('payment-service').first()).toBeVisible({ timeout: 15000 });
     await expect(page.getByText('Error budget remaining').first()).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Budget Alerts' })).toBeVisible();
+    // Multi-window burn-rate alert policy readout (SLOs · E1).
+    await expect(page.getByText('Alerting policy · multi-window burn rate')).toBeVisible();
+    await expect(page.getByText('1h + 5m')).toBeVisible();
   });
 
   test('creates a new SLO', async ({ page }) => {

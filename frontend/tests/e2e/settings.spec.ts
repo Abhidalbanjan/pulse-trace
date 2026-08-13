@@ -45,6 +45,18 @@ test.describe('Settings', () => {
     await expect(page.getByRole('link', { name: 'Contact sales' }).first()).toBeVisible();
   });
 
+  test('Usage & Quota tab shows per-signal consumption vs plan', async ({ page }) => {
+    await page.goto('/settings');
+    await page.getByRole('button', { name: 'Usage & Quota' }).click();
+    await expect(page.getByRole('heading', { name: 'Usage & Quota' })).toBeVisible({ timeout: 10000 });
+    // Resolves to a real state: per-signal usage cards (Logs/Traces/…) or an
+    // explicit empty state — both prove /api/v1/usage/series is wired.
+    await expect(
+      page.locator('main').getByText(/Logs|Traces|No usage recorded this period yet/).first(),
+    ).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('Loading usage…')).toHaveCount(0, { timeout: 10000 });
+  });
+
   test('Rate Limits tab lists seeded rules', async ({ page }) => {
     await page.goto('/settings');
     await page.getByRole('button', { name: 'Rate Limits' }).click();

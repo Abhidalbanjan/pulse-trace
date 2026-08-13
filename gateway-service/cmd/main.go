@@ -206,6 +206,7 @@ func main() {
 		// Metered usage for the current billing period.
 		usageHandler := handler.NewUsageHandler(authHandler.GetDB())
 		mux.HandleFunc("GET /api/v1/usage", usageHandler.GetUsage)
+		mux.HandleFunc("GET /api/v1/usage/series", usageHandler.GetUsageSeries)
 
 		// Billing: provider-agnostic (Stripe for SaaS, manual for on-prem).
 		billingHandler := billing.NewHandler(billing.FromEnv(), tenantStore)

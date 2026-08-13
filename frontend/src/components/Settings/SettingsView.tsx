@@ -14,6 +14,7 @@ import { IngestionKeysPanel } from './IngestionKeysPanel';
 import { DataPrivacyPanel } from './DataPrivacyPanel';
 import { ChannelsPanel } from './ChannelsPanel';
 import { AnomalyConfigPanel } from './AnomalyConfigPanel';
+import { UsagePanel } from './UsagePanel';
 import { useTheme } from '@/context/ThemeContext';
 
 interface User { id: string; username: string; role: string; created_at?: string; }
@@ -220,7 +221,7 @@ export function SettingsView() {
       <div style={{ width: '230px', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '4px' }}>
         <h2 style={{ fontSize: '24px', fontWeight: 700, margin: '0 0 20px', color: t.text1 }}>Settings</h2>
 
-        {['users', 'security', 'billing', 'roles', 'policies', 'ratelimits', 'audit', 'apikeys', 'sso', 'alerts', 'anomalies', 'privacy'].map(tab => (
+        {['users', 'security', 'billing', 'usage', 'roles', 'policies', 'ratelimits', 'audit', 'apikeys', 'sso', 'alerts', 'anomalies', 'privacy'].map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -241,6 +242,7 @@ export function SettingsView() {
             {tab === 'users' ? 'Users'
               : tab === 'security' ? 'Security (MFA)'
               : tab === 'billing' ? 'Billing & Usage'
+              : tab === 'usage' ? 'Usage & Quota'
               : tab === 'roles' ? 'Roles (RBAC)'
               : tab === 'policies' ? 'Policies (ABAC)'
               : tab === 'ratelimits' ? 'Rate Limits'
@@ -336,6 +338,7 @@ export function SettingsView() {
 
         {activeTab === 'security' && <SecurityPanel />}
         {activeTab === 'billing' && <BillingPanel />}
+        {activeTab === 'usage' && <UsagePanel />}
         {activeTab === 'roles' && <RolesPanel />}
 
         {activeTab === 'policies' && <PoliciesPanel />}

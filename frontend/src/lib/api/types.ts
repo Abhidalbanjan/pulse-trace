@@ -257,6 +257,21 @@ export interface Alert {
   created_at?: string;
 }
 
+// A set of near-identical alerts collapsed into one row (Alerts · E1). Members
+// share a group key (service + level + a fingerprint of the message); Count and
+// first/last-seen turn an alert storm into one scannable line.
+export interface AlertGroup {
+  key: string;
+  service: string;
+  level: string;
+  sample: string;
+  sample_id: string;
+  count: number;
+  first_seen: string;
+  last_seen: string;
+  instances?: Alert[];
+}
+
 // ── Anomaly-detection tuning (ROAD_TO_100 · F14) ──────────────────────────────
 export interface AnomalyConfig {
   enabled: boolean;

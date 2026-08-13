@@ -60,6 +60,27 @@ func (h *AlertHandler) ListAlerts(w http.ResponseWriter, r *http.Request) {
 		params.PageSize = ps
 	}
 
+	// Grouped view (Alerts · E1): collapse near-identical alerts into deduplicated
+	// groups with a count and first/last-seen span. We group over the widest
+	// single page the repository allows (capped at 200) so a storm collapses into
+	// a handful of rows the operator can actually scan, rather than grouping only
+	// the current small page.
+	if q.Get("group") == "true" {
+		params.Page = 1
+		params.PageSize = 200
+		result, err := h.repo.Query(ctx, params)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "query failed")
+			writeJSON(w, http.StatusInternalServerError, models.Fail("query failed: "+err.Error()))
+			return
+		}
+		groups := GroupAlerts(result.Alerts)
+		span.SetAttributes(attribute.Int("alert.groups", len(groups)))
+		writeJSON(w, http.StatusOK, models.OK(groups))
+		return
+	}
+
 	result, err := h.repo.Query(ctx, params)
 	if err != nil {
 		span.RecordError(err)

@@ -10,7 +10,7 @@
 import React, { useState } from 'react';
 import { useTheme } from '@/context/ThemeContext';
 import { api } from '@/lib/api/client';
-import type { Alert } from '@/lib/api/types';
+import type { Alert, AlertGroup } from '@/lib/api/types';
 import { useApiResource } from '@/lib/hooks/useApiResource';
 import { StateBoundary } from '@/components/ui';
 
@@ -21,14 +21,30 @@ export function AlertsView() {
 
   const [service, setService] = useState('');
   const [level, setLevel] = useState('');
+  const [grouped, setGrouped] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const query = `service=${encodeURIComponent(service)}&level=${encodeURIComponent(level)}`;
   const alerts = useApiResource<Alert[]>(
     () => api.list<Alert>(`/api/v1/alerts?${query}`).then((r) => r.items),
-    { key: query, pollMs: 15000 },
+    { key: query, pollMs: 15000, enabled: !grouped },
   );
   const list = alerts.data ?? [];
+
+  const groups = useApiResource<AlertGroup[]>(
+    () => api.list<AlertGroup>(`/api/v1/alerts?${query}&group=true`).then((r) => r.items),
+    { key: query, pollMs: 15000, enabled: grouped },
+  );
+  const groupList = groups.data ?? [];
+
+  const toggleExpanded = (key: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   const detail = useApiResource<Alert | null>(
     () => {
@@ -61,39 +77,105 @@ export function AlertsView() {
         <select value={level} onChange={(e) => setLevel(e.target.value)} style={inputStyle} aria-label="Filter by level">
           {LEVELS.map((l) => <option key={l || 'all'} value={l}>{l || 'All levels'}</option>)}
         </select>
+        <button
+          onClick={() => { setGrouped((g) => !g); setSelectedId(null); }}
+          aria-pressed={grouped}
+          style={{
+            ...inputStyle, cursor: 'pointer', fontWeight: 600, fontSize: '13px',
+            background: grouped ? t.accent : inputStyle.background,
+            color: grouped ? '#fff' : t.text1, borderColor: grouped ? t.accent : t.panelBorder,
+          }}
+          title="Collapse near-identical alerts into deduplicated groups"
+        >
+          {grouped ? '⊟ Grouped' : '⊞ Group similar'}
+        </button>
       </div>
 
       <div style={{ display: 'flex', gap: '20px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: '320px' }}>
-          <StateBoundary
-            loading={alerts.loading}
-            error={alerts.error}
-            empty={list.length === 0}
-            onRetry={alerts.refetch}
-            loadingLabel="Loading alerts…"
-            emptyLabel="No alerts match these filters."
-          >
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {list.map((a) => {
-                const c = levelColor(a.level);
-                const isSel = selectedId === a.id;
-                return (
-                  <div
-                    key={a.id}
-                    onClick={() => setSelectedId(a.id)}
-                    style={{ background: t.panelBg, border: '1px solid ' + (isSel ? t.accent : t.panelBorder), borderLeft: `3px solid ${c}`, borderRadius: '12px', padding: '12px 14px', cursor: 'pointer' }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
-                      <span style={{ fontWeight: 600, color: t.text1, fontSize: '13.5px' }}>{a.service}</span>
-                      <span style={{ color: c, fontWeight: 700, fontSize: '11px' }}>{a.level}</span>
+          {grouped ? (
+            <StateBoundary
+              loading={groups.loading}
+              error={groups.error}
+              empty={groupList.length === 0}
+              onRetry={groups.refetch}
+              loadingLabel="Grouping alerts…"
+              emptyLabel="No alerts match these filters."
+            >
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {groupList.map((g) => {
+                  const c = levelColor(g.level);
+                  const isOpen = expanded.has(g.key);
+                  return (
+                    <div key={g.key} style={{ background: t.panelBg, border: '1px solid ' + t.panelBorder, borderLeft: `3px solid ${c}`, borderRadius: '12px', overflow: 'hidden' }}>
+                      <div onClick={() => toggleExpanded(g.key)} style={{ padding: '12px 14px', cursor: 'pointer' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center' }}>
+                          <span style={{ fontWeight: 600, color: t.text1, fontSize: '13.5px' }}>
+                            <span style={{ color: t.text2, marginRight: '6px', fontSize: '11px' }}>{isOpen ? '▾' : '▸'}</span>
+                            {g.service}
+                          </span>
+                          <span style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                            <span style={{ background: c, color: '#fff', fontWeight: 700, fontSize: '11px', borderRadius: '999px', padding: '1px 8px' }}>×{g.count}</span>
+                            <span style={{ color: c, fontWeight: 700, fontSize: '11px' }}>{g.level}</span>
+                          </span>
+                        </div>
+                        <div style={{ color: t.text2, fontSize: '12.5px', marginTop: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.sample}</div>
+                        <div style={{ color: t.text2, fontSize: '11.5px', marginTop: '4px' }}>
+                          {g.count === 1
+                            ? new Date(g.last_seen).toLocaleString()
+                            : `${g.count} alerts · ${new Date(g.first_seen).toLocaleString()} → ${new Date(g.last_seen).toLocaleString()}`}
+                        </div>
+                      </div>
+                      {isOpen && (
+                        <div style={{ borderTop: '1px solid ' + t.panelBorder, padding: '6px 8px 8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                          {(g.instances ?? []).map((a) => (
+                            <div
+                              key={a.id}
+                              onClick={() => setSelectedId(a.id)}
+                              style={{ padding: '7px 10px', borderRadius: '8px', cursor: 'pointer', background: selectedId === a.id ? (t.dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)') : 'transparent', display: 'flex', justifyContent: 'space-between', gap: '10px' }}
+                            >
+                              <span style={{ color: t.text2, fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.message}</span>
+                              <span style={{ color: t.text2, fontSize: '11px', flexShrink: 0 }}>{new Date(a.triggered_at).toLocaleTimeString()}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                    <div style={{ color: t.text2, fontSize: '12.5px', marginTop: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.message}</div>
-                    <div style={{ color: t.text2, fontSize: '11.5px', marginTop: '4px' }}>{new Date(a.triggered_at).toLocaleString()}</div>
-                  </div>
-                );
-              })}
-            </div>
-          </StateBoundary>
+                  );
+                })}
+              </div>
+            </StateBoundary>
+          ) : (
+            <StateBoundary
+              loading={alerts.loading}
+              error={alerts.error}
+              empty={list.length === 0}
+              onRetry={alerts.refetch}
+              loadingLabel="Loading alerts…"
+              emptyLabel="No alerts match these filters."
+            >
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {list.map((a) => {
+                  const c = levelColor(a.level);
+                  const isSel = selectedId === a.id;
+                  return (
+                    <div
+                      key={a.id}
+                      onClick={() => setSelectedId(a.id)}
+                      style={{ background: t.panelBg, border: '1px solid ' + (isSel ? t.accent : t.panelBorder), borderLeft: `3px solid ${c}`, borderRadius: '12px', padding: '12px 14px', cursor: 'pointer' }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
+                        <span style={{ fontWeight: 600, color: t.text1, fontSize: '13.5px' }}>{a.service}</span>
+                        <span style={{ color: c, fontWeight: 700, fontSize: '11px' }}>{a.level}</span>
+                      </div>
+                      <div style={{ color: t.text2, fontSize: '12.5px', marginTop: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.message}</div>
+                      <div style={{ color: t.text2, fontSize: '11.5px', marginTop: '4px' }}>{new Date(a.triggered_at).toLocaleString()}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </StateBoundary>
+          )}
         </div>
 
         {selectedId && (

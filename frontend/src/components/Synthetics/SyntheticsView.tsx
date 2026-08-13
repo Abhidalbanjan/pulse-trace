@@ -14,7 +14,38 @@ interface SyntheticResult {
   last_failure?: string;
 }
 
+interface UptimeBucket { start: string; total: number; success: number; uptime_pct: number; status: 'up' | 'degraded' | 'down' | 'no-data'; }
+interface UptimeSummary { target: string; uptime_pct: number; total: number; success: number; buckets: UptimeBucket[]; }
+
 const METHODS = ['GET', 'HEAD', 'POST'];
+
+// AvailabilityStrip renders the 24h red/green SLA timeline (Synthetics · E2).
+function AvailabilityStrip({ summary, t }: { summary: UptimeSummary; t: ReturnType<typeof useTheme>['tokens'] }) {
+  const color = (s: UptimeBucket['status']) =>
+    s === 'up' ? t.green : s === 'degraded' ? t.amber : s === 'down' ? t.red : (t.dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.1)');
+  if (summary.buckets.length === 0) {
+    return <div style={{ color: t.text2, fontSize: '12.5px', padding: '8px 0' }}>No probe history in this window.</div>;
+  }
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: '2px', height: '28px', borderRadius: '5px', overflow: 'hidden' }}>
+        {summary.buckets.map((b, i) => (
+          <div
+            key={i}
+            style={{ flex: 1, background: color(b.status), minWidth: '2px' }}
+            title={`${new Date(b.start.replace(' ', 'T') + 'Z').toLocaleString()} · ${b.status}${b.total ? ` · ${b.success}/${b.total} ok` : ''}`}
+          />
+        ))}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '6px', fontSize: '11.5px', color: t.text2 }}>
+        <span>{summary.buckets.length} buckets · last 24h</span>
+        <span style={{ color: summary.uptime_pct >= 99.9 ? t.green : summary.uptime_pct >= 99 ? t.amber : t.red, fontWeight: 700 }}>
+          {summary.total > 0 ? `${summary.uptime_pct.toFixed(3)}% uptime` : 'no data'}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 // A step in the builder form. Assertion fields are strings (raw input) and are
 // only sent when non-empty, so an unset field means "no assertion", not zero.
@@ -55,6 +86,24 @@ export function SyntheticsView() {
   const [steps, setSteps] = useState<StepForm[]>([emptyStep()]);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Uptime timeline (Synthetics · E2): which check's SLA strip is expanded.
+  const [uptimeTarget, setUptimeTarget] = useState<string | null>(null);
+  const [uptime, setUptime] = useState<UptimeSummary | null>(null);
+  const [uptimeLoading, setUptimeLoading] = useState(false);
+
+  const toggleUptime = (r: SyntheticResult) => {
+    const key = r.check_name || r.URL;
+    if (uptimeTarget === key) { setUptimeTarget(null); return; }
+    setUptimeTarget(key);
+    setUptime(null);
+    setUptimeLoading(true);
+    fetchWithAuth(`/api/v1/synthetics/uptime?target=${encodeURIComponent(key)}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then((data: UptimeSummary | null) => setUptime(data))
+      .catch(() => setUptime(null))
+      .finally(() => setUptimeLoading(false));
+  };
 
   const fetchResults = () => {
     fetchWithAuth('/api/v1/synthetics/results')
@@ -270,8 +319,11 @@ export function SyntheticsView() {
                 ) : (
                   results.map((r, i) => {
                     const healthy = r.uptime_percent === 100;
+                    const key = r.check_name || r.URL;
+                    const isOpen = uptimeTarget === key;
                     return (
-                      <tr key={i} style={{ borderBottom: '1px solid ' + t.panelBorder }}>
+                      <React.Fragment key={i}>
+                      <tr style={{ borderBottom: isOpen ? 'none' : '1px solid ' + t.panelBorder }}>
                         <td style={{ padding: '16px' }}>
                           <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: healthy ? t.green : t.red }} />
                         </td>
@@ -281,12 +333,36 @@ export function SyntheticsView() {
                         </td>
                         <td style={{ padding: '16px' }}><Sparkline data={r.latency_history || []} color={healthy ? t.accent : t.red} /></td>
                         <td style={{ padding: '16px', fontWeight: 600, fontSize: '13.5px', color: t.text1 }}>{Math.round(r.avg_latency_ms)} ms</td>
-                        <td style={{ padding: '16px', fontSize: '13.5px', color: r.uptime_percent >= 99.9 ? t.green : t.red }}>{r.uptime_percent.toFixed(2)}%</td>
+                        <td style={{ padding: '16px', fontSize: '13.5px' }}>
+                          <button
+                            onClick={() => toggleUptime(r)}
+                            title="Show the 24h availability timeline"
+                            style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, display: 'inline-flex', alignItems: 'center', gap: '6px', color: r.uptime_percent >= 99.9 ? t.green : t.red, fontSize: '13.5px', fontWeight: 600 }}
+                          >
+                            <span style={{ color: t.text2, fontSize: '10px' }}>{isOpen ? '▾' : '▸'}</span>
+                            {r.uptime_percent.toFixed(2)}%
+                          </button>
+                        </td>
                         <td style={{ padding: '16px', fontSize: '12px', color: r.last_failure ? t.red : t.text2, maxWidth: '220px' }}>{r.last_failure || '—'}</td>
                         <td style={{ padding: '16px', textAlign: 'right' }}>
                           <button onClick={() => handleDelete(r.URL)} title="Stop monitoring this endpoint" style={{ background: 'transparent', border: 'none', color: t.text2, cursor: 'pointer', fontSize: '16px', lineHeight: 1, padding: '2px 6px' }}>✕</button>
                         </td>
                       </tr>
+                      {isOpen && (
+                        <tr style={{ borderBottom: '1px solid ' + t.panelBorder }}>
+                          <td colSpan={7} style={{ padding: '4px 16px 20px' }}>
+                            <div style={{ fontSize: '11.5px', fontWeight: 700, letterSpacing: '0.04em', color: t.text2, margin: '4px 0 10px' }}>AVAILABILITY · LAST 24 HOURS</div>
+                            {uptimeLoading ? (
+                              <div style={{ color: t.text2, fontSize: '13px' }}>Loading timeline…</div>
+                            ) : uptime ? (
+                              <AvailabilityStrip summary={uptime} t={t} />
+                            ) : (
+                              <div style={{ color: t.text2, fontSize: '13px' }}>No uptime data available.</div>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                      </React.Fragment>
                     );
                   })
                 )}

@@ -17,6 +17,16 @@ test.describe('Synthetic Monitoring', () => {
     await expect(page.getByText('Checkout journey').first()).toBeVisible({ timeout: 10000 });
   });
 
+  test('expanding a check shows its 24h availability timeline', async ({ page }) => {
+    await page.goto('/synthetics');
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
+    // The uptime % in each row is a toggle; clicking it reveals the SLA strip.
+    await page.getByRole('button', { name: /Show the 24h availability timeline/ }).first().click();
+    await expect(page.getByText(/AVAILABILITY · LAST 24 HOURS/i)).toBeVisible({ timeout: 10000 });
+    // Resolves to a real state (strip or explicit empty), never an infinite spinner.
+    await expect(page.getByText('Loading timeline…')).toHaveCount(0, { timeout: 10000 });
+  });
+
   test('the check builder assembles a multi-step check with assertions', async ({ page }) => {
     await page.goto('/synthetics');
     await page.getByRole('button', { name: /create check/i }).click();

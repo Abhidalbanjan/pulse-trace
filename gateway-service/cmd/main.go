@@ -400,6 +400,7 @@ func main() {
 
 	// Synthetics API
 	mux.HandleFunc("GET /api/v1/synthetics/results", syntheticsHandler.GetResults)
+	mux.HandleFunc("GET /api/v1/synthetics/uptime", syntheticsHandler.GetUptime)
 	mux.HandleFunc("GET /api/v1/synthetics/tests", syntheticsHandler.ListTargets)
 	mux.HandleFunc("POST /api/v1/synthetics/tests", syntheticsHandler.CreateTarget)
 	mux.HandleFunc("DELETE /api/v1/synthetics/tests", syntheticsHandler.DeleteTarget)

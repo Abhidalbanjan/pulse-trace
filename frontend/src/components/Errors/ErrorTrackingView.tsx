@@ -7,6 +7,7 @@ import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { useTheme } from '@/context/ThemeContext';
 
 interface TimelineBucket { time_bucket: string; count: number }
+interface SimilarGroup { fingerprint: string; service: string; operation: string; message: string; sample_message: string; similarity: number }
 
 interface ErrorGroup {
   fingerprint: string;
@@ -59,11 +60,14 @@ export function ErrorTrackingView() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineBucket[]>([]);
   const [timelineLoading, setTimelineLoading] = useState(false);
+  // Similar issues (Error Tracking · E6) for the expanded group.
+  const [similar, setSimilar] = useState<SimilarGroup[]>([]);
 
   const toggleTimeline = (g: ErrorGroup) => {
     if (expanded === g.fingerprint) { setExpanded(null); return; }
     setExpanded(g.fingerprint);
     setTimeline([]);
+    setSimilar([]);
     setTimelineLoading(true);
     const params = new URLSearchParams({ service: g.service, operation: g.operation, message: g.message, interval: '7d' });
     fetchWithAuth(`/api/v1/errors/groups/${g.fingerprint}/timeline?${params.toString()}`)
@@ -71,6 +75,12 @@ export function ErrorTrackingView() {
       .then(data => setTimeline((data?.data || []).map((b: { time_bucket: string; count: string | number }) => ({ time_bucket: b.time_bucket, count: Number(b.count) }))))
       .catch(() => setTimeline([]))
       .finally(() => setTimelineLoading(false));
+    // Similar issues (best-effort; no spinner — appears if any are found).
+    const sp = new URLSearchParams({ service: g.service, operation: g.operation, message: g.message });
+    fetchWithAuth(`/api/v1/errors/groups/${g.fingerprint}/similar?${sp.toString()}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => setSimilar(data?.data || []))
+      .catch(() => setSimilar([]));
   };
 
   const fetchGroups = useCallback(() => {
@@ -358,6 +368,20 @@ export function ErrorTrackingView() {
                               <Bar dataKey="count" fill={t.red} radius={[3, 3, 0, 0]} />
                             </BarChart>
                           </ResponsiveContainer>
+                        </div>
+                      )}
+                      {similar.length > 0 && (
+                        <div style={{ marginTop: '18px' }}>
+                          <div style={{ fontSize: '11.5px', fontWeight: 700, letterSpacing: '0.04em', color: t.text2, marginBottom: '8px' }}>SIMILAR ISSUES · {similar.length}</div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            {similar.map(sg => (
+                              <div key={sg.fingerprint} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 10px', borderRadius: '8px', background: t.dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}>
+                                <span style={{ fontSize: '11px', fontWeight: 700, color: t.accent, minWidth: '38px' }}>{Math.round(sg.similarity * 100)}%</span>
+                                <span style={{ fontSize: '12px', color: t.accent, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{sg.service}</span>
+                                <span style={{ fontSize: '12.5px', color: t.text2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={sg.sample_message || sg.message}>{sg.sample_message || sg.message}</span>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </td>

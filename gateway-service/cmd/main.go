@@ -376,6 +376,7 @@ func main() {
 	// Error Tracking APIs (ClickHouse grouping + Postgres triage workflow)
 	mux.HandleFunc("GET /api/v1/errors/groups", errorTrackingHandler.ListErrorGroups)
 	mux.HandleFunc("GET /api/v1/errors/groups/{fingerprint}/timeline", errorTrackingHandler.GetErrorGroupTimeline)
+	mux.HandleFunc("GET /api/v1/errors/groups/{fingerprint}/similar", errorTrackingHandler.GetSimilarErrorGroups)
 	mux.HandleFunc("POST /api/v1/errors/groups/{fingerprint}/resolve", errorTrackingHandler.ResolveErrorGroup)
 	mux.HandleFunc("POST /api/v1/errors/groups/{fingerprint}/mute", errorTrackingHandler.MuteErrorGroup)
 	mux.HandleFunc("POST /api/v1/errors/groups/{fingerprint}/reopen", errorTrackingHandler.ReopenErrorGroup)

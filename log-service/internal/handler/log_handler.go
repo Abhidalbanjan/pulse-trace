@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 	"time"
 
 	"github.com/google/uuid"
@@ -325,8 +326,9 @@ type quickwitSearchResponse struct {
 // timestamp or an un-compilable regex — rather than silently dropping the
 // clause and returning a wider result set than the operator asked for, which
 // during an incident is a dangerous way to be wrong.
-func buildLogQuery(r *http.Request, tenantID string) (string, error) {
+func buildLogQuery(r *http.Request, tenantID string) (string, *regexp.Regexp, error) {
 	clauses := []string{fmt.Sprintf("tenant_id:%q", tenantID)}
+	var matcher *regexp.Regexp
 
 	if svc := r.URL.Query().Get("service"); svc != "" {
 		clauses = append(clauses, fmt.Sprintf("service_name:%q", svc))
@@ -342,35 +344,81 @@ func buildLogQuery(r *http.Request, tenantID string) (string, error) {
 		clauses = append(clauses, fmt.Sprintf("message:%q", q))
 	}
 	if pattern := r.URL.Query().Get("regex"); pattern != "" {
-		clause, err := regexClause(pattern)
+		re, clause, err := regexPrefilter(pattern)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
-		clauses = append(clauses, clause)
+		matcher = re
+		if clause != "" {
+			clauses = append(clauses, clause)
+		}
 	}
 
 	timeClause, err := timeRangeClause(r.URL.Query())
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if timeClause != "" {
 		clauses = append(clauses, timeClause)
 	}
 
-	return strings.Join(clauses, " AND "), nil
+	return strings.Join(clauses, " AND "), matcher, nil
 }
 
-// regexClause builds a Quickwit regex query (message:/pattern/) against the
-// full-text message field. The pattern is validated with Go's regexp engine —
-// whose syntax matches the tantivy engine Quickwit uses closely enough to catch
-// the mistakes an operator actually makes (unbalanced groups, bad escapes) —
-// and any '/' is escaped so it can't terminate the literal early.
-func regexClause(pattern string) (string, error) {
-	if _, err := regexp.Compile(pattern); err != nil {
-		return "", fmt.Errorf("invalid regex %q: %w", pattern, err)
+// regexPrefilter turns a caller's regex into (a) a compiled matcher applied in
+// Go and (b) an optional Quickwit clause that narrows the candidate set.
+//
+// It does NOT emit `message:/pattern/`. That syntax was assumed to be a regex
+// query; Quickwit 0.8 has no regex support in its query language and parses
+// `/…/` as a *wildcard* pattern instead. The practical effect was that any
+// pattern containing regex metacharacters — the only reason to use the feature —
+// failed the query outright ("wildcard in non final position", or a parse
+// error), surfacing as a 502. Only a metacharacter-free string, i.e. a plain
+// term search, appeared to work. The Log Explorer has been shipping a regex
+// toggle for something that could not match.
+//
+// Instead the regex is evaluated where a regex engine exists: in Go, over
+// candidates the index can still narrow cheaply. `LiteralPrefix` gives the
+// leading literal the pattern must start with (`duration_ms=` for
+// `duration_ms=[0-9]+`), which becomes a wildcard clause so the index does the
+// heavy lifting whenever the pattern is anchored by a literal. An unanchored
+// pattern falls back to scanning the time/service/level-filtered window, which
+// is honest work rather than a silent failure.
+func regexPrefilter(pattern string) (*regexp.Regexp, string, error) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid regex %q: %w", pattern, err)
 	}
-	escaped := strings.ReplaceAll(pattern, `/`, `\/`)
-	return "message:/" + escaped + "/", nil
+
+	prefix, _ := re.LiteralPrefix()
+	// Truncate to the first whole token. Quickwit's default tokenizer splits on
+	// every non-alphanumeric character, so "duration_ms=" is indexed as the
+	// tokens "duration" and "ms" — a `message:duration_ms=*` clause matches no
+	// token at all and returns zero hits for a pattern that genuinely occurs.
+	// A false negative is worse than the original 502: an empty result reads as
+	// "those logs do not exist" rather than "the query could not run".
+	token := leadingToken(prefix)
+	if len(token) < 3 {
+		return re, "", nil
+	}
+	return re, fmt.Sprintf("message:%s*", quickwitEscapeTerm(token)), nil
+}
+
+// leadingToken returns the longest alphanumeric run at the start of s — the
+// part the index actually stores as a term. Returns "" when s does not begin
+// with an alphanumeric, in which case no useful clause exists.
+func leadingToken(s string) string {
+	for i, r := range s {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+func quickwitEscapeTerm(s string) string {
+	r := strings.NewReplacer(`"`, `\"`, `\`, `\\`)
+	return r.Replace(s)
 }
 
 // timeRangeClause builds a Quickwit datetime range clause on the timestamp
@@ -462,16 +510,27 @@ func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	query, err := buildLogQuery(r, tenantID)
+	query, matcher, err := buildLogQuery(r, tenantID)
 	if err != nil {
 		span.SetStatus(codes.Error, "invalid query params")
 		writeJSON(w, http.StatusBadRequest, models.Fail(err.Error()))
 		return
 	}
 
+	// A regex is evaluated here, not in the index (see regexPrefilter). Ask for
+	// more candidates than the caller wants, because most will be filtered out,
+	// and cap the scan so one pathological pattern cannot walk the whole index.
+	maxHits := limit
+	if matcher != nil {
+		maxHits = limit * regexCandidateMultiplier
+		if maxHits > regexScanCap {
+			maxHits = regexScanCap
+		}
+	}
+
 	req := quickwitSearchRequest{
 		Query:       query,
-		MaxHits:     limit,
+		MaxHits:     maxHits,
 		SortByField: "-timestamp",
 	}
 
@@ -484,7 +543,54 @@ func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if matcher != nil {
+		scanned := len(hits)
+		hits = filterByRegex(hits, matcher, limit)
+		span.SetAttributes(
+			attribute.Int("log.regex.scanned", scanned),
+			attribute.Int("log.regex.matched", len(hits)),
+		)
+		// Say so when the candidate window was saturated: the caller is seeing
+		// matches from a prefix of the range, not from all of it, and silently
+		// returning a short list would read as "no more matches exist".
+		if scanned >= maxHits && len(hits) < limit {
+			w.Header().Set("X-PulseTrace-Regex-Truncated", "true")
+		}
+	}
+
 	writeJSON(w, http.StatusOK, models.OK(hits))
+}
+
+
+// Regex scanning bounds. The multiplier over-fetches because the index can only
+// narrow by literal prefix, so most candidates will not match; the cap stops an
+// unanchored pattern from walking the entire retention window.
+const (
+	regexCandidateMultiplier = 20
+	regexScanCap             = 10000
+)
+
+// filterByRegex applies the caller's pattern to the message field, preserving
+// the index's ordering and stopping once `limit` matches are found. Hits stay as
+// raw JSON — only `message` is decoded, so the rest of each document passes
+// through untouched rather than being round-tripped through a map.
+func filterByRegex(hits []json.RawMessage, re *regexp.Regexp, limit int) []json.RawMessage {
+	out := make([]json.RawMessage, 0, limit)
+	for _, hit := range hits {
+		var doc struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(hit, &doc); err != nil {
+			continue // a document we cannot read cannot be matched
+		}
+		if re.MatchString(doc.Message) {
+			out = append(out, hit)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
 }
 
 // GetLog fetches a single log entry by ID via Quickwit.

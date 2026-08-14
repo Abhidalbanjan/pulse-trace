@@ -140,6 +140,33 @@ func (h *SyntheticsHandler) initPostgresTable() {
 	_, _ = h.DB.Exec("ALTER TABLE synthetic_targets ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(50) NOT NULL DEFAULT 'default'")
 	_, _ = h.DB.Exec("ALTER TABLE synthetic_targets ADD COLUMN IF NOT EXISTS name VARCHAR(120) NOT NULL DEFAULT ''")
 	_, _ = h.DB.Exec("ALTER TABLE synthetic_targets ADD COLUMN IF NOT EXISTS spec JSONB")
+
+	// Repair the uniqueness constraint on deployments that predate multi-tenancy.
+	//
+	// Those tables were created with a single-column UNIQUE(url). CREATE TABLE IF
+	// NOT EXISTS above is a no-op against them, and the ALTERs add tenant_id as a
+	// column but not to the constraint — so CreateTarget's
+	// `ON CONFLICT (tenant_id, url)` had no matching constraint and every check
+	// creation failed with 42P10 (`no unique or exclusion constraint matching the
+	// ON CONFLICT specification`). Fresh installs were fine, which is why CI never
+	// saw it: only upgraded databases are affected.
+	//
+	// UNIQUE(url) is also wrong on its own terms once tenants exist — it stops two
+	// tenants registering the same URL, and turns a collision into a signal that
+	// someone else already monitors it.
+	if _, err := h.DB.Exec("ALTER TABLE synthetic_targets DROP CONSTRAINT IF EXISTS synthetic_targets_url_key"); err != nil {
+		log.Printf("[SyntheticsHandler] WARNING: could not drop legacy UNIQUE(url): %v", err)
+	}
+	if _, err := h.DB.Exec(`DO $$ BEGIN
+		IF NOT EXISTS (
+			SELECT 1 FROM pg_constraint WHERE conname = 'synthetic_targets_tenant_id_url_key'
+		) THEN
+			ALTER TABLE synthetic_targets
+				ADD CONSTRAINT synthetic_targets_tenant_id_url_key UNIQUE (tenant_id, url);
+		END IF;
+	END $$;`); err != nil {
+		log.Printf("[SyntheticsHandler] WARNING: could not add UNIQUE(tenant_id, url): %v", err)
+	}
 }
 
 func (h *SyntheticsHandler) initClickHouseTable() {

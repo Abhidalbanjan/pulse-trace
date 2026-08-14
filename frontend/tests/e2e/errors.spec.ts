@@ -15,13 +15,13 @@ test.describe('Error Tracking', () => {
 
   test('status tabs filter the table', async ({ page }) => {
     await page.goto('/errors');
-    await page.getByRole('button', { name: 'All' }).click();
+    await page.getByRole('button', { name: 'All', exact: true }).click();
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
   });
 
   test('assign an owner to an error group persists', async ({ page }) => {
     await page.goto('/errors');
-    await page.getByRole('button', { name: 'All' }).click();
+    await page.getByRole('button', { name: 'All', exact: true }).click();
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
 
     const firstRow = page.locator('table tbody tr').first();
@@ -43,7 +43,7 @@ test.describe('Error Tracking', () => {
 
   test('expanding a group shows its occurrence timeline', async ({ page }) => {
     await page.goto('/errors');
-    await page.getByRole('button', { name: 'All' }).click();
+    await page.getByRole('button', { name: 'All', exact: true }).click();
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
     await page.getByRole('button', { name: 'Timeline' }).first().click();
     // The expanded panel renders and resolves to a real state (chart or explicit

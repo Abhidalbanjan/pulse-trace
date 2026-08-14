@@ -20,11 +20,8 @@ const AUTH_FILE = 'tests/e2e/.auth/state.json';
 setup('authenticate', async ({ page, context }) => {
   await page.goto('/login');
 
-  // The <label>s on this form are presentational — no htmlFor/id association —
-  // so getByLabel cannot resolve them. Select the inputs structurally instead.
-  const form = page.locator('form');
-  await form.locator('input[type="text"]').first().fill('admin');
-  await form.locator('input[type="password"]').first().fill('admin');
+  await page.getByLabel('Email or Username').fill('admin');
+  await page.getByLabel('Password', { exact: true }).fill('admin');
   await page.getByRole('button', { name: 'Sign In', exact: true }).click();
 
   // middleware.ts bounces an authenticated user off /login, so landing anywhere

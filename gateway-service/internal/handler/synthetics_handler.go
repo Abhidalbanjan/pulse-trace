@@ -568,16 +568,30 @@ func isPublicIP(ip net.IP) bool {
 // entirely (or partly) into non-public space is refused too, catching
 // internal.corp-style names pointing at private IPs. Best-effort — a resolution
 // failure is treated as "can't confirm private" and left to the literal checks.
+// dnsLookupTimeout bounds the SSRF pre-flight lookup. It runs synchronously in
+// CreateTarget, once per step, so an unresolvable host otherwise stalls the
+// request for the resolver's full default timeout — a two-step check against
+// hosts that don't exist took tens of seconds and was the slowest thing in the
+// whole seed.
+//
+// This does not weaken the guard: an unresolvable host was already treated as
+// "not provably private" and allowed through (the `err != nil` branch below), so
+// a timeout lands in exactly the same place. Anything that genuinely resolves to
+// a private address does so from cache or a local resolver well inside 2s.
+const dnsLookupTimeout = 2 * time.Second
+
 func resolvesToPrivate(host string) bool {
 	if net.ParseIP(host) != nil {
 		return false // literal IPs are handled by validateProbeURL
 	}
-	ips, err := net.LookupIP(host)
+	ctx, cancel := context.WithTimeout(context.Background(), dnsLookupTimeout)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return false
 	}
 	for _, ip := range ips {
-		if !isPublicIP(ip) {
+		if !isPublicIP(ip.IP) {
 			return true
 		}
 	}

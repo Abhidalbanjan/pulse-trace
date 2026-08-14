@@ -140,6 +140,44 @@ func (h *SyntheticsHandler) initPostgresTable() {
 	_, _ = h.DB.Exec("ALTER TABLE synthetic_targets ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(50) NOT NULL DEFAULT 'default'")
 	_, _ = h.DB.Exec("ALTER TABLE synthetic_targets ADD COLUMN IF NOT EXISTS name VARCHAR(120) NOT NULL DEFAULT ''")
 	_, _ = h.DB.Exec("ALTER TABLE synthetic_targets ADD COLUMN IF NOT EXISTS spec JSONB")
+
+	// Repair the uniqueness constraint on deployments that predate multi-tenancy.
+	//
+	// Those tables were created with a single-column UNIQUE(url). CREATE TABLE IF
+	// NOT EXISTS above is a no-op against them, and the ALTERs add tenant_id as a
+	// column but not to the constraint — so CreateTarget's
+	// `ON CONFLICT (tenant_id, url)` had no matching constraint and every check
+	// creation failed with 42P10 (`no unique or exclusion constraint matching the
+	// ON CONFLICT specification`). Fresh installs were fine, which is why CI never
+	// saw it: only upgraded databases are affected.
+	//
+	// UNIQUE(url) is also wrong on its own terms once tenants exist — it stops two
+	// tenants registering the same URL, and turns a collision into a signal that
+	// someone else already monitors it.
+	if _, err := h.DB.Exec("ALTER TABLE synthetic_targets DROP CONSTRAINT IF EXISTS synthetic_targets_url_key"); err != nil {
+		log.Printf("[SyntheticsHandler] WARNING: could not drop legacy UNIQUE(url): %v", err)
+	}
+	// The existence check must be scoped to *this* table in the *current* schema.
+	// A bare `WHERE conname = …` matches the name anywhere in the database, so a
+	// same-named constraint in another schema would make this silently skip —
+	// leaving the table with the legacy constraint dropped and no replacement,
+	// which is strictly worse than not having run at all.
+	if _, err := h.DB.Exec(`DO $$ BEGIN
+		IF NOT EXISTS (
+			SELECT 1
+			FROM pg_constraint c
+			JOIN pg_class t ON t.oid = c.conrelid
+			JOIN pg_namespace n ON n.oid = t.relnamespace
+			WHERE c.conname = 'synthetic_targets_tenant_id_url_key'
+			  AND t.relname = 'synthetic_targets'
+			  AND n.nspname = current_schema()
+		) THEN
+			ALTER TABLE synthetic_targets
+				ADD CONSTRAINT synthetic_targets_tenant_id_url_key UNIQUE (tenant_id, url);
+		END IF;
+	END $$;`); err != nil {
+		log.Printf("[SyntheticsHandler] WARNING: could not add UNIQUE(tenant_id, url): %v", err)
+	}
 }
 
 func (h *SyntheticsHandler) initClickHouseTable() {
@@ -530,16 +568,30 @@ func isPublicIP(ip net.IP) bool {
 // entirely (or partly) into non-public space is refused too, catching
 // internal.corp-style names pointing at private IPs. Best-effort — a resolution
 // failure is treated as "can't confirm private" and left to the literal checks.
+// dnsLookupTimeout bounds the SSRF pre-flight lookup. It runs synchronously in
+// CreateTarget, once per step, so an unresolvable host otherwise stalls the
+// request for the resolver's full default timeout — a two-step check against
+// hosts that don't exist took tens of seconds and was the slowest thing in the
+// whole seed.
+//
+// This does not weaken the guard: an unresolvable host was already treated as
+// "not provably private" and allowed through (the `err != nil` branch below), so
+// a timeout lands in exactly the same place. Anything that genuinely resolves to
+// a private address does so from cache or a local resolver well inside 2s.
+const dnsLookupTimeout = 2 * time.Second
+
 func resolvesToPrivate(host string) bool {
 	if net.ParseIP(host) != nil {
 		return false // literal IPs are handled by validateProbeURL
 	}
-	ips, err := net.LookupIP(host)
+	ctx, cancel := context.WithTimeout(context.Background(), dnsLookupTimeout)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return false
 	}
 	for _, ip := range ips {
-		if !isPublicIP(ip) {
+		if !isPublicIP(ip.IP) {
 			return true
 		}
 	}

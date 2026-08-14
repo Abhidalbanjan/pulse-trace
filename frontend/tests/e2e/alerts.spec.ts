@@ -7,8 +7,15 @@ test.describe('Alerts', () => {
     await expect(page.getByPlaceholder('Filter by service…')).toBeVisible();
     // The list resolves to either alerts (level badges) or the empty state —
     // both prove the screen loaded against the real API without error.
+    //
+    // `visible: true` is load-bearing: the level filter is a <select> whose
+    // <option>CRITICAL</option> also matches this text but is never visible, so
+    // an unfiltered .first() latches onto the dropdown and waits forever.
     await expect(
-      page.getByText(/No alerts match these filters\.|CRITICAL|ERROR|WARNING/).first(),
+      page
+        .getByText(/No alerts match these filters\.|CRITICAL|ERROR|WARNING/)
+        .filter({ visible: true })
+        .first(),
     ).toBeVisible({ timeout: 15000 });
   });
 
@@ -44,8 +51,13 @@ test.describe('Alerts', () => {
     // (either dedup rows with counts, or the empty state) — both prove the
     // group=true path loaded against the real API without error.
     await expect(page.getByRole('button', { name: /Grouped/ })).toHaveAttribute('aria-pressed', 'true');
+    // See the note in the first test: the hidden <option>s in the level filter
+    // match this text too, so the visibility filter is required.
     await expect(
-      page.getByText(/No alerts match these filters\.|×\d+|CRITICAL|ERROR|WARNING/).first(),
+      page
+        .getByText(/No alerts match these filters\.|×\d+|CRITICAL|ERROR|WARNING/)
+        .filter({ visible: true })
+        .first(),
     ).toBeVisible({ timeout: 15000 });
   });
 });

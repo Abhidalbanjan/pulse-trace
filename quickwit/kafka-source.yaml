@@ -11,6 +11,11 @@ params:
     bootstrap.servers: kafka:29092
     client.id: quickwit-consumer
     enable.auto.commit: true
+    # Defensive: librdkafka defaults to `latest`, so a source created after
+    # messages were already produced would silently skip everything published
+    # before it existed. `earliest` means a late or re-created source still
+    # indexes the backlog instead of starting blind.
+    auto.offset.reset: earliest
 transform:
   # Use Vector Remap Language (VRL) to parse both JSON and unstructured Syslog via Grok.
   # Quickwit 0.8's source transform schema names this field `script`, not `vrl` -

@@ -21,8 +21,16 @@ test.describe('Continuous Profiler', () => {
     await expect(page.getByText('Loading profile…')).toHaveCount(0, { timeout: 10000 });
     // The flame view resolves to either a searchable graph or an explicit empty
     // state — both prove the flame payload path is wired, not blank.
+    // Three states are legitimate, and the third was missing: when the service
+    // has reported nothing to Pyroscope, ContinuousProfilerView short-circuits
+    // on `functions.length === 0` and renders its own "No profile samples"
+    // message — FlameGraph never mounts, so neither of the other two branches
+    // can appear.
     await expect(
-      page.getByLabel('Search flame graph').or(page.getByText(/No flame data in this window/i)),
+      page
+        .getByLabel('Search flame graph')
+        .or(page.getByText(/No flame data in this window/i))
+        .or(page.getByText(/No profile samples in this window yet/i)),
     ).toBeVisible({ timeout: 10000 });
   });
 

@@ -2,6 +2,7 @@
 
 import React from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { usePathname } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { useTheme } from '@/context/ThemeContext';
@@ -68,7 +69,7 @@ export function GlobalSidebar({ isCollapsed, onToggle }: { isCollapsed?: boolean
           display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
           overflow: 'hidden',
         }}>
-          <img src="/logo.png" alt="" style={{ width: '20px', height: '20px', objectFit: 'contain' }} />
+          <Image src="/logo.png" alt="" width={20} height={20} style={{ objectFit: 'contain' }} />
         </div>
         {!isCollapsed && (
           <span style={{ fontSize: '17px', fontWeight: 700, letterSpacing: '-0.01em', color: t.text1, whiteSpace: 'nowrap' }}>

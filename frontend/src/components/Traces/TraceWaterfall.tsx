@@ -109,7 +109,7 @@ export function TraceWaterfall({ traceId }: TraceWaterfallProps) {
         <h3 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '24px', color: t.text1 }}>Trace Timeline: {traceId.substring(0, 8)}</h3>
 
         <div style={{ position: 'relative', width: '100%' }}>
-          {traceData.spans.map((span: Span, index: number) => {
+          {traceData.spans.map((span: Span) => {
             const serviceName = traceData.processes[span.processID]?.serviceName || 'Unknown';
             const offsetPercentage = ((span.startTime - minStartTime) / totalDuration) * 100;
             const widthPercentage = Math.max((span.duration / totalDuration) * 100, 0.5); // Min width 0.5% for visibility

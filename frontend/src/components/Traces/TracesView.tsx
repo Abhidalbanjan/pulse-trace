@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { fetchWithAuth } from '@/lib/api';
 import { TraceWaterfall } from './TraceWaterfall';
@@ -97,15 +97,30 @@ export function TracesView() {
           setTraces([]);
         }
       })
-      .catch(err => setError("Failed to load traces. Ensure Jaeger is running and generating traffic."))
+      .catch(() => setError("Failed to load traces. Ensure Jaeger is running and generating traffic."))
       .finally(() => setLoading(false));
   };
 
+  // Keep the polling interval calling the *current* fetchTraces without making
+  // it an effect dependency.
+  //
+  // The effect intentionally re-runs only on selectedService — adding tagFilter
+  // would refetch on every keystroke, and the filter is meant to apply on Enter.
+  // But capturing fetchTraces directly meant the 10s interval kept invoking the
+  // closure from when the effect last ran, so after applying a tag filter the
+  // next poll silently replaced the filtered results with unfiltered ones. A ref
+  // keeps the deps honest and the polling correct.
+  const fetchTracesRef = useRef(fetchTraces);
+  // Assigned in an effect, not during render — writing to a ref while rendering
+  // is disallowed (react-hooks/refs) and unsafe under concurrent rendering.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot fetch/hydration on mount; effect is the right place to sync from the API/localStorage
-    fetchTraces();
+    fetchTracesRef.current = fetchTraces;
+  });
+
+  useEffect(() => {
+    fetchTracesRef.current();
     // Refresh every 10s
-    const interval = setInterval(fetchTraces, 10000);
+    const interval = setInterval(() => fetchTracesRef.current(), 10000);
     return () => clearInterval(interval);
   }, [selectedService]);
 

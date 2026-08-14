@@ -54,7 +54,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.26.6"
           cache-dependency-path: ${{ matrix.service }}/go.sum
 
       - name: Download dependencies
@@ -133,7 +133,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.26.6"
           cache-dependency-path: ${{ matrix.service }}/go.sum
 
       # govulncheck reports only vulnerabilities the code actually reaches, so a
@@ -210,6 +210,20 @@ jobs:
 
       - name: Cross-tenant isolation test (multi-tenant data boundary)
         run: node scripts/test-tenant-isolation.mjs
+
+      # Without this a failing e2e run gives Playwright output and nothing else —
+      # no way to see that (for example) quickwit-setup could not attach its
+      # Kafka source, or which service was unhealthy. That blind spot cost
+      # several round-trips; the logs are worth the few seconds.
+      - name: Dump container logs (on failure)
+        if: failure()
+        run: |
+          echo '── service states ──'
+          docker compose ps
+          echo '── setup containers ──'
+          docker compose logs kafka-setup quickwit-setup --no-color || true
+          echo '── application services (tail) ──'
+          docker compose logs --tail=120 --no-color gateway log-service correlation-service vector quickwit || true
 
       - name: Upload Playwright artifacts
         if: always()

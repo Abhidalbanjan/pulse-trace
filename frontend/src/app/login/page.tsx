@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from 'react';
+import Image from 'next/image';
 import { useAuth } from '@/context/AuthContext';
 import { useTheme } from '@/context/ThemeContext';
 
@@ -171,7 +172,7 @@ export default function LoginPage() {
         {/* Logo */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '32px' }}>
           <div style={{ width: '40px', height: '40px' }}>
-            <img src="/logo.png" alt="PulseTrace" style={{ width: '100%', height: '100%' }} />
+            <Image src="/logo.png" alt="PulseTrace" width={40} height={40} style={{ width: '100%', height: '100%' }} />
           </div>
           <span style={{ fontSize: '24px', fontWeight: 700, letterSpacing: '-0.02em', color: t.text1 }}>
             Pulse<span style={{ color: t.accent }}>Trace</span>
@@ -258,8 +259,9 @@ export default function LoginPage() {
         <form onSubmit={handleSubmit} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
           {!isLogin && (
             <div>
-              <label style={labelStyle}>Organization name</label>
+              <label htmlFor="org-name" style={labelStyle}>Organization name</label>
               <input
+                id="org-name"
                 type="text"
                 value={orgName}
                 onChange={(e) => setOrgName(e.target.value)}
@@ -271,8 +273,9 @@ export default function LoginPage() {
           )}
 
           <div>
-            <label style={labelStyle}>Email or Username</label>
+            <label htmlFor="login-email" style={labelStyle}>Email or Username</label>
             <input
+              id="login-email"
               type="text"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -283,8 +286,9 @@ export default function LoginPage() {
           </div>
 
           <div>
-            <label style={labelStyle}>Password</label>
+            <label htmlFor="login-password" style={labelStyle}>Password</label>
             <input
+              id="login-password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -296,8 +300,9 @@ export default function LoginPage() {
 
           {!isLogin && (
             <div>
-              <label style={labelStyle}>Confirm Password</label>
+              <label htmlFor="confirm-password" style={labelStyle}>Confirm Password</label>
               <input
+                id="confirm-password"
                 type="password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
@@ -356,6 +361,12 @@ export default function LoginPage() {
             cursor: 'pointer'
           }}
         >
+          {/* eslint-disable-next-line @next/next/no-img-element -- next/image on a
+              third-party host requires adding svgrepo.com to next.config
+              remotePatterns, which lets the optimizer proxy arbitrary images from
+              it. Not worth that surface for a 20px icon. The better fix is
+              vendoring the official Google mark into /public, tracked separately
+              because it carries brand-asset licensing questions. */}
           <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" style={{ width: '20px' }} />
           Continue with Google
         </button>

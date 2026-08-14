@@ -33,7 +33,7 @@ export function GlobalHeader() {
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
         <div style={pillStyle}>
           <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>dns</span>
-          <select style={selectStyle} defaultValue="prod">
+          <select style={selectStyle} defaultValue="prod" aria-label="Global environment">
             <option value="all">All Environments</option>
             <option value="prod">Production</option>
             <option value="staging">Staging</option>
@@ -41,7 +41,7 @@ export function GlobalHeader() {
         </div>
         <div style={pillStyle}>
           <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>schedule</span>
-          <select style={selectStyle} defaultValue="1h">
+          <select style={selectStyle} defaultValue="1h" aria-label="Global time window">
             <option value="15m">Last 15 minutes</option>
             <option value="1h">Last 1 hour</option>
             <option value="24h">Last 24 hours</option>

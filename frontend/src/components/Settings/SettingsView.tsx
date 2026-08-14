@@ -359,6 +359,9 @@ export function SettingsView() {
 
              <div style={{ background: t.dark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)', padding: '24px', borderRadius: '12px', border: '1px solid ' + t.panelBorder }}>
                 <div style={{ fontWeight: 600, marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', color: t.text1 }}>
+                  {/* eslint-disable-next-line @next/next/no-img-element -- see the note in
+                      app/login/page.tsx: optimizing a remote favicon would mean granting
+                      next/image proxy access to google.com. */}
                   <img src="https://www.google.com/favicon.ico" alt="Google" style={{ width: '16px', height: '16px' }} />
                   Google Workspace (OIDC)
                 </div>

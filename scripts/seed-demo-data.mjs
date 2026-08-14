@@ -47,13 +47,31 @@ async function login() {
   return j.token;
 }
 
+// Every seed request is bounded.
+//
+// Registering a synthetic check makes the gateway probe the target URL, and the
+// demo targets are fictional hosts (api.acme.io, gateway.acme.io). Depending on
+// how the network resolves them that probe can hang for a long time or drop the
+// connection — on a CI runner it surfaced as an unhandled `TypeError: fetch
+// failed` roughly 48s in, which aborted the whole seed before catalog and admin
+// were created. A timeout turns "hangs forever" into a reported skip.
+const REQUEST_TIMEOUT_MS = Number(process.env.SEED_REQUEST_TIMEOUT_MS || 15000);
+
 async function authed(token, path, body, method = 'POST') {
-  const res = await fetch(`${GATEWAY}${path}`, {
-    method,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  return res.status;
+  try {
+    const res = await fetch(`${GATEWAY}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    return res.status;
+  } catch (e) {
+    // Report and carry on: a demo seeder must not take the whole suite down
+    // because one optional fixture could not be created.
+    console.log(`    (${method} ${path} failed: ${e.name === 'TimeoutError' ? `no response in ${REQUEST_TIMEOUT_MS}ms` : e.message})`);
+    return 599;
+  }
 }
 
 async function seedLogs() {
@@ -272,17 +290,69 @@ async function seedAdmin(token) {
 async function main() {
   console.log(`Seeding PulseTrace demo data (gateway=${GATEWAY})...`);
   const token = await login();
-  await seedLogs();
-  await seedTraces();
-  await seedMetrics();
-  await seedRUM(token);
-  await seedDeployments(token);
-  await seedSynthetics(token);
-  await seedCatalog(token);
-  await seedAdmin(token);
-  console.log('Waiting 20s for async pipelines (Kafka->Quickwit index, alert->incident, synthetics worker)...');
-  await new Promise((r) => setTimeout(r, 20000));
+  // Each section is independent — one failing must not deprive every later
+  // section (and therefore whole swathes of the e2e suite) of its fixtures.
+  const sections = [
+    ['logs', () => seedLogs()],
+    ['traces', () => seedTraces()],
+    ['metrics', () => seedMetrics()],
+    ['rum', () => seedRUM(token)],
+    ['deployments', () => seedDeployments(token)],
+    ['synthetics', () => seedSynthetics(token)],
+    ['catalog', () => seedCatalog(token)],
+    ['admin', () => seedAdmin(token)],
+  ];
+  const failed = [];
+  for (const [name, run] of sections) {
+    try {
+      await run();
+    } catch (e) {
+      failed.push(name);
+      console.log(`  ${name}: FAILED — ${e.message}`);
+    }
+  }
+  if (failed.length) {
+    console.log(`WARNING: ${failed.length} seed section(s) failed: ${failed.join(', ')} — specs depending on them will fail.`);
+  }
+
+  await waitForLogsSearchable(token);
   console.log('Seed complete.');
+}
+
+// Wait until the seeded logs are actually *searchable*, not for a fixed guess.
+//
+// Logs travel gateway -> Kafka -> Quickwit, and Quickwit only publishes a split
+// once its commit timeout elapses — which defaults to 60s and is not overridden
+// in quickwit/logs-index.yaml. The previous fixed 20s sleep was therefore
+// shorter than the pipeline's own latency: locally it looked fine because
+// minutes passed before anyone ran the suite, but in CI the tests start
+// immediately and the Log Explorer specs failed against an empty index.
+//
+// Polling the real query path is both faster in the common case and correct in
+// the slow one. If it never becomes searchable we warn rather than fail — the
+// suite should report which specs broke, not die here with less context.
+async function waitForLogsSearchable(token, timeoutMs = 120000) {
+  const started = Date.now();
+  process.stdout.write('Waiting for seeded logs to become searchable');
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const res = await fetch(`${GATEWAY}/api/v1/logs?since=1h&limit=1`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const body = await res.json();
+        if ((body.data || []).length > 0) {
+          console.log(` ok (${Math.round((Date.now() - started) / 1000)}s)`);
+          return;
+        }
+      }
+    } catch {
+      // gateway momentarily unavailable — keep polling
+    }
+    process.stdout.write('.');
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  console.log(`\nWARNING: logs still not searchable after ${timeoutMs / 1000}s — log-dependent specs will fail.`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

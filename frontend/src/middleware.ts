@@ -4,9 +4,15 @@ import type { NextRequest } from 'next/server';
 export function middleware(request: NextRequest) {
   // Public paths that don't require authentication
   const publicPaths = [
-    '/login', 
-    '/register', 
-    '/api/v1/auth/login', 
+    '/login',
+    '/register',
+    // A password reset is by definition performed while signed out — the user
+    // arrives from an emailed link. Without these the middleware bounced them
+    // to /login and the entire forgot-password flow (F18) was impossible to
+    // complete. '/api/v1/auth/password' covers both /forgot and /reset.
+    '/reset-password',
+    '/api/v1/auth/password',
+    '/api/v1/auth/login',
     '/api/v1/auth/register',
     '/api/v1/auth/sso/login',
     '/api/v1/auth/sso/callback'

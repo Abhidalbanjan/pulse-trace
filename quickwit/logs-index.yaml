@@ -17,6 +17,17 @@ doc_mapping:
     - name: message
       type: text
       tokenizer: default
+      # Phrase queries need token positions. Quickwit defaults `record` to
+      # `basic`, which stores no positions, so log-service's phrase clause
+      # (`message:"connection pool"`, built by buildLogQuery) silently matched
+      # nothing: single words worked, any multi-word search returned zero hits.
+      # That is the worst possible failure mode for log search during an
+      # incident — an empty result set reads as "no such logs", not "your query
+      # could never match".
+      #
+      # Costs somewhat more index space. Existing indexes must be recreated to
+      # pick this up; splits written under `basic` keep the old behaviour.
+      record: position
     - name: trace_id
       type: text
       tokenizer: raw

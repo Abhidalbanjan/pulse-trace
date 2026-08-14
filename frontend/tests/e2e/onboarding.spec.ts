@@ -15,8 +15,13 @@ test.describe('Onboarding wizard', () => {
     // Real OpenTelemetry setup, not a fictional vendor agent: the Collector helm
     // install, the standard OTLP exporter env, and a runnable curl test event.
     await expect(page.locator('pre', { hasText: 'helm install otel-collector' })).toBeVisible();
-    await expect(page.locator('pre', { hasText: 'OTEL_EXPORTER_OTLP_ENDPOINT' })).toBeVisible();
-    await expect(page.locator('pre', { hasText: 'curl -X POST' })).toBeVisible();
+    // The Kubernetes path points the Collector at PulseTrace through helm
+    // --set values, not the OTEL_EXPORTER_OTLP_ENDPOINT env var (that is the
+    // Docker path). Assert what this platform actually renders.
+    await expect(
+      page.locator('pre', { hasText: 'config.exporters.otlphttp.endpoint' }),
+    ).toBeVisible();
+    await expect(page.locator('pre', { hasText: 'curl -X POST' }).first()).toBeVisible();
   });
 
   test('offers real OTel snippets across languages (Node.js)', async ({ page }) => {
@@ -27,7 +32,8 @@ test.describe('Onboarding wizard', () => {
     await expect(page.getByText("You're all set!")).toBeVisible({ timeout: 10000 });
     // The Node path uses the OTel auto-instrumentation register hook + a Bearer
     // header carrying the minted key.
-    await expect(page.locator('pre', { hasText: 'auto-instrumentations-node' })).toBeVisible();
-    await expect(page.locator('pre', { hasText: 'Authorization=Bearer' })).toBeVisible();
+    // Both the install and run snippets mention the package, so scope to the first.
+    await expect(page.locator('pre', { hasText: 'auto-instrumentations-node' }).first()).toBeVisible();
+    await expect(page.locator('pre', { hasText: 'Authorization=Bearer' }).first()).toBeVisible();
   });
 });

@@ -415,6 +415,11 @@ export function ServiceCatalog() {
                         return (
                           <button
                             onClick={() => openMetaModal(node)}
+                            // The button wraps visible badges, and text content beats
+                            // title in accessible-name computation — so without this
+                            // it announced as "Production Tier-1" with no hint that
+                            // it opens an editor.
+                            aria-label="Edit lifecycle, tier & links"
                             title="Edit lifecycle, tier & links"
                             style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
                           >

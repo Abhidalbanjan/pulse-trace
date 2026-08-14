@@ -221,7 +221,12 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
     ports:
-      - "3000:3000"
+      # Host 3001, not 3000: the PulseTrace frontend owns :3000 (Next.js default,
+      # and playwright.config.ts baseURL). When Grafana held :3000 it silently
+      # won the race in CI — `npm run start` died with EADDRINUSE and Grafana
+      # answered the e2e health check instead, so the whole Playwright suite
+      # drove Grafana rather than PulseTrace.
+      - "3001:3000"
     depends_on:
       - prometheus
       - jaeger
@@ -611,6 +616,29 @@ services:
       start_period: 30s
 
   # ── Quickwit Index & Source Bootstrap ────────────────────────────────────────
+  # Creates the topics up front so they exist before anything needs them.
+  #
+  # Kafka has auto-create enabled, but a topic only springs into existence on
+  # first *produce* — which is long after quickwit-setup runs. Quickwit refuses
+  # to attach a source to a topic with no partitions, so on a fresh deployment
+  # the log source was never created and log search was permanently empty. The
+  # stack only appeared to work on hosts where an earlier run had already
+  # created the topic.
+  kafka-setup:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: pulsetrace-kafka-setup
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      echo 'Creating Kafka topics...';
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic logs --partitions 10 --replication-factor 1;
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic alerts --partitions 10 --replication-factor 1;
+      echo 'Kafka topics ready.';
+      "
+
   quickwit-setup:
     image: quickwit/quickwit:0.8.1
     container_name: pulsetrace-quickwit-setup
@@ -626,12 +654,22 @@ services:
     depends_on:
       quickwit:
         condition: service_healthy
+      kafka-setup:
+        condition: service_completed_successfully
     entrypoint: >
       /bin/sh -c "
       echo 'Creating Quickwit indexes...';
       quickwit index create --index-config /config/logs-index.yaml --endpoint http://quickwit:7280 || true;
       echo 'Attaching Kafka source for logs...';
-      quickwit source create --index pulsetrace-logs --source-config /config/kafka-source.yaml --endpoint http://quickwit:7280 || true;
+      if ! quickwit source create --index pulsetrace-logs --source-config /config/kafka-source.yaml --endpoint http://quickwit:7280; then
+        echo 'source create returned non-zero — checking whether it already exists';
+        if quickwit source list --index pulsetrace-logs --endpoint http://quickwit:7280 | grep -q kafka-logs-source; then
+          echo 'Kafka source already present, continuing.';
+        else
+          echo 'FATAL: Kafka source could not be created — every log search would return empty.';
+          exit 1;
+        fi;
+      fi;
       echo 'Quickwit setup complete. Traces use native OTLP ingestion (otel-traces-v0_7 index, auto-created by the collector).';
       "
 

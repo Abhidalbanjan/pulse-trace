@@ -48,6 +48,23 @@ PT_GATEWAY="$PT_GATEWAY" OO_URL="$OO_URL" \
 BENCH_CPUS="${BENCH_CPUS:-4}" BENCH_MEMORY="${BENCH_MEMORY:-8g}" \
   node "$ROOT/scripts/bench/collect.mjs" > "$ROOT/scripts/bench/.last-run.json"
 
+# Merge the footprint delta if the caller captured before/after snapshots around
+# the load. Absent snapshots leave the section empty rather than guessed.
+if [ -n "${FOOTPRINT_BEFORE:-}" ] && [ -f "${FOOTPRINT_BEFORE}" ]; then
+  echo "==> Sampling footprint"
+  "$ROOT/scripts/bench/footprint.sh" snapshot > "$ROOT/scripts/bench/.footprint-after.json"
+  INGESTED_BYTES="${INGESTED_BYTES:-0}" \
+    "$ROOT/scripts/bench/footprint.sh" delta "$FOOTPRINT_BEFORE" "$ROOT/scripts/bench/.footprint-after.json" \
+    > "$ROOT/scripts/bench/.footprint.json"
+  python3 - "$ROOT/scripts/bench/.last-run.json" "$ROOT/scripts/bench/.footprint.json" <<'PY'
+import json, sys
+run_path, fp_path = sys.argv[1], sys.argv[2]
+run = json.load(open(run_path))
+run["footprint"] = json.load(open(fp_path))
+json.dump(run, open(run_path, "w"), indent=2)
+PY
+fi
+
 echo "==> Rendering BENCHMARK.md"
 node "$ROOT/scripts/bench/write-report.mjs" "$ROOT/scripts/bench/.last-run.json" "$ROOT/BENCHMARK.md"
 

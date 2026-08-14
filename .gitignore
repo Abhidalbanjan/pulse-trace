@@ -63,3 +63,4 @@ scripts/bench/corpus/corpus
 
 # Bench run artifact (regenerated every run)
 scripts/bench/.last-run.json
+scripts/bench/.footprint*.json

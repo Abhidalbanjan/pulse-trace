@@ -1,0 +1,22 @@
+{
+  "id": "high_cardinality_groupby",
+  "name": "High-cardinality group-by",
+  "why": "Top customers by error volume across 50k distinct customer_id values. This is where a columnar store and an inverted index diverge most, and the dimension vendor benchmarks usually omit.",
+  "pulsetrace": {
+    "unsupported": "Same ceiling as the full-scan aggregation: no GROUP BY, so a 50k-cardinality ranking is not expressible against the log API."
+  },
+  "openobserve": {
+    "method": "POST",
+    "path": "/api/default/_search",
+    "auth": "basic",
+    "body": {
+      "query": {
+        "sql": "SELECT customer_id, count(*) AS n FROM bench_logs WHERE level = 'ERROR' GROUP BY customer_id ORDER BY n DESC LIMIT 20",
+        "from": 0,
+        "size": 20,
+        "start_time": "${START_US}",
+        "end_time": "${END_US}"
+      }
+    }
+  }
+}

@@ -75,6 +75,14 @@ services:
       ZO_S3_BUCKET_NAME: openobserve
       ZO_S3_FEATURE_FORCE_PATH_STYLE: "true"
       ZO_TELEMETRY_ENABLED: "false"
+      # The corpus is anchored to a fixed epoch so it stays byte-reproducible,
+      # which means we replay historical data. OpenObserve discards anything
+      # older than 5 hours by default and — importantly — does so with HTTP 200
+      # and a per-record error in the body, so without this the benchmark
+      # silently queries an empty database. Widening the window is a documented
+      # config knob that affects neither query nor storage behaviour, so it
+      # equalises the two sides rather than advantaging either.
+      ZO_INGEST_ALLOWED_UPTO: "87600"
     ports:
       - "5080:5080"
     volumes:

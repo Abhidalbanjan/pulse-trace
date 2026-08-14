@@ -27,12 +27,18 @@ set -euo pipefail
 TARGET=""
 CORPUS=""
 BATCH="${BATCH:-500}"
+# Both targets must receive the same timestamps, or they hold different data and
+# no query comparison is like-for-like. The corpus is anchored to a fixed epoch
+# for reproducibility, so loaders shift it into a recent window — the same
+# window on both sides. Defaults to now; pass the SAME value to both loads.
+TIME_ANCHOR="${TIME_ANCHOR:-$(date +%s)}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --target) TARGET="$2"; shift 2 ;;
     --corpus) CORPUS="$2"; shift 2 ;;
     --batch)  BATCH="$2";  shift 2 ;;
+    --time-anchor) TIME_ANCHOR="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -50,7 +56,7 @@ OO_PASS="${OO_PASS:-benchpassword123}"
 
 corpus_bytes=$(wc -c < "$CORPUS" | tr -d ' ')
 corpus_lines=$(wc -l < "$CORPUS" | tr -d ' ')
-echo "corpus: $CORPUS  ${corpus_bytes} bytes  ${corpus_lines} records  batch=${BATCH}"
+echo "corpus: $CORPUS  ${corpus_bytes} bytes  ${corpus_lines} records  batch=${BATCH}  time-anchor=${TIME_ANCHOR}"
 
 # Fail loudly on a corpus mismatch rather than silently benchmarking a different
 # dataset than the one recorded alongside the results.
@@ -77,9 +83,32 @@ case "$TARGET" in
 
     # Only log records go down the native log path; traces and metrics have
     # their own endpoints and are measured separately by the query suite.
-    python3 - "$CORPUS" "$BATCH" "$PT_GATEWAY" "$token" <<'PY'
+    python3 - "$CORPUS" "$BATCH" "$PT_GATEWAY" "$token" "$TIME_ANCHOR" <<'PY'
 import json, sys, urllib.request
+from datetime import datetime, timezone
 corpus, batch, gateway, token = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+anchor = int(sys.argv[5])
+def compute_shift(path, anchor):
+    """Seconds to add to each corpus timestamp so the newest record lands on the
+    anchor. Two-pass: the corpus is a fixed epoch (for byte-reproducibility), so
+    without this the data would be months old — OpenObserve refuses anything
+    older than its ingest window, and PulseTrace would stamp `now` instead,
+    leaving the two sides holding different data."""
+    newest = None
+    with open(path) as fh:
+        for line in fh:
+            ts = json.loads(line).get("timestamp")
+            if ts and (newest is None or ts > newest):
+                newest = ts
+    if newest is None:
+        return 0
+    epoch = datetime.fromisoformat(newest.replace("Z", "+00:00")).timestamp()
+    return anchor - epoch
+
+def shifted(ts_str, shift):
+    t = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp() + shift
+    return datetime.fromtimestamp(t, tz=timezone.utc)
+
 sent = failed = 0
 buf = []
 
@@ -100,6 +129,8 @@ def flush():
         failed += len(buf)
     buf = []
 
+shift = compute_shift(corpus, anchor)
+
 with open(corpus) as f:
     for line in f:
         rec = json.loads(line)
@@ -111,24 +142,59 @@ with open(corpus) as f:
             "message": rec["message"],
             "trace_id": rec.get("trace_id", ""),
             "metadata": rec.get("attrs", {}),
+            "timestamp": shifted(rec["timestamp"], shift).isoformat(),
         })
         if len(buf) >= batch:
             flush()
 flush()
 print(f"  sent={sent} failed={failed}")
+# Symmetric guard: an empty load on either side invalidates every later number.
+if sent == 0:
+    print("  FATAL: no records were accepted", file=sys.stderr)
+    sys.exit(1)
 PY
     ;;
 
   openobserve)
-    python3 - "$CORPUS" "$BATCH" "$OO_URL" "$OO_USER" "$OO_PASS" <<'PY'
+    python3 - "$CORPUS" "$BATCH" "$OO_URL" "$OO_USER" "$OO_PASS" "$TIME_ANCHOR" <<'PY'
 import base64, json, sys, urllib.request
+from datetime import datetime, timezone
 corpus, batch, url, user, password = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
+anchor = int(sys.argv[6])
+def compute_shift(path, anchor):
+    """Seconds to add to each corpus timestamp so the newest record lands on the
+    anchor. Two-pass: the corpus is a fixed epoch (for byte-reproducibility), so
+    without this the data would be months old — OpenObserve refuses anything
+    older than its ingest window, and PulseTrace would stamp `now` instead,
+    leaving the two sides holding different data."""
+    newest = None
+    with open(path) as fh:
+        for line in fh:
+            ts = json.loads(line).get("timestamp")
+            if ts and (newest is None or ts > newest):
+                newest = ts
+    if newest is None:
+        return 0
+    epoch = datetime.fromisoformat(newest.replace("Z", "+00:00")).timestamp()
+    return anchor - epoch
+
+def shifted(ts_str, shift):
+    t = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp() + shift
+    return datetime.fromtimestamp(t, tz=timezone.utc)
+
 auth = base64.b64encode(f"{user}:{password}".encode()).decode()
 sent = failed = 0
 buf = []
 
+first_error = None
+
 def flush():
-    global sent, failed, buf
+    # OpenObserve answers 200 even when it discards every record — the outcome
+    # is in the body ({"status":[{"successful":N,"failed":M,"error":"…"}]}).
+    # Trusting the HTTP status here once produced a "sent=19939 failed=0" run
+    # against a database that held zero documents, and every latency measured
+    # off it was an empty-set timing. Parse the body.
+    global sent, failed, buf, first_error
     if not buf:
         return
     body = json.dumps(buf).encode()
@@ -136,13 +202,22 @@ def flush():
         headers={"Content-Type": "application/json", "Authorization": f"Basic {auth}"})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
-            if r.status < 300:
-                sent += len(buf)
-            else:
+            payload = json.loads(r.read().decode() or "{}")
+            statuses = payload.get("status") or []
+            if not statuses:
                 failed += len(buf)
-    except Exception:
+                first_error = first_error or f"unrecognised ingest response: {payload}"
+            for st in statuses:
+                sent += st.get("successful", 0)
+                failed += st.get("failed", 0)
+                if st.get("error") and not first_error:
+                    first_error = st["error"]
+    except Exception as e:
         failed += len(buf)
+        first_error = first_error or str(e)
     buf = []
+
+shift = compute_shift(corpus, anchor)
 
 with open(corpus) as f:
     for line in f:
@@ -150,7 +225,7 @@ with open(corpus) as f:
         if rec.get("signal") != "log":
             continue
         flat = {
-            "_timestamp": rec["timestamp"],
+            "_timestamp": shifted(rec["timestamp"], shift).isoformat(),
             "service": rec["service"],
             "level": rec["level"],
             "message": rec["message"],
@@ -162,6 +237,15 @@ with open(corpus) as f:
             flush()
 flush()
 print(f"  sent={sent} failed={failed}")
+if first_error:
+    print(f"  first error: {first_error}")
+# A load that lands nothing must not look like a successful load, or every
+# latency measured afterwards is an empty-set timing.
+if sent == 0:
+    print("  FATAL: no records were accepted", file=sys.stderr)
+    sys.exit(1)
+if failed:
+    print(f"  WARNING: {failed} records rejected", file=sys.stderr)
 PY
     ;;
 

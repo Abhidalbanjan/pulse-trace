@@ -1,0 +1,174 @@
+// Renders the machine-written results block for BENCHMARK.md.
+//
+// Kept as pure functions with no I/O so the formatting and the percentile maths
+// are unit-testable. This is the code that produces the numbers we publish, so
+// it is the last place to be casual: a percentile off by one index, or a
+// "faster" verdict computed the wrong way round, becomes a claim in a document
+// someone makes a decision from.
+//
+// Deliberate choices:
+//   * Percentiles use nearest-rank on a sorted sample. No interpolation, no
+//     pretending 20 samples support more precision than they do.
+//   * An unsupported query renders as "not expressible" and never as a blank,
+//     a zero, or an omission. A capability gap that quietly disappears from the
+//     table is the most self-serving mistake this file could make.
+//   * Verdicts are only emitted when both sides produced numbers.
+
+export const RESULTS_BEGIN = '<!-- BENCH:BEGIN -->';
+export const RESULTS_END = '<!-- BENCH:END -->';
+
+/** Nearest-rank percentile over an unsorted array of numbers. */
+export function percentile(values, p) {
+  if (!values || values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const rank = Math.ceil((p / 100) * sorted.length);
+  return sorted[Math.min(Math.max(rank, 1), sorted.length) - 1];
+}
+
+export function summarise(samples) {
+  if (!samples || samples.length === 0) return null;
+  return {
+    n: samples.length,
+    p50: percentile(samples, 50),
+    p95: percentile(samples, 95),
+    p99: percentile(samples, 99),
+    min: Math.min(...samples),
+    max: Math.max(...samples),
+  };
+}
+
+function ms(v) {
+  if (v === null || v === undefined) return '—';
+  return v >= 1000 ? `${(v / 1000).toFixed(2)} s` : `${Math.round(v)} ms`;
+}
+
+function bytes(v) {
+  if (v === null || v === undefined) return '—';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let i = 0;
+  let n = v;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return `${n.toFixed(n < 10 && i > 0 ? 2 : 0)} ${units[i]}`;
+}
+
+/**
+ * Ratio verdict for a latency pair. Lower is better, so a ratio < 1 means
+ * PulseTrace won. Returns null when either side has no number — a comparison
+ * against a missing measurement is not a comparison.
+ */
+export function verdict(ptP95, ooP95) {
+  if (ptP95 == null || ooP95 == null) return null;
+  if (ooP95 === 0) return null;
+  const ratio = ptP95 / ooP95;
+  const label =
+    ratio < 0.95 ? 'PulseTrace faster' : ratio > 1.05 ? 'OpenObserve faster' : 'parity';
+  return { ratio, label };
+}
+
+/**
+ * One side's cell. Three outcomes must stay visually distinct, because
+ * collapsing them is how a benchmark flatters its author:
+ *   - not expressible : the product cannot ask this question (a design gap)
+ *   - failed          : it can ask, and the request errored (a defect)
+ *   - measured        : latencies
+ * Rendering a failure as "—" would let a broken feature read as "not measured".
+ */
+function sideCell(side) {
+  if (!side) return '—';
+  if (side.unsupported) return '**not expressible**';
+  if (side.p50 === undefined || side.p50 === null) {
+    return side.errors ? `**failed** (${side.errors}/${side.errors} errored)` : '—';
+  }
+  const base = `${ms(side.p50)} / ${ms(side.p95)}`;
+  // Partial failures still get their numbers, but never silently.
+  return side.errors ? `${base} ⚠ ${side.errors} errored` : base;
+}
+
+export function renderQueryTable(results) {
+  const lines = [
+    '| Query class | PulseTrace p50 / p95 | OpenObserve p50 / p95 | Verdict |',
+    '| --- | --- | --- | --- |',
+  ];
+  for (const r of results) {
+    const pt = r.pulsetrace;
+    const oo = r.openobserve;
+
+    let verdictCell;
+    if (pt?.unsupported) {
+      verdictCell = 'OpenObserve only';
+    } else if (oo?.unsupported) {
+      verdictCell = 'PulseTrace only';
+    } else {
+      const v = verdict(pt?.p95, oo?.p95);
+      verdictCell = v ? `${v.label} (${v.ratio.toFixed(2)}×)` : 'no comparison';
+    }
+    lines.push(`| ${r.name} | ${sideCell(pt)} | ${sideCell(oo)} | ${verdictCell} |`);
+  }
+  return lines.join('\n');
+}
+
+export function renderFootprintTable(f) {
+  const rows = [
+    ['Bytes on disk (after ingest)', bytes(f?.pulsetrace?.diskBytes), bytes(f?.openobserve?.diskBytes)],
+    ['Bytes per GiB ingested', bytes(f?.pulsetrace?.bytesPerGiB), bytes(f?.openobserve?.bytesPerGiB)],
+    ['Containers', f?.pulsetrace?.containers ?? '—', f?.openobserve?.containers ?? '—'],
+    ['Cold start to first query', ms(f?.pulsetrace?.coldStartMs), ms(f?.openobserve?.coldStartMs)],
+    ['Peak RSS (loaded)', bytes(f?.pulsetrace?.peakRssBytes), bytes(f?.openobserve?.peakRssBytes)],
+  ];
+  return [
+    '| Measure | PulseTrace | OpenObserve |',
+    '| --- | --- | --- |',
+    ...rows.map(([k, a, b]) => `| ${k} | ${a} | ${b} |`),
+  ].join('\n');
+}
+
+export function renderResultsBlock(run) {
+  const parts = [
+    RESULTS_BEGIN,
+    '',
+    `_Generated by \`scripts/bench/run-benchmark.sh\` — do not edit by hand._`,
+    '',
+    `- Run: **${run.timestamp ?? 'unknown'}**`,
+    `- Corpus: **${run.corpus?.sizeLabel ?? '—'}**, seed \`${run.corpus?.seed ?? '—'}\`, sha256 \`${(run.corpus?.sha256 ?? '').slice(0, 16)}…\``,
+    `- Iterations per query: **${run.iterations ?? '—'}**`,
+    `- Resource cap (both sides): **${run.resourceCap ?? '—'}**`,
+    `- OpenObserve image: \`${run.openobserveImage ?? '—'}\``,
+    '',
+    '### Query latency',
+    '',
+    renderQueryTable(run.queries ?? []),
+    '',
+    '### Footprint',
+    '',
+    renderFootprintTable(run.footprint ?? {}),
+    '',
+  ];
+
+  const gaps = (run.queries ?? []).filter((q) => q.pulsetrace?.unsupported);
+  if (gaps.length) {
+    parts.push(
+      '### Capability gaps',
+      '',
+      `${gaps.length} of ${run.queries.length} query classes cannot be expressed against PulseTrace at all:`,
+      '',
+      ...gaps.map((g) => `- **${g.name}** — ${g.pulsetrace.unsupported}`),
+      '',
+    );
+  }
+
+  parts.push(RESULTS_END);
+  return parts.join('\n');
+}
+
+/** Splices a freshly rendered block into an existing document, preserving prose. */
+export function spliceResults(doc, block) {
+  const start = doc.indexOf(RESULTS_BEGIN);
+  const end = doc.indexOf(RESULTS_END);
+  if (start === -1 || end === -1) {
+    return `${doc.trimEnd()}\n\n${block}\n`;
+  }
+  return doc.slice(0, start) + block + doc.slice(end + RESULTS_END.length);
+}

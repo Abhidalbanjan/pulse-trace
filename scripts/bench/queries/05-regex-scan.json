@@ -1,0 +1,24 @@
+{
+  "id": "regex_scan",
+  "name": "Regex scan",
+  "why": "A regex over the message field. Defeats term indexes on both sides, so it measures the decompress-and-match path \u2014 the query class that most often surprises people on their bill.",
+  "pulsetrace": {
+    "method": "GET",
+    "path": "/api/v1/logs?regex=duration_ms%3D%5B0-9%5D%7B4%7D&since=48h&limit=50",
+    "auth": "bearer"
+  },
+  "openobserve": {
+    "method": "POST",
+    "path": "/api/default/_search",
+    "auth": "basic",
+    "body": {
+      "query": {
+        "sql": "SELECT * FROM bench_logs WHERE re_match(message, 'duration_ms=[0-9]{4}') LIMIT 50",
+        "from": 0,
+        "size": 50,
+        "start_time": "${START_US}",
+        "end_time": "${END_US}"
+      }
+    }
+  }
+}

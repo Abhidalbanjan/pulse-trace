@@ -60,3 +60,6 @@ docker_related_config.xml
 # Compiled bench tool (the binary is named after its directory)
 /corpus
 scripts/bench/corpus/corpus
+
+# Bench run artifact (regenerated every run)
+scripts/bench/.last-run.json

@@ -15,7 +15,12 @@ test.describe('Settings', () => {
     // Scope to the roles table row, not page-wide: the sidebar footer also
     // renders the current user's role ("admin"), which would otherwise collide.
     await expect(page.locator('table tbody tr', { hasText: 'admin' }).first()).toBeVisible({ timeout: 10000 });
-    await expect(page.getByText('support')).toBeVisible();
+    // Exact cell match: the seeded role's own description begins "Support
+    // engineers triaging…", so a substring match hits both the name and the
+    // description cell.
+    await expect(
+      page.getByRole('cell', { name: 'support', exact: true }).first(),
+    ).toBeVisible();
   });
 
   test('Policies tab lists seeded ABAC policies', async ({ page }) => {

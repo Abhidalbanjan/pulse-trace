@@ -336,6 +336,10 @@ export function SyntheticsView() {
                         <td style={{ padding: '16px', fontSize: '13.5px' }}>
                           <button
                             onClick={() => toggleUptime(r)}
+                            // Without an explicit name this announces as just the
+                            // uptime percentage ("99.98%"), since text content takes
+                            // precedence over title.
+                            aria-label="Show the 24h availability timeline"
                             title="Show the 24h availability timeline"
                             style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, display: 'inline-flex', alignItems: 'center', gap: '6px', color: r.uptime_percent >= 99.9 ? t.green : t.red, fontSize: '13.5px', fontWeight: 600 }}
                           >

@@ -32,7 +32,9 @@ test.describe('Settings', () => {
     // Fill a guided clause: role is viewer. The builder generates the expr-lang
     // and the backend /validate endpoint confirms it compiles.
     await page.getByLabel('Value').first().fill('viewer');
-    await expect(page.getByText('subject.role == "viewer"')).toBeVisible();
+    // Exact: seeded policy rows render the same expression plus `&& action !=
+    // "read"`, so a substring match also hits those table cells.
+    await expect(page.getByText('subject.role == "viewer"', { exact: true })).toBeVisible();
     await expect(page.getByText('✓ Valid')).toBeVisible({ timeout: 10000 });
   });
 
@@ -51,8 +53,14 @@ test.describe('Settings', () => {
     await expect(page.getByRole('heading', { name: 'Usage & Quota' })).toBeVisible({ timeout: 10000 });
     // Resolves to a real state: per-signal usage cards (Logs/Traces/…) or an
     // explicit empty state — both prove /api/v1/usage/series is wired.
+    // Case-insensitive: the cards render the raw signal id ("logs", "traces")
+    // and only *look* capitalised via CSS text-transform, which changes
+    // rendering but not the DOM text getByText matches against.
     await expect(
-      page.locator('main').getByText(/Logs|Traces|No usage recorded this period yet/).first(),
+      page
+        .locator('main')
+        .getByText(/logs|traces|no usage recorded this period yet/i)
+        .first(),
     ).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading usage…')).toHaveCount(0, { timeout: 10000 });
   });
@@ -139,7 +147,9 @@ test.describe('Settings', () => {
     await page.getByRole('button', { name: 'Data & Privacy' }).click();
     await expect(page.getByRole('heading', { name: 'Data & Privacy' })).toBeVisible();
     await expect(page.getByText('Purge telemetry data')).toBeVisible();
-    await expect(page.getByText('Close account')).toBeVisible();
+    // Exact: the section heading is "Close account" and its trigger is
+    // "Close account…", so a substring match hits both.
+    await expect(page.getByText('Close account', { exact: true })).toBeVisible();
 
     // Open the purge confirm — but never actually confirm (that would wipe the
     // shared seeded tenant). The confirm button stays disabled until an id is

@@ -25,13 +25,17 @@ test.describe('Error Tracking', () => {
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
 
     const firstRow = page.locator('table tbody tr').first();
-    // Open the inline assignee editor, type an owner, commit with Enter.
-    await firstRow.getByRole('button', { name: '+ Assign' }).click();
+    // Idempotent: this test assigns an owner, so on any re-run against the same
+    // data the trigger reads as the existing assignee rather than "+ Assign"
+    // (the cell renders `{g.assignee || '+ Assign'}`). Its title is stable in
+    // both states, so key off that and use a fresh owner each run.
+    const owner = `oncall-${Date.now().toString().slice(-6)}`;
+    await firstRow.getByTitle('Assign an owner').click();
     const input = firstRow.getByLabel('Assignee');
-    await input.fill('oncall-ana');
+    await input.fill(owner);
     await input.press('Enter');
     // The PATCH round-trips and the refetched list shows the owner on that group.
-    await expect(page.getByRole('button', { name: 'oncall-ana' }).first()).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('button', { name: owner }).first()).toBeVisible({ timeout: 10000 });
   });
 
   test('snooze control is available on open groups', async ({ page }) => {

@@ -17,8 +17,14 @@ test.describe('Incidents', () => {
     await page.goto('/incidents');
     await expect(page.getByText('AI Root Cause Analysis')).toBeVisible({ timeout: 15000 });
     await page.getByRole('button', { name: 'Postmortem' }).click();
-    // Generate (LLM when configured, deterministic template otherwise — always works).
-    await page.getByRole('button', { name: /Generate postmortem/i }).click();
+    // Generate (LLM when configured, deterministic template otherwise — always
+    // works). Idempotent: once a draft exists the panel swaps the trigger to
+    // "Regenerate", so a re-run against the same incident must accept either.
+    await page
+      .getByRole('button', { name: /Generate postmortem/i })
+      .or(page.getByRole('button', { name: 'Regenerate' }))
+      .first()
+      .click();
     // The drafted document carries the structured sections.
     await expect(page.getByRole('heading', { name: 'Summary' })).toBeVisible({ timeout: 20000 });
     await expect(page.getByRole('heading', { name: 'Action Items' })).toBeVisible();

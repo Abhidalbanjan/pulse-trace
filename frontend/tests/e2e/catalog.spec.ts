@@ -27,8 +27,10 @@ test.describe('Service Catalog', () => {
     await row.getByRole('button', { name: /Edit lifecycle, tier & links/ }).click();
     await expect(page.getByRole('heading', { name: 'Service Metadata' })).toBeVisible();
 
-    await page.getByLabel('Lifecycle').selectOption('production');
-    await page.getByLabel('Tier').selectOption('tier-1');
+    // Exact: every row's edit button is labelled "Edit lifecycle, tier & links",
+    // which substring-matches both "Lifecycle" and "Tier".
+    await page.getByLabel('Lifecycle', { exact: true }).selectOption('production');
+    await page.getByLabel('Tier', { exact: true }).selectOption('tier-1');
     await page.getByRole('button', { name: 'Save Metadata' }).click();
 
     // Modal closes and the row now reflects the production lifecycle badge.

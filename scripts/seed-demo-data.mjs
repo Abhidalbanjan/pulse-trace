@@ -47,13 +47,31 @@ async function login() {
   return j.token;
 }
 
+// Every seed request is bounded.
+//
+// Registering a synthetic check makes the gateway probe the target URL, and the
+// demo targets are fictional hosts (api.acme.io, gateway.acme.io). Depending on
+// how the network resolves them that probe can hang for a long time or drop the
+// connection — on a CI runner it surfaced as an unhandled `TypeError: fetch
+// failed` roughly 48s in, which aborted the whole seed before catalog and admin
+// were created. A timeout turns "hangs forever" into a reported skip.
+const REQUEST_TIMEOUT_MS = Number(process.env.SEED_REQUEST_TIMEOUT_MS || 15000);
+
 async function authed(token, path, body, method = 'POST') {
-  const res = await fetch(`${GATEWAY}${path}`, {
-    method,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  return res.status;
+  try {
+    const res = await fetch(`${GATEWAY}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    return res.status;
+  } catch (e) {
+    // Report and carry on: a demo seeder must not take the whole suite down
+    // because one optional fixture could not be created.
+    console.log(`    (${method} ${path} failed: ${e.name === 'TimeoutError' ? `no response in ${REQUEST_TIMEOUT_MS}ms` : e.message})`);
+    return 599;
+  }
 }
 
 async function seedLogs() {
@@ -272,14 +290,31 @@ async function seedAdmin(token) {
 async function main() {
   console.log(`Seeding PulseTrace demo data (gateway=${GATEWAY})...`);
   const token = await login();
-  await seedLogs();
-  await seedTraces();
-  await seedMetrics();
-  await seedRUM(token);
-  await seedDeployments(token);
-  await seedSynthetics(token);
-  await seedCatalog(token);
-  await seedAdmin(token);
+  // Each section is independent — one failing must not deprive every later
+  // section (and therefore whole swathes of the e2e suite) of its fixtures.
+  const sections = [
+    ['logs', () => seedLogs()],
+    ['traces', () => seedTraces()],
+    ['metrics', () => seedMetrics()],
+    ['rum', () => seedRUM(token)],
+    ['deployments', () => seedDeployments(token)],
+    ['synthetics', () => seedSynthetics(token)],
+    ['catalog', () => seedCatalog(token)],
+    ['admin', () => seedAdmin(token)],
+  ];
+  const failed = [];
+  for (const [name, run] of sections) {
+    try {
+      await run();
+    } catch (e) {
+      failed.push(name);
+      console.log(`  ${name}: FAILED — ${e.message}`);
+    }
+  }
+  if (failed.length) {
+    console.log(`WARNING: ${failed.length} seed section(s) failed: ${failed.join(', ')} — specs depending on them will fail.`);
+  }
+
   await waitForLogsSearchable(token);
   console.log('Seed complete.');
 }

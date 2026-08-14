@@ -157,9 +157,20 @@ func (h *SyntheticsHandler) initPostgresTable() {
 	if _, err := h.DB.Exec("ALTER TABLE synthetic_targets DROP CONSTRAINT IF EXISTS synthetic_targets_url_key"); err != nil {
 		log.Printf("[SyntheticsHandler] WARNING: could not drop legacy UNIQUE(url): %v", err)
 	}
+	// The existence check must be scoped to *this* table in the *current* schema.
+	// A bare `WHERE conname = …` matches the name anywhere in the database, so a
+	// same-named constraint in another schema would make this silently skip —
+	// leaving the table with the legacy constraint dropped and no replacement,
+	// which is strictly worse than not having run at all.
 	if _, err := h.DB.Exec(`DO $$ BEGIN
 		IF NOT EXISTS (
-			SELECT 1 FROM pg_constraint WHERE conname = 'synthetic_targets_tenant_id_url_key'
+			SELECT 1
+			FROM pg_constraint c
+			JOIN pg_class t ON t.oid = c.conrelid
+			JOIN pg_namespace n ON n.oid = t.relnamespace
+			WHERE c.conname = 'synthetic_targets_tenant_id_url_key'
+			  AND t.relname = 'synthetic_targets'
+			  AND n.nspname = current_schema()
 		) THEN
 			ALTER TABLE synthetic_targets
 				ADD CONSTRAINT synthetic_targets_tenant_id_url_key UNIQUE (tenant_id, url);

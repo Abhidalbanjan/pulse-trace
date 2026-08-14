@@ -23,9 +23,24 @@ for i in $(seq 1 60); do
 done
 
 echo "==> Waiting for frontend ($FRONTEND_URL)"
+# Identity-checked, not just reachability. A bare `curl -sf` here is a false
+# positive waiting to happen: any process holding the port satisfies it. That
+# is exactly how this suite once spent a full run driving Grafana — it held
+# :3000, `npm run start` died with EADDRINUSE, and the health check passed
+# anyway. Assert the response is actually PulseTrace's app shell.
 for i in $(seq 1 60); do
-  if curl -sf "$FRONTEND_URL" >/dev/null 2>&1; then echo "    frontend up"; break; fi
-  [ "$i" = 60 ] && { echo "    ERROR: frontend never became reachable"; exit 1; }
+  body=$(curl -sfL "$FRONTEND_URL/login" 2>/dev/null || true)
+  if printf '%s' "$body" | grep -qi "pulsetrace"; then echo "    frontend up"; break; fi
+  if [ -n "$body" ] && printf '%s' "$body" | grep -qi "grafana"; then
+    echo "    ERROR: $FRONTEND_URL is served by Grafana, not PulseTrace."
+    echo "           The frontend almost certainly failed to bind (EADDRINUSE)."
+    echo "           Grafana must not publish on the frontend's port."
+    exit 1
+  fi
+  [ "$i" = 60 ] && {
+    echo "    ERROR: frontend never served a recognisable PulseTrace page"
+    exit 1
+  }
   sleep 2
 done
 

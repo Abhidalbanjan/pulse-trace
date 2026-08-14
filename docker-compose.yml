@@ -221,7 +221,12 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
     ports:
-      - "3000:3000"
+      # Host 3001, not 3000: the PulseTrace frontend owns :3000 (Next.js default,
+      # and playwright.config.ts baseURL). When Grafana held :3000 it silently
+      # won the race in CI — `npm run start` died with EADDRINUSE and Grafana
+      # answered the e2e health check instead, so the whole Playwright suite
+      # drove Grafana rather than PulseTrace.
+      - "3001:3000"
     depends_on:
       - prometheus
       - jaeger

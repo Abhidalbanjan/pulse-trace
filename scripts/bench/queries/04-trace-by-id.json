@@ -1,0 +1,25 @@
+{
+  "id": "trace_by_id",
+  "name": "Trace by ID",
+  "why": "Point lookup of one trace. Pure index seek \u2014 should be fast on both, and a slow result here indicates a missing or unused index rather than a scan cost.",
+  "pulsetrace": {
+    "method": "GET",
+    "path": "/api/v1/logs?trace_id=${TRACE_ID}&since=48h&limit=50",
+    "auth": "bearer",
+    "note": "Resolved against the log store: the corpus stamps trace_id on log records, so both sides answer the same question over the same data."
+  },
+  "openobserve": {
+    "method": "POST",
+    "path": "/api/default/_search",
+    "auth": "basic",
+    "body": {
+      "query": {
+        "sql": "SELECT * FROM bench_logs WHERE trace_id = '${TRACE_ID}' LIMIT 50",
+        "from": 0,
+        "size": 50,
+        "start_time": "${START_US}",
+        "end_time": "${END_US}"
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "id": "needle",
+  "name": "Needle in a haystack",
+  "why": "The single most common on-call action: find one rare string across the whole window. Rewards an inverted index; punishes a full scan.",
+  "pulsetrace": {
+    "method": "GET",
+    "path": "/api/v1/logs?q=bitmap_heap_scan&since=48h&limit=50",
+    "auth": "bearer"
+  },
+  "openobserve": {
+    "method": "POST",
+    "path": "/api/default/_search",
+    "auth": "basic",
+    "body": {
+      "query": {
+        "sql": "SELECT * FROM bench_logs WHERE match_all('bitmap_heap_scan') LIMIT 50",
+        "from": 0,
+        "size": 50,
+        "start_time": "${START_US}",
+        "end_time": "${END_US}"
+      }
+    }
+  }
+}

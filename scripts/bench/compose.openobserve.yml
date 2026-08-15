@@ -1,0 +1,109 @@
+# OpenObserve, configured as closely to PulseTrace's stack as is honest.
+#
+# This exists so BENCHMARK.md compares two systems rather than two accidents of
+# configuration. Notes on the choices, because they decide whether the numbers
+# mean anything:
+#
+#   * Image tag is pinned. A moving `latest` would silently re-baseline every
+#     comparison and make old results unreproducible.
+#   * MinIO backs it, exactly as PulseTrace's cold tier does, so neither side
+#     gets an unfair local-disk advantage on storage measurements.
+#   * CPU/memory limits are declared here and must be kept equal to the limits
+#     the PulseTrace side runs under. Comparing an unconstrained single binary
+#     against a resource-capped 23-container stack would flatter them; comparing
+#     a capped binary against an uncapped stack would flatter us. Neither is
+#     worth publishing.
+#   * Isolated network and its own volumes, so a bench run cannot touch or be
+#     influenced by the dev stack.
+#
+# Bring up:   docker compose -f scripts/bench/compose.openobserve.yml up -d
+# Tear down:  docker compose -f scripts/bench/compose.openobserve.yml down -v
+
+name: pulsetrace-bench-oo
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    container_name: bench-oo-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - oo_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [bench]
+
+  # Creates the bucket OpenObserve expects; without it the first write fails.
+  minio-setup:
+    image: minio/mc:RELEASE.2024-06-12T14-34-03Z
+    container_name: bench-oo-minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/openobserve;
+      echo 'bench: openobserve bucket ready';
+      "
+    networks: [bench]
+
+  openobserve:
+    image: public.ecr.aws/zinclabs/openobserve:v0.14.4
+    container_name: bench-oo
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      ZO_ROOT_USER_EMAIL: bench@pulsetrace.local
+      ZO_ROOT_USER_PASSWORD: benchpassword123
+      ZO_DATA_DIR: /data
+      # Object-store backed, mirroring how PulseTrace tiers to S3/MinIO.
+      ZO_LOCAL_MODE: "true"
+      ZO_LOCAL_MODE_STORAGE: s3
+      ZO_S3_PROVIDER: s3
+      ZO_S3_SERVER_URL: http://minio:9000
+      ZO_S3_REGION_NAME: us-east-1
+      ZO_S3_ACCESS_KEY: minioadmin
+      ZO_S3_SECRET_KEY: minioadmin
+      ZO_S3_BUCKET_NAME: openobserve
+      ZO_S3_FEATURE_FORCE_PATH_STYLE: "true"
+      ZO_TELEMETRY_ENABLED: "false"
+      # The corpus is anchored to a fixed epoch so it stays byte-reproducible,
+      # which means we replay historical data. OpenObserve discards anything
+      # older than 5 hours by default and — importantly — does so with HTTP 200
+      # and a per-record error in the body, so without this the benchmark
+      # silently queries an empty database. Widening the window is a documented
+      # config knob that affects neither query nor storage behaviour, so it
+      # equalises the two sides rather than advantaging either.
+      ZO_INGEST_ALLOWED_UPTO: "87600"
+    ports:
+      - "5080:5080"
+    volumes:
+      - oo_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5080/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    # Keep in lockstep with the PulseTrace-side limits used for the same run.
+    deploy:
+      resources:
+        limits:
+          cpus: "${BENCH_CPUS:-4}"
+          memory: "${BENCH_MEMORY:-8g}"
+    networks: [bench]
+
+networks:
+  bench:
+    name: pulsetrace-bench
+
+volumes:
+  oo_data:
+  oo_minio_data:

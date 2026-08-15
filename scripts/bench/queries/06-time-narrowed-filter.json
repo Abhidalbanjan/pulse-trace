@@ -1,0 +1,24 @@
+{
+  "id": "time_narrowed_filter",
+  "name": "Time-narrowed service filter",
+  "why": "The default dashboard query: one service, one level, a short recent window. Both sides can express it, so it is the fairest head-to-head latency number in the suite and the one closest to real interactive use.",
+  "pulsetrace": {
+    "method": "GET",
+    "path": "/api/v1/logs?service=svc-07&level=ERROR&since=1h&limit=50",
+    "auth": "bearer"
+  },
+  "openobserve": {
+    "method": "POST",
+    "path": "/api/default/_search",
+    "auth": "basic",
+    "body": {
+      "query": {
+        "sql": "SELECT * FROM bench_logs WHERE service = 'svc-07' AND level = 'ERROR' LIMIT 50",
+        "from": 0,
+        "size": 50,
+        "start_time": "${START_US}",
+        "end_time": "${END_US}"
+      }
+    }
+  }
+}

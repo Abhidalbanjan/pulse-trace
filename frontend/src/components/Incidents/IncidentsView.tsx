@@ -27,12 +27,31 @@ export function IncidentsView() {
   );
   const list = incidents.data ?? [];
 
-  // Selection: sticky once the user clicks; defaults to the first incident so the
-  // detail pane is never empty when there's data (derived, so no effect needed).
+  // Selection: sticky once resolved, not just once clicked.
+  //
+  // The default used to be recomputed as `list[0]?.id` on every render, and the
+  // list polls every 15s. A newly-correlated incident arriving at the top
+  // therefore silently switched the detail pane out from under whoever was
+  // reading — the pane blanks while the new incident's detail loads, so an
+  // on-call engineer mid-investigation loses their place to an unrelated alert.
+  // That is the wrong behaviour for an incident console: new incidents should
+  // announce themselves in the list, never seize the reader's context.
+  //
+  // Pinning the first resolved id also makes the detail pane deterministic,
+  // which is why the incidents e2e specs were flaky in a way that moved between
+  // runs — they were racing a background pipeline that never stops producing
+  // incidents.
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [pinned, setPinned] = useState<string | null>(null);
+  // Adjusting state during render is React's sanctioned pattern for deriving
+  // from freshly-arrived data: it re-renders before commit, so there is no
+  // cascading update and no ref written mid-render.
+  if (!pinned && list.length > 0) {
+    setPinned(list[0].id);
+  }
   // Detail-pane tab: the live causal analysis vs. the AI-drafted postmortem (E1).
   const [detailTab, setDetailTab] = useState<'analysis' | 'postmortem'>('analysis');
-  const effectiveId = selectedId ?? list[0]?.id ?? null;
+  const effectiveId = selectedId ?? pinned;
 
   // Per-incident detail carries the full causal analysis + playbook; refetched
   // after a remediation action via RemediationPanel's onChanged.

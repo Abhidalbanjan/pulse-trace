@@ -105,30 +105,54 @@ export function SyntheticsView() {
       .finally(() => setUptimeLoading(false));
   };
 
-  const fetchResults = () => {
-    fetchWithAuth('/api/v1/synthetics/results')
-      .then(res => res.json())
-      .then(data => { if (data && data.data) setResults(data.data); })
-      .catch(console.error)
-      .finally(() => setLoading(false));
+  // Single loader for both the initial render and the post-create refresh.
+  //
+  // It must fetch *both* sources and merge once. The previous version refreshed
+  // only /results and overwrote state with it, which silently dropped any check
+  // that had not been probed yet — including the one the user had just created,
+  // 2.5s after they created it.
+  const loadChecks = async () => {
+    const [resultsRes, checksRes] = await Promise.all([
+      fetchWithAuth('/api/v1/synthetics/results').then(r => r.json()).catch(() => null),
+      fetchWithAuth('/api/v1/synthetics/tests').then(r => r.json()).catch(() => null),
+    ]);
+    const probed: SyntheticResult[] = resultsRes?.data || [];
+    const checks: Array<{ url: string; name?: string }> = checksRes?.data || [];
+
+    // Configuration wins over observation for the display name.
+    //
+    // Checks are keyed by URL (UNIQUE (tenant_id, url)), so registering a
+    // multi-step check whose first step reuses an existing check's URL upserts
+    // over it and renames the row. Probe results recorded before that rename
+    // keep the old name, and merging by URL alone let the stale observation
+    // shadow the current configuration — the renamed check simply vanished from
+    // the list until the worker happened to probe it again.
+    const configuredName = new Map(checks.filter(c => c.name).map(c => [c.url, c.name as string]));
+    const withNames = probed.map(r => ({ ...r, check_name: r.check_name || configuredName.get(r.URL) }));
+
+    const seen = new Set(probed.map(r => r.URL));
+    const pending = checks
+      .filter(c => !seen.has(c.url))
+      .map(c => ({ URL: c.url, check_name: c.name, uptime_percent: 100, avg_latency_ms: 0 }));
+    return [...withNames, ...pending];
   };
 
   useEffect(() => {
-    fetchResults();
-    // Load configured checks so a just-created (not-yet-probed) check still shows.
-    fetchWithAuth('/api/v1/synthetics/tests')
-      .then(res => res.json())
-      .then(data => {
-        const checks = data?.data || [];
-        setResults(prev => {
-          const seen = new Set(prev.map(r => r.URL));
-          const pending = checks
-            .filter((c: { url: string }) => !seen.has(c.url))
-            .map((c: { url: string; name?: string }) => ({ URL: c.url, check_name: c.name, uptime_percent: 100, avg_latency_ms: 0 }));
-          return [...prev, ...pending];
-        });
-      })
-      .catch(console.error);
+    // Resolve both sources before writing state.
+    //
+    // These used to be two independent fetches that each called setResults: the
+    // probe results overwrote, and the configured checks merged into `prev`.
+    // Whichever resolved second won, so when /tests came back first its merged
+    // list was wiped by /results. Invisible once the worker has probed — the
+    // URLs already exist in results — but on a fresh deployment, where results
+    // is empty, a just-created check disappeared from the list until its first
+    // probe landed. Exactly the case this code exists to handle.
+    let cancelled = false;
+    loadChecks()
+      .then(rows => { if (!cancelled) setResults(rows); })
+      .catch(console.error)
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, []);
 
   const updateStep = (i: number, patch: Partial<StepForm>) =>
@@ -164,7 +188,7 @@ export function SyntheticsView() {
       setResults(prev => (prev.some(r => r.URL === payloadSteps[0].url)
         ? prev
         : [...prev, { URL: payloadSteps[0].url, check_name: name.trim(), uptime_percent: 100, avg_latency_ms: 0 }]));
-      setTimeout(fetchResults, 2500);
+      setTimeout(() => { loadChecks().then(setResults).catch(console.error); }, 2500);
     } catch (err) {
       setFormError(errMessage(err));
     } finally {

@@ -316,7 +316,40 @@ async function main() {
   }
 
   await waitForLogsSearchable(token);
+  // The SLO worker computes SLIs on a 60s tick, so the definition seeded above
+  // exists long before the dashboard has anything to show. Without this the
+  // dashboard spec starts against an empty screen — the same race as logs, one
+  // pipeline further along.
+  await waitForReady(token, '/api/v1/slo/dashboard', 'SLO dashboard', 90000);
+  // Causal analysis runs asynchronously after an incident is opened.
+  await waitForReady(token, '/api/v1/incidents', 'incidents', 60000);
   console.log('Seed complete.');
+}
+
+// Poll an endpoint until it returns at least one row. Async pipelines (SLO
+// worker tick, alert->incident correlation, causal analysis) finish well after
+// the seed's HTTP calls return, and a fixed sleep is a guess that is either too
+// short in CI or wasted locally.
+async function waitForReady(token, path, label, timeoutMs) {
+  const started = Date.now();
+  process.stdout.write(`Waiting for ${label}`);
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const res = await fetch(`${GATEWAY}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) {
+        const body = await res.json();
+        if ((body.data || []).length > 0) {
+          console.log(` ok (${Math.round((Date.now() - started) / 1000)}s)`);
+          return;
+        }
+      }
+    } catch {
+      // transient — keep polling
+    }
+    process.stdout.write('.');
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  console.log(`\nWARNING: ${label} still empty after ${timeoutMs / 1000}s — specs depending on it will fail.`);
 }
 
 // Wait until the seeded logs are actually *searchable*, not for a fixed guess.

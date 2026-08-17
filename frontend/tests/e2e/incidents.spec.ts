@@ -55,8 +55,17 @@ test.describe('Incidents', () => {
 
     if (await dryRun.count()) {
       await dryRun.first().click();
-      // Dry-run is read-only and must never fail the page; a result surfaces.
-      await expect(page.getByText(/Dry-run complete|plan below/i).first()).toBeVisible({ timeout: 10000 });
+      // Assert on persisted panel state, not the success toast.
+      //
+      // The toast ("Dry-run complete — plan below") auto-dismisses, so a slow
+      // server round-trip could raise and retire it before the assertion polled
+      // — the test then failed with the feature working perfectly. The panel
+      // itself durably reflects the outcome: it renders the returned plan in a
+      // <pre> and moves the status pill to "Dry-run". Either is proof the
+      // round-trip completed, and neither disappears on a timer.
+      const planOutput = page.locator('pre').filter({ hasText: /.+/ });
+      const dryRunStatus = page.getByText('Dry-run', { exact: true });
+      await expect(planOutput.or(dryRunStatus).first()).toBeVisible({ timeout: 15000 });
     }
   });
 });

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -186,7 +187,14 @@ func TestIngest_QueueFullReturns503(t *testing.T) {
 }
 
 // buildQuery is a helper that runs buildLogQuery against a URL's query string.
+// The regex matcher is dropped here; tests that care about it use buildQueryRE.
 func buildQuery(t *testing.T, rawQuery, tenantID string) (string, error) {
+	t.Helper()
+	q, _, err := buildQueryRE(t, rawQuery, tenantID)
+	return q, err
+}
+
+func buildQueryRE(t *testing.T, rawQuery, tenantID string) (string, *regexp.Regexp, error) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/logs?"+rawQuery, nil)
 	return buildLogQuery(req, tenantID)
@@ -216,11 +224,19 @@ func TestBuildLogQuery_FiltersAndRegex(t *testing.T) {
 		`level:"ERROR"`, // level is upper-cased to match the raw-tokenized field
 		`trace_id:"abc"`,
 		`message:"timeout"`,
-		`message:/user_[0-9]+/`,
 	} {
 		if !strings.Contains(q, want) {
 			t.Errorf("query missing %q; got %q", want, q)
 		}
+	}
+	// The regex must NOT be emitted as `message:/…/`. Quickwit 0.8 has no regex
+	// support and parses that as a wildcard, so any pattern with metacharacters
+	// failed the whole query. This assertion is the regression guard: the
+	// previous version of this test asserted the broken syntax was present,
+	// which is why the defect survived — it checked what we generated, never
+	// that the engine accepted it.
+	if strings.Contains(q, "message:/") {
+		t.Errorf("regex must not be emitted as a Quickwit regex clause; got %q", q)
 	}
 }
 
@@ -423,6 +439,110 @@ func TestIngest_ValidLevelsPassThrough(t *testing.T) {
 		got := drain(h)
 		if len(got) != 1 || got[0].Level != lvl {
 			t.Fatalf("level %s not preserved: %+v", lvl, got)
+		}
+	}
+}
+
+// --- regex search -----------------------------------------------------------
+//
+// Quickwit 0.8's query language has no regex. These cover the replacement:
+// narrow with whatever literal the pattern is anchored by, then match in Go.
+
+func TestRegexPrefilter_UsesLiteralPrefixToNarrow(t *testing.T) {
+	re, clause, err := regexPrefilter(`duration_ms=[0-9]+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Truncated to the first whole token: Quickwit's default tokenizer splits on
+	// "_" and "=", so only "duration" is an indexed term. Emitting the full
+	// literal would match no token and silently return zero hits.
+	if clause != `message:duration*` {
+		t.Errorf("expected a wildcard clause on the leading token, got %q", clause)
+	}
+	if !re.MatchString("request completed duration_ms=1234") {
+		t.Error("matcher should match a string the pattern describes")
+	}
+	if re.MatchString("request completed duration_ms=abc") {
+		t.Error("matcher must not match where the pattern does not")
+	}
+}
+
+func TestRegexPrefilter_UnanchoredPatternDoesNotNarrow(t *testing.T) {
+	// No leading literal: any clause we invented here would exclude real
+	// matches, so the scan must stay wide rather than quietly lose results.
+	_, clause, err := regexPrefilter(`[0-9]{3}-[0-9]{4}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if clause != "" {
+		t.Errorf("an unanchored pattern must not produce a narrowing clause, got %q", clause)
+	}
+}
+
+func TestRegexPrefilter_ShortOrUnsafePrefixIgnored(t *testing.T) {
+	for _, pattern := range []string{
+		`ab[0-9]+`,  // leading token too short to be useful
+		`=[0-9]+`,   // starts with punctuation, so there is no leading token
+		`a b[0-9]+`, // leading token "a" is too short
+	} {
+		_, clause, err := regexPrefilter(pattern)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", pattern, err)
+		}
+		if clause != "" {
+			t.Errorf("%s: expected no narrowing clause, got %q", pattern, clause)
+		}
+	}
+}
+
+func TestRegexPrefilter_InvalidPatternRejected(t *testing.T) {
+	if _, _, err := regexPrefilter(`user_[0-9`); err == nil {
+		t.Fatal("an un-compilable pattern must be rejected, not silently dropped")
+	}
+}
+
+func TestFilterByRegex_MatchesAndRespectsLimit(t *testing.T) {
+	hits := []json.RawMessage{
+		json.RawMessage(`{"message":"duration_ms=1234 ok"}`),
+		json.RawMessage(`{"message":"no numbers here"}`),
+		json.RawMessage(`{"message":"duration_ms=99 ok"}`),
+		json.RawMessage(`{"message":"duration_ms=7 ok"}`),
+	}
+	re := regexp.MustCompile(`duration_ms=[0-9]+`)
+
+	got := filterByRegex(hits, re, 10)
+	if len(got) != 3 {
+		t.Errorf("expected 3 matches, got %d", len(got))
+	}
+	if limited := filterByRegex(hits, re, 2); len(limited) != 2 {
+		t.Errorf("limit must be honoured, got %d", len(limited))
+	}
+}
+
+func TestFilterByRegex_SkipsUndecodableDocuments(t *testing.T) {
+	// A malformed document must not abort the whole search.
+	hits := []json.RawMessage{
+		json.RawMessage(`not json`),
+		json.RawMessage(`{"message":"duration_ms=5"}`),
+	}
+	got := filterByRegex(hits, regexp.MustCompile(`duration_ms=[0-9]+`), 10)
+	if len(got) != 1 {
+		t.Errorf("expected the readable match only, got %d", len(got))
+	}
+}
+
+func TestLeadingToken_StopsAtTokenBoundary(t *testing.T) {
+	// The regression this guards: "duration_ms=" was emitted whole, matching no
+	// indexed term, so a pattern that genuinely occurs returned zero hits.
+	for _, tc := range []struct{ in, want string }{
+		{"duration_ms=", "duration"},
+		{"duration", "duration"},
+		{"cache ", "cache"},
+		{"=abc", ""},
+		{"", ""},
+	} {
+		if got := leadingToken(tc.in); got != tc.want {
+			t.Errorf("leadingToken(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

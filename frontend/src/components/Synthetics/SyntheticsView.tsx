@@ -117,12 +117,24 @@ export function SyntheticsView() {
       fetchWithAuth('/api/v1/synthetics/tests').then(r => r.json()).catch(() => null),
     ]);
     const probed: SyntheticResult[] = resultsRes?.data || [];
-    const checks = checksRes?.data || [];
+    const checks: Array<{ url: string; name?: string }> = checksRes?.data || [];
+
+    // Configuration wins over observation for the display name.
+    //
+    // Checks are keyed by URL (UNIQUE (tenant_id, url)), so registering a
+    // multi-step check whose first step reuses an existing check's URL upserts
+    // over it and renames the row. Probe results recorded before that rename
+    // keep the old name, and merging by URL alone let the stale observation
+    // shadow the current configuration — the renamed check simply vanished from
+    // the list until the worker happened to probe it again.
+    const configuredName = new Map(checks.filter(c => c.name).map(c => [c.url, c.name as string]));
+    const withNames = probed.map(r => ({ ...r, check_name: r.check_name || configuredName.get(r.URL) }));
+
     const seen = new Set(probed.map(r => r.URL));
     const pending = checks
-      .filter((c: { url: string }) => !seen.has(c.url))
-      .map((c: { url: string; name?: string }) => ({ URL: c.url, check_name: c.name, uptime_percent: 100, avg_latency_ms: 0 }));
-    return [...probed, ...pending];
+      .filter(c => !seen.has(c.url))
+      .map(c => ({ URL: c.url, check_name: c.name, uptime_percent: 100, avg_latency_ms: 0 }));
+    return [...withNames, ...pending];
   };
 
   useEffect(() => {

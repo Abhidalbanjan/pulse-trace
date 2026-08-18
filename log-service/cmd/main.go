@@ -10,13 +10,12 @@ import (
 	"syscall"
 	"time"
 
-
+	"github.com/grafana/pyroscope-go"
 	"github.com/pulsetrace/log-service/internal/handler"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/metering"
 	"github.com/pulsetrace/shared/middleware"
 	"github.com/pulsetrace/shared/telemetry"
-	"github.com/grafana/pyroscope-go"
 )
 
 const serviceName = "log-service"
@@ -64,7 +63,26 @@ func main() {
 		defer producer.Close()
 	}
 
-
+	// ── Kafka retention watchdog ──────────────────────────────────────────────
+	//
+	// Kafka retention is 24h (it was 168h, which cost 4.32 GiB against a 2 GiB
+	// ingest — the largest single line in our storage footprint). Quickwit is
+	// the system of record for logs; Kafka only has to hold a record long
+	// enough for every consumer to read it.
+	//
+	// The shorter window is safe only if a stalled consumer is noticed before
+	// the broker deletes what it has not read. This watches each group's
+	// committed offset against the oldest offset still retained and says so,
+	// loudly, when records have been dropped unread. Failure to start is not
+	// fatal — log-service's job is ingestion, and refusing to serve because the
+	// watchdog could not connect would trade a monitoring gap for an outage.
+	if watcher, err := kafka.NewRetentionWatcher([]string{"logs"}); err != nil {
+		log.Printf("WARNING: kafka retention watchdog unavailable, retention is unmonitored: %v", err)
+	} else {
+		defer watcher.Close()
+		go watcher.Run(ctx, time.Minute)
+		log.Printf("kafka retention watchdog running on topic %q", "logs")
+	}
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	quickwitURL := os.Getenv("QUICKWIT_URL")

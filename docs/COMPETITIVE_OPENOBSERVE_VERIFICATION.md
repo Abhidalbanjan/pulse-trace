@@ -118,7 +118,13 @@ What was **not** done, and should not be claimed:
   that their SLO engine is "arguably deeper" rests on their having backfill and
   reconciliation modules we lack — a structural argument, not a benchmark.
 - **The enterprise build was not seen at all** (§0).
-- **No behaviour was executed.** Wave **P0** of the implementation plan — the
-  side-by-side benchmark harness — is still the only thing that will turn any
-  performance or cost claim into a fact. This pass corrects the *feature* map;
-  it does nothing for D2 or D15.
+- **No behaviour was executed *in this pass*.** Wave **P0** of the implementation
+  plan — the side-by-side benchmark harness — was the only thing that could turn
+  a performance or cost claim into a fact, and it has since run:
+  [BENCHMARK.md](../BENCHMARK.md) settles **D1, D2 and D3** on a shared 2 GiB
+  corpus. This pass corrects the *feature* map and nothing more; where it and the
+  benchmark both speak, **the benchmark is the authority on behaviour and this
+  document on what exists**.
+- **D15 is still unsettled.** Their 2 PB/day is a customer-scale artifact; a
+  single-node 2 GiB run neither corroborates nor refutes it, and P0.3 (our own
+  ceiling) has not run.

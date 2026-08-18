@@ -74,7 +74,7 @@ first twenty minutes, before anyone sees what we are actually good at.
 | :---: | --- | --- | :---: | :---: |
 | **P0** | Ground truth | Measured baseline vs OpenObserve; no unverified claim survives | 4 | 2 |
 | **P1** | Core runtime | Five ports; one binary; `docker run` → data in <60 s | 7 | 9 |
-| **P2** | Storage engine | Object-store-primary, compactor, file-list index, cost accounting | 5 | 6 |
+| **P2** | Storage engine | Dedup the ingest path, compact splits, object-store-primary, cost accounting | 6 | 6 |
 | **P3** | Query engine | Federated SQL (DuckDB) + PromQL + cross-signal joins | 7 | 11 |
 | **P4** | Streams & schema | Registry, inference, 15-field settings, self-serve retention | 4 | 5 |
 | **P5** | Pipelines & governance | Real VRL, enrichment, SDR, **per-record erasure** | 6 | 9 |
@@ -155,6 +155,17 @@ Every slice, all nine. No exceptions, no "follow-up ticket."
 currently measured. P0 is cheap and makes every later phase falsifiable.
 **Non-goals.** Tuning. P0 measures; it does not optimise.
 
+> **Status: P0.1 and P0.2 are delivered.** The harness lives in
+> `scripts/bench/`, results in [BENCHMARK.md](../BENCHMARK.md), and the exit
+> condition below is met — §1 of the spec doc now cites measured numbers.
+> It paid for itself immediately: the measurement **rescoped P2** (the gap is
+> duplication, not format — see the note there) and **confirmed P3 is the only
+> phase that closes D3**. It also found a shipped bug no test covered: the regex
+> class failed 20/20 because Quickwit 0.8 has no regex and parsed our `field:/…/`
+> as a wildcard. Fixed; the class now runs at 86/148 ms against their 61/136 ms.
+> **Still outstanding: P0.3, P0.4, and cold-start-to-first-query** — the one
+> sample in P0.2's list the harness does not yet collect.
+
 **P0.1 · Comparative harness · S**
 `scripts/bench/compose.openobserve.yml` (pinned tag, MinIO backing, resource
 limits matched to ours) · `corpus/gen.go` — seeded, byte-reproducible: 10 GB
@@ -185,8 +196,9 @@ measured numbers instead of their marketing.
 
 ## P1 — Core runtime · 7 slices · 9 weeks
 
-**Thesis.** 23 containers is the largest adoption barrier and the root of our
-cost disadvantage. Five ports let the same code be a one-container product or the
+**Thesis.** **24 containers — measured, against their 2** — is the largest
+adoption barrier and a real cost line: **5.38 GiB resident against their
+905 MiB**. Five ports let the same code be a one-container product or the
 cluster we run today.
 
 **Non-goals.** Rewriting business logic.
@@ -316,19 +328,44 @@ in under a minute; the cluster path is unchanged; all pre-existing gates green.
 
 ---
 
-## P2 — Storage engine · 5 slices · 6 weeks
+## P2 — Storage engine · 6 slices · 6 weeks
 
-**Thesis.** Our log tier is already competitive — Quickwit *is* tantivy, the same
-substrate as their Parquet + tantivy/puffin. The real gaps: traces/metrics/RUM sit
-on SSD-primary ClickHouse for the whole retention window, and we have **no
-compactor and no file-list index** — which is how they enforce retention and
-account for cost.
+> **Rescoped after P0 measured it.** [BENCHMARK.md](../BENCHMARK.md): we write
+> **1.53 GiB per GiB ingested against their 187 MiB — 8.4×**, reproduced at 7.5×
+> on an independent clean build. The measurement also found the *cause*, which
+> is what changes this phase: it is **duplication, not format**.
 
-**Key decision — do not write a storage engine.** _Rejected:_ building our own
-Parquet+index engine. Twelve-plus months, it is their core competency, and
-Quickwit already gives us the property that matters. We close the gap with
-tiering, compaction and accounting — weeks, not quarters. Win the dimension,
-don't win the rewrite.
+**Thesis.** The substrate is not the problem. Our log tier is Quickwit, which
+*is* tantivy — the same engine family as their Parquet + tantivy/puffin — so the
+8.4× is not columnar beating an inverted index. It decomposes into three things
+we own:
+
+1. **Kafka retains a full second copy** of every log record after Quickwit has
+   indexed it. Pure duplication, and the same hop that makes our ingest 593 s
+   against their 76 s. Highest leverage item in the phase.
+2. **Quickwit splits are never compacted.** Small splits carry per-split
+   overhead and never merge, so the index grows superlinearly in file count.
+3. **Traces/metrics/RUM sit on SSD-primary ClickHouse** for the whole retention
+   window, with no compactor and no file-list index — which is how they enforce
+   retention and account for cost.
+
+**Key decision — do not write a storage engine, now with evidence.**
+_Rejected:_ building our own Parquet+index engine. Twelve-plus months, it is
+their core competency, and P0 confirmed Quickwit already gives us the property
+that matters — the format is not where the bytes go. We close the gap with
+retention policy, compaction, tiering and accounting. **The rewrite risk this
+phase was carrying is retired.**
+
+**P2.0 · Ingest-path deduplication · S — do this first** — the cheapest large
+win in the plan. Kafka's `logs` topic currently keeps its full default retention
+after Quickwit has durably indexed the record, so the corpus exists twice.
+Bound it: retention sized to the Quickwit indexing lag plus a replay margin
+(hours, not days), sized from the measured lag not guessed, with the margin a
+config knob because P2.4's rebuild-from-replay depends on it. **Verify by
+re-running the harness, not by reasoning** — this slice's whole claim is a
+number, and it either moves or it does not.
+**Budget:** bytes-per-GiB-ingested drops materially with **zero** loss of
+indexed records; ingest wall-clock re-measured in the same run.
 
 **P2.1 · Object-store-primary tiering · M** — hot window in **hours**
 (`TTL … + INTERVAL 6 HOUR TO DISK 's3'`), hot volume sized for the window. The
@@ -360,12 +397,22 @@ streams. Foundation of the cost-intelligence differentiator: they compete on bei
 cheap, we also explain the bill.
 
 **P2.4 · Quickwit lifecycle ownership · M** — today it is configured once by an
-init container and never managed. Bring it under lifecycle: split merge policy,
-retention via the compactor, index health in Settings, and an admin action to
-rebuild an index from Kafka replay.
+init container and never managed, which is cause (2) above: **splits are never
+compacted.** Bring it under lifecycle: an explicit split merge policy, retention
+via the compactor, index health in Settings, and an admin action to rebuild an
+index from Kafka replay (note the coupling to P2.0 — replay cannot reach further
+back than Kafka retention, so the two slices must agree on the margin).
+Existing deployments also need the index recreated to pick up
+`record: position`, so fold that migration in here rather than shipping a second
+disruptive index change later.
 
-**P2.5 · Cost benchmark · S** — re-run `run-benchmark.sh`.
-**Exit gate: bytes-on-disk per GB ingested ≤ theirs, with query p95 ≤ 1.2×.**
+**P2.5 · Cost benchmark · S** — re-run `run-benchmark.sh`. The baseline is no
+longer hypothetical: **1.53 GiB/GiB, 3.06 GiB on disk, 593 s ingest, 24
+containers, 5.38 GiB RSS**, against their 187 MiB/GiB, 373 MiB, 76 s, 2, 905 MiB.
+**Exit gate: bytes-on-disk per GiB ingested ≤ theirs, with query p95 ≤ 1.2× of
+the P0 baseline** — and the four expressible query classes must not regress from
+their measured values (81/182, 16/27, 86/148, 62/88 ms p50/p95), two of which we
+currently win.
 
 ---
 
@@ -800,7 +847,7 @@ CI-enforced; a regression fails the build.
 
 **Decision (2026-08-13): the buyer is enterprise / regulated.** Compliance, audit
 and governance decide these deals; the buyer runs Helm and does not care that the
-stack is 23 containers. That inverts the naive phase order — §2's numbering is the
+stack is 24 containers. That inverts the naive phase order — §2's numbering is the
 *dependency* map, this section is the *execution* map, and this section wins.
 
 ### 5.1 The principle: threshold parity, not full parity

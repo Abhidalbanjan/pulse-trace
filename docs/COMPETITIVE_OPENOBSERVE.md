@@ -3,6 +3,7 @@
 _Author: competitive engineering plan · Created: 2026-08-13_
 _Subject: [openobserve/openobserve](https://github.com/openobserve/openobserve) (AGPL-3.0, Rust) — **source-verified** at `main`, Aug 2026, supplemented by openobserve.ai/docs._
 _Implementation plan: [COMPETITIVE_OPENOBSERVE_IMPLEMENTATION.md](COMPETITIVE_OPENOBSERVE_IMPLEMENTATION.md) — the phase-by-phase "how"._
+_Measurements: [BENCHMARK.md](../BENCHMARK.md) — D1, D2 and D3 are now **measured on a shared 2 GiB corpus**, not asserted._
 
 > ⚠️ **Revised 2026-08-13 after a source-verification pass.** The first version of
 > this document was written from five web pages and **overstated PulseTrace's
@@ -33,7 +34,7 @@ a DoD per epic, and the parity gate stays at 100%.
 | Side | How it was assessed |
 | --- | --- |
 | PulseTrace | Direct code read: 220 Go files across 8 modules, 66 `.tsx` screens/components, all HTTP routes extracted from the 6 services, `docker-compose.yml` (23 runtime containers), Quickwit index + Kafka source config, ClickHouse table DDL, [ROAD_TO_100.md](../ROAD_TO_100.md), [PARITY_REPORT.md](../PARITY_REPORT.md), [PERF_BASELINE.md](../PERF_BASELINE.md). |
-| OpenObserve | **Source read** of a shallow clone (1,419 Rust files / 576k LOC): structural map of 38 crates, then targeted reads of the module owning each dimension, with file citations recorded in [COMPETITIVE_OPENOBSERVE_VERIFICATION.md](COMPETITIVE_OPENOBSERVE_VERIFICATION.md). Supplemented by the repo README and openobserve.ai docs. **Two limits:** their `src/enterprise/` is four 16-line stubs — the commercial build is closed-source, so SDR, SSO breadth and parts of federation are *not verifiable*; and all performance/cost figures remain **their published claims**, which only Wave O0 can settle. |
+| OpenObserve | **Source read** of a shallow clone (1,419 Rust files / 576k LOC): structural map of 38 crates, then targeted reads of the module owning each dimension, with file citations recorded in [COMPETITIVE_OPENOBSERVE_VERIFICATION.md](COMPETITIVE_OPENOBSERVE_VERIFICATION.md). Supplemented by the repo README and openobserve.ai docs. **Two limits:** their `src/enterprise/` is four 16-line stubs — the commercial build is closed-source, so SDR, SSO breadth and parts of federation are *not verifiable*; and their **published** performance/cost figures (140×, 2 PB/day) remain marketing. P0 has since settled the ones that matter to a buyer — storage, footprint and query latency are measured in [BENCHMARK.md](../BENCHMARK.md) and cited inline below; their headline claims are still unverified and are no longer relied on anywhere in this document. |
 
 ### 0.1 What PulseTrace actually is (correcting the README)
 
@@ -77,9 +78,9 @@ Verdict is **today**, before any work in this plan.
 
 | # | Dimension | PulseTrace today | OpenObserve today | Verdict |
 | --- | --- | --- | --- | :---: |
-| D1 | Time-to-first-data / deployability | 23 containers, 11 volumes, Kafka+ZK+Neo4j+RabbitMQ+Redis+CH+PG+Quickwit+MinIO+Azurite+Jaeger+Prom+Grafana+Pyroscope | one binary / one container, SQLite + disk, no deps | **OO** |
-| D2 | Storage economics | Quickwit splits (good) + ClickHouse SSD hot for traces/metrics/RUM; S3/Azure/GCS only as *cold* tier | Parquet-on-object-store as the **primary** tier, compaction, 99% search-space pruning | **OO** |
-| D3 | Ad-hoc query power | No user query language. Logs = Quickwit query string; metrics = fixed params → server-built SQL; no joins, no aggregations, no user SQL | **DataFusion** SQL engine + a **full PromQL engine** (aggregations/binaries/functions) + tantivy inverted index + bloom pruner + result cache | **OO** |
+| D1 | Time-to-first-data / deployability | **Measured: 24 containers, 5.38 GiB peak RSS.** 11 volumes, Kafka+ZK+Neo4j+RabbitMQ+Redis+CH+PG+Quickwit+MinIO+Azurite+Jaeger+Prom+Grafana+Pyroscope | **Measured: 2 containers, 905 MiB peak RSS.** One binary, SQLite + disk, no deps | **OO** — 12× the containers, 6× the memory |
+| D2 | Storage economics | **Measured: 1.53 GiB written per GiB ingested.** Quickwit splits (good) + ClickHouse SSD hot for traces/metrics/RUM; S3/Azure/GCS only as *cold* tier | **Measured: 187 MiB per GiB ingested — 8.4× less.** Parquet-on-object-store as the **primary** tier, compaction, 99% search-space pruning | **OO** — measured, reproduced across two clean builds |
+| D3 | Ad-hoc query power | **Measured: 2 of 6 benchmark query classes are not expressible at all.** No user query language. Logs = Quickwit query string; metrics = fixed params → server-built SQL; no joins, no aggregations, no user SQL | **6 of 6 expressible.** **DataFusion** SQL engine + a **full PromQL engine** (aggregations/binaries/functions) + tantivy inverted index + bloom pruner + result cache | **OO** — a capability gap, not a latency gap |
 | D4 | Custom dashboards | **None.** No `/dashboards` route exists | Folders, tabs, **21 panel types (verified)**, variables + dependencies, filters, time-comparison, drilldown, import/export, timed annotations | **OO** |
 | D5 | Streams / schema flexibility | Fixed tables; Quickwit index is `mode: dynamic` but nothing surfaces the inferred schema; TTLs hardcoded in DDL; no per-tenant retention | Stream registry + schema inference; `StreamSettings` carries **15 fields** — FTS keys, partition keys, bloom-filter fields, UDS, retention, extended retention, `index_all_values`, `store_original_data`, `max_query_range` | **OO** |
 | D6 | Ingest pipelines / transforms | Vector in compose + one VRL script in the Quickwit source — no user-facing product | Real-time + scheduled pipelines, no-code graph editor, **the real `vrl` 0.31 crate**, enrichment tables, remote destinations, import/export | **OO** |
@@ -129,11 +130,51 @@ fast and self-serve as theirs, then keep the incident-intelligence layer they
 don't have.** A telemetry substrate is table stakes; the intelligence on top is
 the product. Waves O1–O5 buy the table stakes. Waves O6–O7 make the win durable.
 
+### 1.2 What P0 actually measured — and what it changed
+
+Three of the rows above used to be argument. They are now numbers, taken on a
+shared byte-reproducible 2 GiB corpus (5,104,768 log records ingested and
+verified on both sides), equal 4 CPU / 8 GiB caps, OpenObserve pinned to
+v0.14.4, 20 iterations per query class. Full method and results:
+[BENCHMARK.md](../BENCHMARK.md).
+
+| Dimension | Was | Is |
+| --- | --- | --- |
+| D1 deployability | "23 containers vs one binary" | **24 vs 2 containers; 5.38 GiB vs 905 MiB peak RSS** |
+| D2 storage | their "140× cheaper than Elastic" | **1.53 GiB vs 187 MiB per GiB ingested — 8.4×**, reproduced at 7.5× on an independent clean build |
+| D3 query power | "no query language" | **2 of 6 classes not expressible** — the user cannot ask, at any latency |
+
+Three findings change the plan rather than merely confirming it:
+
+1. **The storage gap is amplification, not architecture.** Our log tier is
+   Quickwit, which *is* tantivy — the same substrate as their index. So this is
+   not "columnar beats inverted index." Kafka retains a full second copy of the
+   corpus and the Quickwit splits are never compacted. Both are fixable without
+   replacing an engine, which **shrinks P2 from an object-store-primary rewrite
+   to deduplication plus compaction**. The six weeks budgeted to answer this
+   question are largely answered.
+2. **Latency is not the problem; expressibility is.** Where both sides can run
+   the query we are competitive or ahead — **trace-by-ID is ~25× faster on our
+   side** (16 ms vs 504 ms p50, though that compares default configurations),
+   and the time-narrowed service filter wins on p95 (88 ms vs 136 ms). We lose
+   the two classes we cannot express. That is a **P3 (query engine) problem, and
+   only P3's** — no tuning closes it, and no tuning is needed elsewhere.
+3. **One architectural decision shows up in two measurements.** Ingest takes
+   593 s against their 76 s, and the same gateway → Kafka → Quickwit hop is what
+   duplicates the corpus on disk. Fixing it pays down D2 and ingest throughput
+   together, which makes it the highest-leverage item in the substrate work.
+
+**What was not measured:** cold start to first query, and every claim about
+their behaviour above single-node 2 GiB scale. Their 2 PB/day figure remains
+uncorroborated and is not relied on here.
+
 ---
 
 ## 2. Where OpenObserve is genuinely better — mechanisms, not features
 
-**G1 · One binary vs 23 containers.** Our compose brings up ZooKeeper, Kafka,
+**G1 · One binary vs 24 containers — measured.** `docker stats` during the
+benchmark: **24 containers and 5.38 GiB resident on our side, 2 and 905 MiB on
+theirs.** Our compose brings up ZooKeeper, Kafka,
 Neo4j, ClickHouse, Postgres, RabbitMQ, Redis, Jaeger, OTel Collector, Prometheus,
 Grafana, Vector, Quickwit (+ setup), MinIO (+ mc), Azurite, Pyroscope, plus 7
 first-party services. Every one is a failure mode, a RAM allocation, and a reason
@@ -144,16 +185,23 @@ an evaluator quits. OpenObserve's evaluator is running in under a minute with
 `storage.xml` tiers ClickHouse to S3/Azure/GCS on age. OpenObserve never has a
 hot SSD tier at all — Parquet lands in object storage within seconds, queriers
 are stateless and cache on demand, and the compactor rewrites to ≤2 GB files.
-That is what makes "140× cheaper than Elastic" structurally plausible and lets
-them scale queriers independently of data. Our traces/metrics path pays SSD
-prices for the whole retention window.
+That lets them scale queriers independently of data, and it shows up on
+disk: **187 MiB per GiB ingested against our 1.53 GiB — 8.4×** (their "140×
+cheaper than Elastic" is marketing and is not the source of that number; ours
+is). Our traces/metrics path pays SSD prices for the whole retention window.
+But note what the measurement also found: the log-tier share of our overhead is
+**duplication, not format** — Kafka keeps a second copy and splits are never
+compacted — so closing most of D2 does not require adopting their architecture.
 
 **G3 · No query language is a hard ceiling.** Every question a user can ask us
 has to have been anticipated by a Go handler. `metrics_handler.go` supports
 `rate`/`p50`/`p90`/`p95`/`p99` because someone wrote a `switch`. A user who wants
 "error rate by customer tier joined against deploys, bucketed 5m" simply cannot
 ask. OpenObserve users write SQL. This is the single largest capability gap and
-it is invisible in a feature checklist.
+it is invisible in a feature checklist — the benchmark makes it visible:
+**2 of 6 query classes return "not expressible" for PulseTrace**, and on the four
+that do run we are competitive or faster. The ceiling is what a user may ask,
+not how fast we answer.
 
 **G4 · No dashboards means no daily habit.** We have 17 opinionated screens and
 zero user-authored views. Dashboards are how an observability tool becomes the
@@ -262,9 +310,15 @@ fail-closed, all gates green per slice.
 
 ---
 
-### Wave O0 — Measure before claiming · effort M
+### Wave O0 — Measure before claiming · effort M ✅ *mostly delivered*
 
 Nothing in this document should be asserted publicly until it is measured.
+
+**O0.1, O0.2 and O0.4 are done.** The harness is in `scripts/bench/`, the
+scoreboard is [BENCHMARK.md](../BENCHMARK.md), and the README diagram is
+corrected. §1.2 above records what the numbers changed. **O0.3 (throughput
+ceiling) and cold-start-to-first-query remain open** — the latter is the one
+sample in O0.1's list the harness still does not collect.
 
 | Epic | What to build | Effort |
 | --- | --- | :---: |
@@ -274,7 +328,7 @@ Nothing in this document should be asserted publicly until it is measured.
 | **O0.4** | **Fix the README architecture diagram** — logs go to Quickwit, not ClickHouse. Shipping a wrong diagram in the front door of the repo costs credibility in exactly the evaluation we are trying to win. | S |
 
 **DoD:** `BENCHMARK.md` exists, is regenerated by one command, and every claim in
-§1 of this document is replaced by a measured number.
+§1 of this document is replaced by a measured number. **Met for D1, D2 and D3.**
 
 ---
 
@@ -318,13 +372,21 @@ Same binaries, different wiring — **not a fork**:
   routes — (a) ClickHouse `MergeTree` with an *aggressive* `TTL … TO DISK 's3'`
   (hours, not days) plus `allow_experimental_object_type` for wide rows, or
   (b) write Parquet directly and query via chDb/DuckDB. **Recommend (a) first**:
-  it is a storage-policy change plus a benchmark, not a rewrite, and O0.1 will
-  tell us whether it closes the gap.
+  it is a storage-policy change plus a benchmark, not a rewrite. **O0.1 has since
+  reported: the 8.4× is duplication, not format** — so (a) is not merely the
+  cheaper bet, it is the correct one, and (b) is now out of scope.
 - **Backend:** a **compactor** worker (small-part merge + retention enforcement +
   file-list index), the piece OpenObserve has and we do not.
-- **Backend:** end the implicit double-cost question — confirm via O0.1 whether
-  Quickwit splits + ClickHouse `otel_logs` hold overlapping data; if so, drop the
+- **Backend, do this first:** **bound Kafka retention.** O0.1 answered the
+  double-cost question and found a bigger one — the `logs` topic keeps a full
+  second copy of every record after Quickwit has indexed it, and that same hop is
+  why our ingest takes 593 s to their 76 s. One config change, measurable in a
+  re-run, paying down two dimensions at once. Then close the original question:
+  whether Quickwit splits and ClickHouse `otel_logs` overlap, and drop the
   unqueried copy.
+- **Backend:** **compact Quickwit splits.** The index is configured once by an
+  init container and never merged, so file count grows without bound — the second
+  named cause of the 8.4×, and the one no ClickHouse tiering change touches.
 - **Frontend:** Settings → Storage: bytes by tier, by stream, by tenant;
   projected monthly cost; the compaction backlog.
 - **DoD:** `BENCHMARK.md` shows bytes-on-disk per GB ingested **at or below**
@@ -516,9 +578,9 @@ that makes tying impossible.
 
 | # | Dimension | After which wave | Why PulseTrace then wins outright |
 | --- | --- | --- | --- |
-| D1 | Deployability | O1.1 | One container like theirs, **plus** the same artifact scales to the cluster topology with role flags and a data-compatible upgrade path |
-| D2 | Storage economics | O1.2 + O0.1 | Object-store-primary + compaction, **plus** O7.8 cost attribution — cheap *and* explains the bill |
-| D3 | Query power | O2.1–O2.3 | SQL + PromQL like theirs, **plus** cross-store joins (logs ⋈ traces ⋈ deploys) they cannot do across separate stores |
+| D1 | Deployability | O1.1 | One container like theirs, **plus** the same artifact scales to the cluster topology with role flags and a data-compatible upgrade path. Measured baseline to beat: **24 containers / 5.38 GiB RSS → their 2 / 905 MiB** |
+| D2 | Storage economics | O1.2 (+ O0.1 ✅) | **Deduplicate the ingest path and compact splits first** — measured cause of the 8.4×, and cheaper than the tiering work. Then object-store-primary + compaction, **plus** O7.8 cost attribution — cheap *and* explains the bill |
+| D3 | Query power | O2.1–O2.3 | SQL + PromQL like theirs, **plus** cross-store joins (logs ⋈ traces ⋈ deploys) they cannot do across separate stores. Measured gap is **expressibility, not latency** — 2 of 6 classes unaskable, while we win 2 of the 4 that run |
 | D4 | Dashboards | O3.1 | **≥22 panel types (they have 21, verified — not 19)**, plus flame-graph and trace-waterfall panels no log tool has, plus O7.2 AI authoring. Compete on *kind*, not count |
 | D5 | Streams/schema | O4.1 | Same self-serve stream settings, **plus** per-stream cost attribution |
 | D6 | Pipelines | O4.2 | Same node graph and VRL, **plus** O7.1 live debugger and production per-node telemetry |
@@ -562,14 +624,22 @@ that makes tying impossible.
 **Recommended first six slices**, in order — highest evaluation-impact per unit of
 effort:
 
-1. **O0.1 + O0.2** — the benchmark harness. Everything else is guesswork without it.
-2. **O0.4** — fix the README diagram (one hour, disproportionate credibility).
-3. **O1.1** — single-container mode. This is the one that changes the evaluation
-   outcome most, and it is the hardest; start it early and let it run long.
-4. **O2.1** — the SQL surface. Unblocks O3 entirely; nothing else raises the
-   capability ceiling as much.
-5. **O3.1** — dashboards. The missing daily habit.
-6. **O5.2** — Prometheus `remote_write`. Cheapest large migration wedge in the plan.
+~~1. **O0.1 + O0.2** — the benchmark harness.~~ ✅ done — and it rewrote items 3
+and 4 below, which is what it was for.
+~~2. **O0.4** — fix the README diagram.~~ ✅ done.
+
+3. **O1.2's dedup slice** — *promoted to first*. Bounded Kafka retention plus
+   split compaction is a config-and-worker change against the **largest measured
+   gap** (8.4× on disk), and it pays down ingest throughput in the same stroke.
+   Nothing else in this plan has that ratio of effort to measured effect.
+4. **O1.1** — single-container mode. This is the one that changes the evaluation
+   outcome most, and it is the hardest; start it early and let it run long. Now
+   quantified: 24 containers and 5.38 GiB against 2 and 905 MiB.
+5. **O2.1** — the SQL surface. Unblocks O3 entirely; nothing else raises the
+   capability ceiling as much, and it is the **only** thing that closes the 2
+   unaskable query classes.
+6. **O3.1** — dashboards. The missing daily habit.
+7. **O5.2** — Prometheus `remote_write`. Cheapest large migration wedge in the plan.
 
 Waves O1 and O2 can run in parallel by different tracks; O3 depends on O2.1;
 O4.3 depends on O4.2; O6.5 (compliance) should start on day one because it is

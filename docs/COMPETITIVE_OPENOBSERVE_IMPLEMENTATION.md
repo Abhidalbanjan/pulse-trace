@@ -487,9 +487,18 @@ between "we validate the query" and "the attack is inexpressible."
 
 > **In progress.** `gateway-service/internal/sqlq/` now carries the catalog,
 > policy, escape suite, budget, scanner interface and a working DuckDB engine —
-> 37 tests. The two benchmark classes that were *not expressible* (full-scan
-> aggregation, high-cardinality group-by) execute in tests. Remaining: the
-> concrete Quickwit/ClickHouse/Postgres scanners, and P3.2's endpoint.
+> 45 tests, including the concrete Quickwit/ClickHouse/Postgres scanners. The
+> two benchmark classes that were *not expressible* (full-scan aggregation,
+> high-cardinality group-by) execute in tests. Remaining: P3.2's endpoint.
+>
+> **The catalog was rewritten against the live stores.** The first draft invented
+> columns. Reality: `otel_traces` has **no TenantID column** — the tenant lives
+> in `ResourceAttributes['tenant.id']`, so a shared "add WHERE TenantID" helper
+> would have been silently wrong for the largest table; Quickwit's index has no
+> `span_id`; and there is **no `otel_metrics` table at all**, only five typed
+> ones. `metrics` is therefore *removed* from the catalog rather than shipped as
+> a name that resolves and then fails — a modelling decision (which unifying
+> schema? union across five shapes?) masquerading as a mapping.
 >
 > **Executor decision — DuckDB, local execution.** Scanners fetch tenant-bound
 > rows; user SQL runs only against those, so it never reaches a store and

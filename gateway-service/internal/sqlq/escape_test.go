@@ -200,14 +200,14 @@ func TestSubqueryDepthIsBounded(t *testing.T) {
 	// Depth 4 with a limit of 3.
 	sql := "SELECT service_name FROM logs WHERE service_name IN (" +
 		"SELECT service_name FROM traces WHERE service_name IN (" +
-		"SELECT service_name FROM metrics WHERE service_name IN (" +
+		"SELECT service_name FROM rum_events WHERE service_name IN (" +
 		"SELECT service_name FROM logs)))"
 	mustReject(t, sql, ReasonTooDeep)
 }
 
 func TestJoinCountIsBounded(t *testing.T) {
-	sql := "SELECT 1 FROM logs a JOIN traces b ON 1=1 JOIN metrics c ON 1=1 " +
-		"JOIN rum_events d ON 1=1 JOIN synthetic_results e ON 1=1 JOIN deployments f ON 1=1"
+	sql := "SELECT 1 FROM logs a JOIN traces b ON 1=1 JOIN rum_events c ON 1=1 " +
+		"JOIN synthetic_results d ON 1=1 JOIN deployments e ON 1=1 JOIN incidents f ON 1=1"
 	mustReject(t, sql, ReasonTooManyJoins)
 }
 

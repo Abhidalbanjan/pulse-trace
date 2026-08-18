@@ -79,7 +79,7 @@ func TestNoStatementCanCauseAnotherTenantToBeScanned(t *testing.T) {
 	attacks := []string{
 		"SELECT * FROM logs",
 		"SELECT * FROM logs WHERE service_name = 'initech'",
-		"SELECT * FROM logs UNION ALL SELECT service_name, message, level, timestamp, trace_id, span_id FROM logs",
+		"SELECT * FROM logs UNION ALL SELECT timestamp, service_name, level, message, trace_id FROM logs",
 		"WITH x AS (SELECT * FROM logs) SELECT * FROM x",
 		"SELECT l.message FROM logs l JOIN traces t ON l.trace_id = t.trace_id",
 		"SELECT count(*) FROM logs WHERE service_name IN (SELECT service_name FROM traces)",

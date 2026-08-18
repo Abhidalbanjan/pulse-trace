@@ -87,34 +87,55 @@ type Catalog struct {
 // select or filter on directly.
 func DefaultCatalog() *Catalog {
 	rels := []Relation{
+		// Quickwit `pulsetrace-logs`. Field list taken from the live index
+		// mapping, not from what a log record "ought" to have — the first draft
+		// of this catalog invented a span_id here that the index does not carry,
+		// which would have resolved at validation and failed at scan time.
 		{
 			Name: "logs", Store: StoreLogs, TenantBound: true,
-			Columns: []string{"timestamp", "service_name", "level", "message", "trace_id", "span_id"},
+			Columns: []string{"timestamp", "service_name", "level", "message", "trace_id"},
 		},
+		// ClickHouse pulsetrace.otel_traces. Note this table has no TenantID
+		// column at all — the tenant lives in ResourceAttributes['tenant.id'],
+		// which is why the scanner, not the catalog, owns the tenant predicate.
 		{
 			Name: "traces", Store: StoreAnalytics, TenantBound: true,
-			Columns: []string{"timestamp", "trace_id", "span_id", "parent_span_id", "service_name", "span_name", "duration_ms", "status_code"},
+			Columns: []string{"timestamp", "trace_id", "span_id", "parent_span_id", "service_name",
+				"span_name", "span_kind", "duration_ms", "status_code", "status_message"},
 		},
-		{
-			Name: "metrics", Store: StoreAnalytics, TenantBound: true,
-			Columns: []string{"timestamp", "service_name", "metric_name", "value"},
-		},
+		// ClickHouse pulsetrace.rum_events.
 		{
 			Name: "rum_events", Store: StoreAnalytics, TenantBound: true,
-			Columns: []string{"timestamp", "session_id", "event_type", "name", "duration_ms", "url"},
+			Columns: []string{"timestamp", "session_id", "event_type", "path", "user_agent",
+				"metric_name", "metric_value", "error_message", "trace_id", "span_id"},
 		},
+		// ClickHouse pulsetrace.synthetic_results.
 		{
 			Name: "synthetic_results", Store: StoreAnalytics, TenantBound: true,
-			Columns: []string{"timestamp", "check_name", "url", "status_code", "latency_ms", "success", "failure_reason"},
+			Columns: []string{"timestamp", "check_name", "url", "status_code", "latency_ms",
+				"success", "failure_reason"},
 		},
+		// Postgres.
 		{
 			Name: "deployments", Store: StoreMeta, TenantBound: true,
 			Columns: []string{"id", "service", "version", "git_sha", "environment", "deployed_by", "deployed_at"},
 		},
 		{
 			Name: "incidents", Store: StoreMeta, TenantBound: true,
-			Columns: []string{"id", "title", "severity", "status", "service", "opened_at", "closed_at"},
+			Columns: []string{"id", "title", "status", "severity", "root_cause", "alert_count",
+				"started_at", "resolved_at"},
 		},
+
+		// Deliberately absent: `metrics`.
+		//
+		// There is no pulsetrace.otel_metrics table. The collector writes five
+		// typed tables — otel_metrics_gauge, _sum, _histogram, _summary and
+		// _exponential_histogram — with different shapes, so a single `metrics`
+		// relation means choosing a unifying schema and a UNION across all five.
+		// That is a real modelling decision, not a mapping, and shipping the name
+		// before making it would give users a relation that resolves and then
+		// fails. NewEngine refuses to start when a relation has no scanner, which
+		// is what turned this from an assumption into a caught error.
 	}
 	c := &Catalog{byName: make(map[string]Relation, len(rels))}
 	for _, r := range rels {

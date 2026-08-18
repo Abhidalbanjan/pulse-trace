@@ -356,16 +356,45 @@ that matters — the format is not where the bytes go. We close the gap with
 retention policy, compaction, tiering and accounting. **The rewrite risk this
 phase was carrying is retired.**
 
-**P2.0 · Ingest-path deduplication · S — do this first** — the cheapest large
-win in the plan. Kafka's `logs` topic currently keeps its full default retention
-after Quickwit has durably indexed the record, so the corpus exists twice.
-Bound it: retention sized to the Quickwit indexing lag plus a replay margin
-(hours, not days), sized from the measured lag not guessed, with the margin a
-config knob because P2.4's rebuild-from-replay depends on it. **Verify by
-re-running the harness, not by reasoning** — this slice's whole claim is a
-number, and it either moves or it does not.
-**Budget:** bytes-per-GiB-ingested drops materially with **zero** loss of
-indexed records; ingest wall-clock re-measured in the same run.
+**P2.0 · Ingest-path deduplication · S — do this first** ✅ **shipped** — the
+cheapest large win in the plan. Kafka's `logs` topic kept its full 168h default
+after Quickwit had durably indexed the record, so the corpus existed twice.
+Retention is now 24h: enough to survive an overnight failure found the next
+morning, and a config knob because P2.4's rebuild-from-replay cannot reach
+further back than this value.
+
+**What made it non-trivial.** Lowering `retention.hours` alone reclaims
+*nothing*. Kafka deletes only **closed** segments, and the defaults are a 1 GiB
+segment rolling after 168h — a 2 GiB corpus over 10 partitions puts ~215 MiB in
+each, a fifth of one segment, so every partition holds one perpetually-open
+segment and nothing is ever collectable. Confirmed on the live broker before the
+change: 10 partitions, 10 segment files, **0 closed**. The fix is
+`segment.bytes` 128 MiB + `roll.hours` 6 (so segments close at all), plus
+`index.size.max.bytes` 2 MiB (10 MiB is preallocated per *open* segment and
+sized for a 1 GiB one). `scripts/bench/verify-kafka-retention.sh` asserts the
+structural property and fails on the pre-fix broker.
+
+**Correction to this slice as originally written.** It said "verify by re-running
+the harness, not by reasoning." That is wrong, and the harness cannot settle it:
+footprint is sampled immediately after a burst ingest, and with a 24h window
+nothing ages out inside a ten-minute run. The benchmark will show the segment
+and index savings only. What the slice actually buys is the elimination of
+**unbounded growth** — under the old config each benchmark run accumulated
+(2.22 GiB after one load, 4.32 GiB after two, never released), whereas the
+deployment now plateaus at a 24h working set. That is a steady-state property,
+so it is verified structurally and by the watchdog, not by a burst measurement.
+**A slice whose benefit the harness cannot see needs its own evidence, and
+saying so is cheaper than publishing a number the method does not support.**
+
+**Safety, and why it is part of this slice.** At 168h, consumer lag was an
+efficiency question; at 24h a consumer stalled overnight loses records silently,
+and `logs` has three independent consumer groups. `shared/kafka` now carries a
+retention watchdog tracking each group's committed offset against the **oldest
+offset still retained** — lag alone is the wrong signal, since it says nothing
+about whether the unread records still exist. Groups are discovered per sample,
+because Quickwit's group ID embeds a generated ULID.
+**Budget:** Kafka disk bounded by the retention window rather than growing
+monotonically, with **zero** loss of indexed records.
 
 **P2.1 · Object-store-primary tiering · M** — hot window in **hours**
 (`TTL … + INTERVAL 6 HOUR TO DISK 's3'`), hot volume sized for the window. The

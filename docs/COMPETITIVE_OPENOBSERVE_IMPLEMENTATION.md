@@ -377,6 +377,20 @@ change: 10 partitions, 10 segment files, **0 closed**. The fix is
 sized for a 1 GiB one). `scripts/bench/verify-kafka-retention.sh` asserts the
 structural property and fails on the pre-fix broker.
 
+**Verified on a live stack.** Same corpus, same 10 partitions, before and
+after:
+
+| | segment files | closed / collectable |
+| --- | :---: | :---: |
+| Before (168h, 1 GiB segments) | 10 | **0** |
+| After (24h, 128 MiB segments, 6h roll) | 28 | **18, across all 10 partitions** |
+
+Zero collectable segments is the pathology; 18 is retention becoming able to do
+its job. The watchdog was also exercised against the live broker and discovered
+all three consumer groups — including Quickwit's
+`quickwit-pulsetrace-logs:01M09PSPN3891DCRKAV6F6WF30-kafka-logs-source`, which is
+the case a hardcoded group list would have missed.
+
 **Correction to this slice as originally written.** It said "verify by re-running
 the harness, not by reasoning." That is wrong, and the harness cannot settle it:
 footprint is sampled immediately after a burst ingest, and with a 24h window

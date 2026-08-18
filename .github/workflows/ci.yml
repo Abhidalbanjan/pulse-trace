@@ -161,6 +161,37 @@ jobs:
       - name: Enforce backend↔frontend parity
         run: node scripts/parity/check-parity.mjs
 
+  bench-harness:
+    name: benchmark harness
+    runs-on: ubuntu-latest
+    # The harness produces the storage and latency numbers in BENCHMARK.md that
+    # the competitive plan allocates engineering weeks against. It had shipped
+    # three defects that were invisible in its own output — a volume enumerator
+    # that counted OpenObserve's disk in full and skipped 4.86 GiB of ours, a
+    # container filter that swept in an orphan, and a size parser that returned
+    # zero unconditionally. None of its tests ran anywhere. They do now.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.6"
+      # Report rendering: percentile selection, unsupported-class handling, and
+      # the "publish losses as loudly as wins" formatting rules.
+      - name: Report renderer tests
+        run: node --test scripts/bench/report.test.mjs
+      # Footprint sampling. Driven by a stub docker, so it needs no daemon and
+      # catches the selection and parsing bugs that a live run would take a
+      # 40-minute ingest to reveal.
+      - name: Footprint sampler tests
+        run: ./scripts/bench/footprint.test.sh
+      # Corpus reproducibility: the same seed must yield the same SHA-256, or no
+      # two runs are comparable.
+      - name: Corpus generator tests
+        run: cd scripts/bench/corpus && GOWORK=off go test ./...
+
   e2e:
     name: e2e (playwright)
     runs-on: ubuntu-latest

@@ -51,6 +51,7 @@ func TestGatewaySchemaProvisionsFromScratch(t *testing.T) {
 		"users", "error_groups", "deployments", "roles", "abac_policies",
 		"audit_log", "rate_limit_rules", "alert_rules", "ingestion_keys", "tenants", "usage_daily",
 		"saved_searches",
+		"query_audit", "query_budgets",
 	}
 	for _, tbl := range wantTables {
 		var exists bool

@@ -70,6 +70,11 @@ type Result struct {
 	Rows    [][]any
 	Elapsed time.Duration
 	Scanned int // rows pulled from stores, for cost attribution
+	// Relations the validator resolved, for audit and cost attribution.
+	// Carried on the result rather than recomputed by the caller: re-parsing the
+	// statement later would answer with whatever the parser says *then*, which
+	// is not necessarily what was acted on now.
+	Relations []string
 }
 
 // Query validates, scans, loads and executes. tenantID must come from the
@@ -131,6 +136,9 @@ func (e *Engine) Query(ctx context.Context, tenantID, userSQL string) (*Result, 
 	}
 	res.Elapsed = time.Since(start)
 	res.Scanned = track.total
+	for _, rel := range analysis.Relations {
+		res.Relations = append(res.Relations, rel.Name)
+	}
 	return res, nil
 }
 

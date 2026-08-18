@@ -9,6 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/grafana/pyroscope-go v1.4.1
 	github.com/lib/pq v1.12.3
+	github.com/marcboeker/go-duckdb/v2 v2.4.3
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20260817083744-5e1901b920a5
 	github.com/pulsetrace/shared v0.0.0-00010101000000-000000000000
 	github.com/vmihailenco/msgpack/v5 v5.4.1
@@ -60,7 +61,6 @@ require (
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/marcboeker/go-duckdb/arrowmapping v0.0.21 // indirect
 	github.com/marcboeker/go-duckdb/mapping v0.0.21 // indirect
-	github.com/marcboeker/go-duckdb/v2 v2.4.3 // indirect
 	github.com/mattermost/xml-roundtrip-validator v0.1.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/pingcap/errors v0.11.5-0.20250523034308-74f78ae071ee // indirect

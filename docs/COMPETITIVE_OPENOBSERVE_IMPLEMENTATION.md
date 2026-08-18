@@ -510,10 +510,12 @@ between "we validate the query" and "the attack is inexpressible."
 >   and `__res_init`. gateway-service moves to `golang:1.26.6` +
 >   `distroless/cc-debian12` with `CGO_ENABLED=1`. Every other service is
 >   unchanged.
-> - **Image size, which is dimension D1 — the one we already lose.** 68.2 MB →
->   98.9 MB today, and DuckDB adds a further **+38 MB** once the endpoint links
->   it (34.4 → 72.2 MB binary), so ~137 MB. distroless rather than debian-slim
->   saves 100 MB of that; paying for D3 with D1 is a real trade and it is
+> - **Image size, which is dimension D1 — the one we already lose.** Measured on
+>   linux: the gateway binary goes **33 MB → 100.6 MB** once DuckDB is linked
+>   (104,772 symbols), taking the image from 68.2 MB to roughly **166 MB**.
+>   distroless rather than debian-slim saves ~100 MB of that. An earlier note
+>   here said +38 MB — that was measured on a darwin test binary and understated
+>   it; the real cost is +67 MB. Paying for D3 with D1 is a real trade and it is
 >   recorded rather than absorbed.
 >
 > **A rendering bug the tests caught, worth keeping in mind for P3.2:**
@@ -544,7 +546,18 @@ A cannot retrieve tenant B's row through **any** accepted query.
 cover `sqlq`. If isolation cannot be *demonstrated*, this ships single-tenant /
 on-prem only and the docs say so plainly.
 
-### P3.2 — SQL endpoint · M
+### P3.2 — SQL endpoint · M ✅ *shipped*
+`POST /api/v1/query/sql`, migration **027** (`query_audit`, `query_budgets`),
+NDJSON streaming, cancellable via request context, every execution audited —
+**including refusals**, because a run of rejections against system schemas is
+the signal you most want and a success-only log discards it. Registered in the
+parity registry as API-first; the workbench UI is P3.6.
+
+**Honest limit:** the response streams, the *computation* does not. `sqlq`
+materialises the result before returning, so this is not incremental execution
+and the memory profile is that of the whole result set. Saying otherwise would
+misrepresent it.
+
 Migration **027**. `POST /api/v1/query/sql` — streaming NDJSON, cancellable via
 request context, every execution recorded in `query_audit` (who, what, bytes
 scanned, duration). Saved queries extend `saved_search_handler.go` rather than

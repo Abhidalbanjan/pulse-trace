@@ -17,14 +17,17 @@
 #
 # Cost, measured rather than estimated, so it is not rediscovered:
 #
-#   alpine + CGO_ENABLED=0   (before)            68.2 MB image
-#   distroless/cc + CGO=1    (this file)         98.9 MB image, 33 MB binary
-#   DuckDB static link                           +38 MB  (34.4 -> 72.2 MB)
+#   alpine + CGO_ENABLED=0   (before)            68.2 MB image, ~20 MB binary
+#   distroless/cc + CGO=1, sqlq not linked       98.9 MB image,  33 MB binary
+#   distroless/cc + CGO=1, DuckDB linked                 ~166 MB, 100.6 MB binary
 #
-# The image above does NOT yet include DuckDB: nothing in cmd/ imports
-# internal/sqlq, so the linker drops it. Expect ~137 MB once the SQL endpoint
-# wires the engine in. Recorded here because measuring the image today and
-# calling it "the cost of DuckDB" would understate it by 38 MB.
+# The middle row is what the image measured before cmd/ imported internal/sqlq —
+# the linker drops an unimported package, so DuckDB was not in it and calling
+# that "the cost of DuckDB" would have understated it badly. An earlier estimate
+# here said +38 MB, taken from a darwin test binary; the real linux figure is
+# +67 MB (33 -> 100.6 MB, 104,772 DuckDB symbols). The binary numbers are
+# measured; the image total is derived from them, because a local Docker network
+# fault blocked the final image build — CI's docker-build job is the check.
 #
 # Only this service is affected — every other service keeps CGO_ENABLED=0 on
 # Alpine.

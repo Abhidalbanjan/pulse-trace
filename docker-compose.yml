@@ -34,7 +34,44 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_NUM_PARTITIONS: 10
-      KAFKA_LOG_RETENTION_HOURS: 168
+      # ── Retention: Kafka is a transport buffer, not the system of record ────
+      #
+      # Quickwit is the system of record for logs. Kafka only has to hold a
+      # record long enough for every consumer to read it (Quickwit,
+      # alert-service, topology-service) plus enough slack to survive an outage
+      # someone has to wake up and fix. It was set to 168h — a full second copy
+      # of the corpus for a week. Measured: 4.32 GiB of Kafka against a 2 GiB
+      # ingest, the single largest line in our storage footprint.
+      #
+      # 24h covers an overnight failure discovered the next morning, which is
+      # the realistic operator response window. Raise it if you need a longer
+      # replay horizon — note that an index rebuilt from Kafka can only reach
+      # back as far as this setting, so this is the true bound on
+      # rebuild-from-replay.
+      KAFKA_LOG_RETENTION_HOURS: ${KAFKA_LOG_RETENTION_HOURS:-24}
+      #
+      # The three settings below are why lowering retention alone does nothing.
+      # Kafka only deletes *closed* segments. Defaults are a 1 GiB segment that
+      # rolls after 168h, so at any realistic volume here every partition holds
+      # one perpetually-open segment and NOTHING is ever eligible for deletion,
+      # whatever retention.hours says. A 2 GiB corpus over 10 partitions is
+      # ~215 MiB per partition — a fifth of one segment. Verified on a live
+      # broker: 10 partitions, 10 segment files, zero closed.
+      KAFKA_LOG_SEGMENT_BYTES: 134217728          # 128 MiB — segments close at this volume
+      KAFKA_LOG_ROLL_HOURS: ${KAFKA_LOG_ROLL_HOURS:-6}   # ...and close on time when quiet
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 60000       # enforce promptly, not every 5 min
+      #
+      # Preallocated per *open* segment, so it is charged 2x (index + timeindex)
+      # per partition no matter how little data is present. The 10 MiB default
+      # sizes an index for a 1 GiB segment; a 128 MiB segment needs ~256 KiB.
+      KAFKA_LOG_INDEX_SIZE_MAX_BYTES: 2097152     # 2 MiB
+      #
+      # Runaway guard only — per partition, so 512 MiB x 10 = 5 GiB ceiling for
+      # the topic. Time is the primary control; this exists so a burst cannot
+      # fill the disk before the 24h window elapses. Deliberately well above the
+      # 215 MiB/partition a full benchmark load produces, because a byte limit
+      # that bites drops records consumers have not read yet.
+      KAFKA_LOG_RETENTION_BYTES: 536870912
     healthcheck:
       test: ["CMD-SHELL", "timeout 5 bash -c 'cat < /dev/null > /dev/tcp/localhost/9092' 2>/dev/null"]
       interval: 20s

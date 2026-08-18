@@ -74,7 +74,7 @@ first twenty minutes, before anyone sees what we are actually good at.
 | :---: | --- | --- | :---: | :---: |
 | **P0** | Ground truth | Measured baseline vs OpenObserve; no unverified claim survives | 4 | 2 |
 | **P1** | Core runtime | Five ports; one binary; `docker run` → data in <60 s | 7 | 9 |
-| **P2** | Storage engine | Object-store-primary, compactor, file-list index, cost accounting | 5 | 6 |
+| **P2** | Storage engine | Dedup the ingest path, compact splits, object-store-primary, cost accounting | 6 | 6 |
 | **P3** | Query engine | Federated SQL (DuckDB) + PromQL + cross-signal joins | 7 | 11 |
 | **P4** | Streams & schema | Registry, inference, 15-field settings, self-serve retention | 4 | 5 |
 | **P5** | Pipelines & governance | Real VRL, enrichment, SDR, **per-record erasure** | 6 | 9 |
@@ -155,6 +155,18 @@ Every slice, all nine. No exceptions, no "follow-up ticket."
 currently measured. P0 is cheap and makes every later phase falsifiable.
 **Non-goals.** Tuning. P0 measures; it does not optimise.
 
+> **Status: P0.1 and P0.2 are delivered.** The harness lives in
+> `scripts/bench/`, results in [BENCHMARK.md](../BENCHMARK.md), and the exit
+> condition below is met — §1 of the spec doc now cites measured numbers.
+> It paid for itself immediately: the measurement **rescoped P2** (the gap is
+> duplication, not format — see the note there) and **confirmed P3 is the only
+> phase that closes D3**. It also found a shipped bug no test covered: the regex
+> class failed 20/20 because Quickwit 0.8 has no regex and parsed our `field:/…/`
+> as a wildcard. Fixed; the class now runs (79/126 ms against their 47/65 ms —
+> slower than theirs, but it used to be impossible).
+> **Still outstanding: P0.3, P0.4, and cold-start-to-first-query** — the one
+> sample in P0.2's list the harness does not yet collect.
+
 **P0.1 · Comparative harness · S**
 `scripts/bench/compose.openobserve.yml` (pinned tag, MinIO backing, resource
 limits matched to ours) · `corpus/gen.go` — seeded, byte-reproducible: 10 GB
@@ -185,8 +197,9 @@ measured numbers instead of their marketing.
 
 ## P1 — Core runtime · 7 slices · 9 weeks
 
-**Thesis.** 23 containers is the largest adoption barrier and the root of our
-cost disadvantage. Five ports let the same code be a one-container product or the
+**Thesis.** **23 containers — measured, against their 2** — is the largest
+adoption barrier and a real cost line: **5.00 GiB resident against their
+733 MiB**. Five ports let the same code be a one-container product or the
 cluster we run today.
 
 **Non-goals.** Rewriting business logic.
@@ -316,19 +329,89 @@ in under a minute; the cluster path is unchanged; all pre-existing gates green.
 
 ---
 
-## P2 — Storage engine · 5 slices · 6 weeks
+## P2 — Storage engine · 6 slices · 6 weeks
 
-**Thesis.** Our log tier is already competitive — Quickwit *is* tantivy, the same
-substrate as their Parquet + tantivy/puffin. The real gaps: traces/metrics/RUM sit
-on SSD-primary ClickHouse for the whole retention window, and we have **no
-compactor and no file-list index** — which is how they enforce retention and
-account for cost.
+> **Rescoped after P0 measured it.** [BENCHMARK.md](../BENCHMARK.md): we write
+> **3.39 GiB per GiB ingested against their 309 MiB — 11.2×**. The measurement
+> also found the *cause*, which is what changes this phase: it is **duplication,
+> not format**. (Two earlier runs reported 8.4× and 7.5×; both under-measured
+> *us*, because the sampler skipped anonymous volumes. The gap was always this
+> size.)
 
-**Key decision — do not write a storage engine.** _Rejected:_ building our own
-Parquet+index engine. Twelve-plus months, it is their core competency, and
-Quickwit already gives us the property that matters. We close the gap with
-tiering, compaction and accounting — weeks, not quarters. Win the dimension,
-don't win the rewrite.
+**Thesis.** The substrate is not the problem. Our log tier is Quickwit, which
+*is* tantivy — the same engine family as their Parquet + tantivy/puffin — so the
+11.2× is not columnar beating an inverted index. It decomposes into three things
+we own:
+
+1. **Kafka retains a full second copy** of every log record after Quickwit has
+   indexed it. Pure duplication, and the same hop that makes our ingest 572 s
+   against their 74 s. Highest leverage item in the phase.
+2. **Quickwit splits are never compacted.** Small splits carry per-split
+   overhead and never merge, so the index grows superlinearly in file count.
+3. **Traces/metrics/RUM sit on SSD-primary ClickHouse** for the whole retention
+   window, with no compactor and no file-list index — which is how they enforce
+   retention and account for cost.
+
+**Key decision — do not write a storage engine, now with evidence.**
+_Rejected:_ building our own Parquet+index engine. Twelve-plus months, it is
+their core competency, and P0 confirmed Quickwit already gives us the property
+that matters — the format is not where the bytes go. We close the gap with
+retention policy, compaction, tiering and accounting. **The rewrite risk this
+phase was carrying is retired.**
+
+**P2.0 · Ingest-path deduplication · S — do this first** ✅ **shipped** — the
+cheapest large win in the plan. Kafka's `logs` topic kept its full 168h default
+after Quickwit had durably indexed the record, so the corpus existed twice.
+Retention is now 24h: enough to survive an overnight failure found the next
+morning, and a config knob because P2.4's rebuild-from-replay cannot reach
+further back than this value.
+
+**What made it non-trivial.** Lowering `retention.hours` alone reclaims
+*nothing*. Kafka deletes only **closed** segments, and the defaults are a 1 GiB
+segment rolling after 168h — a 2 GiB corpus over 10 partitions puts ~215 MiB in
+each, a fifth of one segment, so every partition holds one perpetually-open
+segment and nothing is ever collectable. Confirmed on the live broker before the
+change: 10 partitions, 10 segment files, **0 closed**. The fix is
+`segment.bytes` 128 MiB + `roll.hours` 6 (so segments close at all), plus
+`index.size.max.bytes` 2 MiB (10 MiB is preallocated per *open* segment and
+sized for a 1 GiB one). `scripts/bench/verify-kafka-retention.sh` asserts the
+structural property and fails on the pre-fix broker.
+
+**Verified on a live stack.** Same corpus, same 10 partitions, before and
+after:
+
+| | segment files | closed / collectable |
+| --- | :---: | :---: |
+| Before (168h, 1 GiB segments) | 10 | **0** |
+| After (24h, 128 MiB segments, 6h roll) | 28 | **18, across all 10 partitions** |
+
+Zero collectable segments is the pathology; 18 is retention becoming able to do
+its job. The watchdog was also exercised against the live broker and discovered
+all three consumer groups — including Quickwit's
+`quickwit-pulsetrace-logs:01M09PSPN3891DCRKAV6F6WF30-kafka-logs-source`, which is
+the case a hardcoded group list would have missed.
+
+**Correction to this slice as originally written.** It said "verify by re-running
+the harness, not by reasoning." That is wrong, and the harness cannot settle it:
+footprint is sampled immediately after a burst ingest, and with a 24h window
+nothing ages out inside a ten-minute run. The benchmark will show the segment
+and index savings only. What the slice actually buys is the elimination of
+**unbounded growth** — under the old config each benchmark run accumulated
+(2.22 GiB after one load, 4.32 GiB after two, never released), whereas the
+deployment now plateaus at a 24h working set. That is a steady-state property,
+so it is verified structurally and by the watchdog, not by a burst measurement.
+**A slice whose benefit the harness cannot see needs its own evidence, and
+saying so is cheaper than publishing a number the method does not support.**
+
+**Safety, and why it is part of this slice.** At 168h, consumer lag was an
+efficiency question; at 24h a consumer stalled overnight loses records silently,
+and `logs` has three independent consumer groups. `shared/kafka` now carries a
+retention watchdog tracking each group's committed offset against the **oldest
+offset still retained** — lag alone is the wrong signal, since it says nothing
+about whether the unread records still exist. Groups are discovered per sample,
+because Quickwit's group ID embeds a generated ULID.
+**Budget:** Kafka disk bounded by the retention window rather than growing
+monotonically, with **zero** loss of indexed records.
 
 **P2.1 · Object-store-primary tiering · M** — hot window in **hours**
 (`TTL … + INTERVAL 6 HOUR TO DISK 's3'`), hot volume sized for the window. The
@@ -360,12 +443,23 @@ streams. Foundation of the cost-intelligence differentiator: they compete on bei
 cheap, we also explain the bill.
 
 **P2.4 · Quickwit lifecycle ownership · M** — today it is configured once by an
-init container and never managed. Bring it under lifecycle: split merge policy,
-retention via the compactor, index health in Settings, and an admin action to
-rebuild an index from Kafka replay.
+init container and never managed, which is cause (2) above: **splits are never
+compacted.** Bring it under lifecycle: an explicit split merge policy, retention
+via the compactor, index health in Settings, and an admin action to rebuild an
+index from Kafka replay (note the coupling to P2.0 — replay cannot reach further
+back than Kafka retention, so the two slices must agree on the margin).
+Existing deployments also need the index recreated to pick up
+`record: position`, so fold that migration in here rather than shipping a second
+disruptive index change later.
 
-**P2.5 · Cost benchmark · S** — re-run `run-benchmark.sh`.
-**Exit gate: bytes-on-disk per GB ingested ≤ theirs, with query p95 ≤ 1.2×.**
+**P2.5 · Cost benchmark · S** — re-run `run-benchmark.sh`. The baseline is no
+longer hypothetical: **3.39 GiB/GiB, 6.78 GiB on disk, 572 s ingest, 23
+containers, 5.00 GiB RSS**, against their 309 MiB/GiB, 618 MiB, 74 s, 2, 733 MiB.
+**Exit gate: bytes-on-disk per GiB ingested ≤ theirs, with query p95 ≤ 1.2× of
+the P0 baseline** — and the four expressible query classes must not regress from
+their measured values (70/102, 13/27, 79/126, 43/64 ms p50/p95). Only
+trace-by-ID is a durable win; the other three sit inside run-to-run variance, so
+gate on *no regression*, not on holding a lead we cannot reproduce.
 
 ---
 

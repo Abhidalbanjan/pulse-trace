@@ -17,6 +17,28 @@ test.describe('Synthetic Monitoring', () => {
     await expect(page.getByText('Checkout journey').first()).toBeVisible({ timeout: 10000 });
   });
 
+  test('a configured name survives the prober, and an unnamed check is not named after its URL', async ({ page }) => {
+    await page.goto('/synthetics');
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
+
+    // Regression: the list merges configured checks with probe observations, and
+    // the prober stores `CheckName = url` for a check with no configured name.
+    // Merging as `observation || config` therefore always short-circuited on
+    // that URL, so a *renamed* check lost its name the moment it was first
+    // probed. "Checkout journey" reuses the URL of a plain check registered
+    // seconds earlier, so the previous test above passed or failed purely on
+    // whether the prober had run yet — it was green by luck, not by behaviour.
+    await expect(page.getByText('Checkout journey').first()).toBeVisible({ timeout: 10000 });
+
+    // The same defect rendered the URL twice for unnamed checks — once as the
+    // "name", once as the URL. A name that is the URL is not a name.
+    const url = 'https://gateway.acme.io/status';
+    const cell = page.getByRole('cell', { name: new RegExp(url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) }).first();
+    await expect(cell).toBeVisible({ timeout: 10000 });
+    const occurrences = (await cell.innerText()).split(url).length - 1;
+    expect(occurrences).toBe(1);
+  });
+
   test('expanding a check shows its 24h availability timeline', async ({ page }) => {
     await page.goto('/synthetics');
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });

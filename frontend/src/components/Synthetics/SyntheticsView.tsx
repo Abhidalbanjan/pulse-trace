@@ -127,8 +127,18 @@ export function SyntheticsView() {
     // keep the old name, and merging by URL alone let the stale observation
     // shadow the current configuration — the renamed check simply vanished from
     // the list until the worker happened to probe it again.
+    //
+    // The precedence has to be config-first, not `observation || config`. The
+    // prober stores `CheckName = url` for a check that has no configured name
+    // (synthetics_handler.go: `if name == "" { name = tgt.url }`), so the
+    // observed name is *never* empty — it is the URL. `r.check_name || …`
+    // therefore always short-circuited on that URL and the configured name was
+    // unreachable for exactly the rows that had already been probed. The seeded
+    // "Checkout journey" reuses the URL of a plain check registered moments
+    // earlier, so whether it appeared at all came down to whether the prober
+    // had run yet: green while the race happened to fall one way.
     const configuredName = new Map(checks.filter(c => c.name).map(c => [c.url, c.name as string]));
-    const withNames = probed.map(r => ({ ...r, check_name: r.check_name || configuredName.get(r.URL) }));
+    const withNames = probed.map(r => ({ ...r, check_name: configuredName.get(r.URL) ?? r.check_name }));
 
     const seen = new Set(probed.map(r => r.URL));
     const pending = checks
@@ -352,7 +362,13 @@ export function SyntheticsView() {
                           <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: healthy ? t.green : t.red }} />
                         </td>
                         <td style={{ padding: '16px', fontSize: '13px', color: t.text1 }}>
-                          {r.check_name && <div style={{ fontWeight: 600, marginBottom: '2px' }}>{r.check_name}</div>}
+                          {/* Same root cause as the merge above: an unnamed check
+                              carries the URL as its observed name, which rendered
+                              the URL twice in the cell. A name that *is* the URL
+                              is not a name. */}
+                          {r.check_name && r.check_name !== r.URL && (
+                            <div style={{ fontWeight: 600, marginBottom: '2px' }}>{r.check_name}</div>
+                          )}
                           <div style={{ fontFamily: 'monospace', color: t.text2, fontSize: '12px', maxWidth: '320px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.URL}</div>
                         </td>
                         <td style={{ padding: '16px' }}><Sparkline data={r.latency_history || []} color={healthy ? t.accent : t.red} /></td>

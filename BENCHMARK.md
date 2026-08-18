@@ -25,7 +25,7 @@ wins — a benchmark you only run until it agrees with you is not a measurement.
 - **Native ingest and query paths on both sides.** Forcing either product onto
   the other's wire format would measure a translation layer.
 - **Equal resource caps.** Recorded in the results block. An uncapped single
-  binary against a capped 24-container stack is not a result.
+  binary against a capped 23-container stack is not a result.
 - **Pinned OpenObserve image.** Recorded in the results block.
 - **Warm-up discarded, errors counted.** The first call pays connection setup
   and cache population; failures are reported rather than dropped.
@@ -34,95 +34,101 @@ Read the numbers with the sample size in mind: nearest-rank percentiles over
 `iterations` samples support less precision than three significant figures
 would suggest.
 
-## ⚠️ The footprint numbers below are under correction
-
-**The storage and container figures in this file undercount PulseTrace.** Found
-2026-08-18 while starting the Kafka-retention work, by asking the running stack
-where its bytes actually were:
-
-- `footprint.sh` enumerated volumes by matching the name prefix `pulse-trace_`.
-  Images that declare `VOLUME` in their Dockerfile — **Kafka, ClickHouse**,
-  ZooKeeper, Neo4j, Redis, Jaeger, Pyroscope — get an *anonymous* volume named
-  with a 64-hex hash, which matches no prefix and was skipped. That is
-  **4.86 GiB unmeasured, 4.32 GiB of it Kafka.** OpenObserve's two volumes are
-  both named, so *their* side was counted in full. The bias ran one way: toward
-  us.
-- It also counted a **stale** `pulse-trace_clickhouse_data` volume from a
-  superseded compose revision — charging us for disk nothing writes to, while
-  missing the volume ClickHouse actually uses.
-- The container count swept in an **orphaned** `clickhouse-enterprise`
-  container from that same old revision. The stack defines **23**, not the 24
-  reported here.
-
-So **1.53 GiB per GiB ingested is too low** and the real ratio is worse than
-8.4×. The direction of the headline finding is unchanged — and the cause is now
-even more clearly Kafka — but the magnitude is wrong and no arithmetic fixes it:
-the delta needs a baseline snapshot for those volumes, which was never taken.
-**It requires a re-run, which is in progress.** Until it lands, treat every
-number in the Footprint table as a lower bound on our own cost.
-
-The sampler is fixed: it now derives both stacks from their compose files and
-counts every volume those containers actually mount, named or not.
-**Query-latency and capability results are unaffected** — they never touched the
-footprint path.
-
 ## What this run says
 
 A clean run: both stacks rebuilt from empty volumes, 2 GiB corpus, **5,104,768
 log records ingested by each side**, both verified to hold that count before
 querying, 20 iterations per class.
 
-**Storage is the clear loss, and it reproduces.** PulseTrace writes **1.53 GiB
-per GiB ingested** against OpenObserve's **187 MiB** — roughly **8.4× more disk
-for the same data**. An earlier independent run on separate clean volumes gave
-1.86 GiB vs 253 MiB (7.5×). Two builds agreeing to within a fraction is what
-makes this structural rather than noise, and it settles the question phase
-**P2** (storage engine, 6 eng-wks) was budgeted to answer.
+This is the first run whose footprint numbers can be trusted. The two before it
+under-measured PulseTrace, and the correction is recorded at the bottom of this
+section rather than quietly folded in.
 
-The useful part is the cause. The log tier here is Quickwit, which *is* tantivy —
-the same substrate as their index — so this is not "columnar beats inverted
-index". It is amplification: Kafka retains a full copy of the corpus, and the
-Quickwit splits are never compacted. Both are addressable without replacing the
-engine, so **P2 should be rescoped from an object-store-primary rewrite to
-deduplication and compaction** — a materially smaller piece of work than the
-plan assumed.
+**Storage is the clear loss, and it is larger than we published.** PulseTrace
+writes **3.39 GiB per GiB ingested** against OpenObserve's **309 MiB** —
+**11.2× more disk for the same data**. Earlier runs reported 8.4× and 7.5×;
+both were measured with a sampler that skipped our anonymous volumes, so the
+gap was always this size and we were reporting a lower bound as if it were the
+figure. The direction never changed, only our ability to see it.
 
-**Deployability is the other clear loss:** 24 containers against 2, and 5.38 GiB
-resident against 905 MiB. Dimension D1, measured rather than asserted.
+The useful part is the cause, and it is unchanged: this is **amplification, not
+format**. Our log tier is Quickwit, which *is* tantivy — the same substrate as
+their index — so it was never "columnar beats inverted index". Kafka retains a
+full second copy of the corpus and the Quickwit splits are never compacted.
+Both are fixable without replacing an engine, so **P2 stays rescoped** from an
+object-store-primary rewrite to deduplication and compaction.
 
-**Ingest throughput differs by ~8×** and is worth reading architecturally rather
-than as a score: OpenObserve took 76 s for the corpus, PulseTrace 593 s. Theirs
-is HTTP straight to storage; ours traverses gateway → Kafka → Quickwit. That is
-each product's native path, which is the comparison this harness exists to make —
-but note the same Kafka hop implicated in the storage amplification shows up
-here too. One architectural decision, two measurements.
+**Deployability:** **23 containers against 2**, and **5.00 GiB resident against
+733 MiB** — 7× the memory. Dimension D1, measured.
 
-**Query latency is mixed, and inverts the smoke run.** At 8 MiB everything
-favoured OpenObserve; at 5.1 M records:
+**Ingest throughput differs by ~7.7×**: OpenObserve took 74 s for the corpus,
+PulseTrace 572 s. Theirs is HTTP straight to storage; ours traverses gateway →
+Kafka → Quickwit. That is each product's native path, which is the comparison
+this harness exists to make — and the same Kafka hop implicated in the storage
+amplification shows up here too. One architectural decision, two measurements.
 
-- **Trace-by-ID: PulseTrace ~25× faster** (16 ms vs 504 ms p50). Quickwit serves
-  it from a term index; OpenObserve scans. Read this as a comparison of *default
-  configurations* — `trace_id` could be indexed on their side and the gap would
-  narrow. It is fair, not damning.
-- **Time-narrowed service filter: PulseTrace faster on p95** (88 ms vs 136 ms),
-  the closest thing here to the everyday interactive query.
-- **Needle-in-a-haystack and regex: near parity**, OpenObserve modestly ahead
-  (182 ms vs 142 ms, and 148 ms vs 136 ms p95).
-- **Aggregations: OpenObserve only.** Not slower on our side — impossible.
+### Query latency — read the small differences as noise
 
-**The regex class now runs.** In the previous run it failed all 20 iterations:
-Quickwit 0.8 has no regex in its query language and parsed the `field:/…/`
-syntax we emitted as a wildcard, so any pattern containing a metacharacter
-returned 502. That is fixed — the regex is now evaluated in Go over an
-index-narrowed candidate set — and the class turns in 86 ms / 148 ms, competitive
-with their 61 ms / 136 ms. A capability that had never worked is now roughly at
-parity.
+| Class | PulseTrace | OpenObserve | Robust? |
+| --- | --- | --- | --- |
+| Trace by ID | 13 / 27 ms | 579 / 701 ms | **yes — ~45×, ours** |
+| Needle in a haystack | 70 / 102 ms | 63 / 95 ms | no |
+| Regex scan | 79 / 126 ms | 47 / 65 ms | no |
+| Time-narrowed service filter | 43 / 64 ms | 36 / 53 ms | no |
+| Full-scan aggregation | *not expressible* | 71 / 91 ms | **yes — theirs** |
+| High-cardinality group-by | *not expressible* | 118 / 149 ms | **yes — theirs** |
 
-Two of six classes remain **not expressible** against PulseTrace at all. That is
-dimension D3 measured, and no amount of tuning closes it — it is what phase P3
-(query engine) exists to fix.
+Only three of these six survive a second run. **Trace-by-ID is decisively ours**
+— Quickwit serves it from a term index while OpenObserve scans, though this
+compares *default configurations*: `trace_id` could be indexed on their side and
+the gap would narrow. It is fair, not damning.
+
+**The three near-parity classes move between runs and should not be quoted.**
+The previous run had us *winning* the time-narrowed service filter on p95
+(88 ms vs 136 ms); this one has OpenObserve ahead (64 ms vs 53 ms). Nothing
+changed in either product between those runs. An earlier draft of this file
+claimed we win two of the four expressible classes — **on this evidence it is
+one**, and the honest statement is that at 5.1 M records the everyday
+interactive queries are close enough that run-to-run variance exceeds the
+difference between the products.
+
+**The regex class runs at all now**, which is the finding that matters there. It
+previously failed 20/20: Quickwit 0.8 has no regex and parsed the `field:/…/`
+syntax we emitted as a wildcard, so any metacharacter returned 502. It is now
+evaluated in Go over an index-narrowed candidate set. It is slower than theirs;
+it used to be impossible.
+
+**Two of six classes remain not expressible against PulseTrace at all.** That is
+dimension D3, and no tuning closes it — it is what phase **P3** (query engine)
+exists to fix. Latency is not our problem; expressibility is.
 
 Cold start is still unmeasured; the sampler records disk, containers and RSS.
+
+### Correction: what the first two runs got wrong
+
+Found 2026-08-18 while starting the Kafka-retention work, by asking the running
+stack where its bytes actually were.
+
+- `footprint.sh` enumerated volumes by matching the name prefix `pulse-trace_`.
+  Images declaring `VOLUME` in their Dockerfile — **Kafka, ClickHouse**,
+  ZooKeeper, Neo4j, Redis, Jaeger, Pyroscope — get an *anonymous* volume named
+  with a 64-hex hash, matching no prefix and silently skipped: **4.86 GiB
+  unmeasured, 4.32 GiB of it Kafka.** OpenObserve's two volumes are both named,
+  so *their* side was counted in full. The bias ran one way, toward us.
+- It counted a **stale** `pulse-trace_clickhouse_data` volume from a superseded
+  compose revision — charging us for disk nothing writes to, while missing the
+  volume ClickHouse actually uses.
+- The container count swept in an **orphaned** `clickhouse-enterprise` container
+  from that same revision, reporting 24 where the stack defines **23**.
+
+Restated: **1.53 GiB/GiB → 3.39**, **8.4× → 11.2×**, **24 containers → 23**.
+Query-latency and capability results never touched the footprint path and were
+unaffected by this defect — though see the variance note above for why three of
+them should not have been quoted so precisely either.
+
+The sampler now derives both stacks from their compose files and counts every
+volume those containers actually mount. `scripts/bench/footprint.test.sh` locks
+in all three fixes, and CI runs it.
 
 ## How to reproduce
 
@@ -139,7 +145,7 @@ EXPECT_SHA256=<hash> ./scripts/bench/load.sh --target openobserve --corpus corpu
 
 _Generated by `scripts/bench/run-benchmark.sh` — do not edit by hand._
 
-- Run: **2026-08-17T12:58:21.284Z**
+- Run: **2026-08-18T05:38:52.428Z**
 - Corpus: **2 GiB (5.10M log records)**, seed `42`, sha256 `5a505252e666571d…`
 - Iterations per query: **20**
 - Resource cap (both sides): **4 CPU / 8g memory**
@@ -149,22 +155,22 @@ _Generated by `scripts/bench/run-benchmark.sh` — do not edit by hand._
 
 | Query class | PulseTrace p50 / p95 | OpenObserve p50 / p95 | Verdict |
 | --- | --- | --- | --- |
-| Needle in a haystack | 81 ms / 182 ms | 78 ms / 142 ms | OpenObserve faster (1.29×) |
-| Full-scan aggregation | **not expressible** | 77 ms / 92 ms | OpenObserve only |
-| High-cardinality group-by | **not expressible** | 139 ms / 222 ms | OpenObserve only |
-| Trace by ID | 16 ms / 27 ms | 504 ms / 723 ms | PulseTrace faster (0.04×) |
-| Regex scan | 86 ms / 148 ms | 61 ms / 136 ms | OpenObserve faster (1.09×) |
-| Time-narrowed service filter | 62 ms / 88 ms | 50 ms / 136 ms | PulseTrace faster (0.65×) |
+| Needle in a haystack | 70 ms / 102 ms | 63 ms / 95 ms | OpenObserve faster (1.07×) |
+| Full-scan aggregation | **not expressible** | 71 ms / 91 ms | OpenObserve only |
+| High-cardinality group-by | **not expressible** | 118 ms / 149 ms | OpenObserve only |
+| Trace by ID | 13 ms / 27 ms | 579 ms / 701 ms | PulseTrace faster (0.04×) |
+| Regex scan | 79 ms / 126 ms | 47 ms / 65 ms | OpenObserve faster (1.92×) |
+| Time-narrowed service filter | 43 ms / 64 ms | 36 ms / 53 ms | OpenObserve faster (1.20×) |
 
 ### Footprint
 
 | Measure | PulseTrace | OpenObserve |
 | --- | --- | --- |
-| Bytes on disk (after ingest) | 3.06 GiB | 373 MiB |
-| Bytes per GiB ingested | 1.53 GiB | 187 MiB |
-| Containers | 24 | 2 |
+| Bytes on disk (after ingest) | 6.78 GiB | 618 MiB |
+| Bytes per GiB ingested | 3.39 GiB | 309 MiB |
+| Containers | 23 | 2 |
 | Cold start to first query | — | — |
-| Peak RSS (loaded) | 5.38 GiB | 905 MiB |
+| Peak RSS (loaded) | 5.00 GiB | 733 MiB |
 
 ### Capability gaps
 

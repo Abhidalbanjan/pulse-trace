@@ -162,7 +162,8 @@ currently measured. P0 is cheap and makes every later phase falsifiable.
 > duplication, not format — see the note there) and **confirmed P3 is the only
 > phase that closes D3**. It also found a shipped bug no test covered: the regex
 > class failed 20/20 because Quickwit 0.8 has no regex and parsed our `field:/…/`
-> as a wildcard. Fixed; the class now runs at 86/148 ms against their 61/136 ms.
+> as a wildcard. Fixed; the class now runs (79/126 ms against their 47/65 ms —
+> slower than theirs, but it used to be impossible).
 > **Still outstanding: P0.3, P0.4, and cold-start-to-first-query** — the one
 > sample in P0.2's list the harness does not yet collect.
 
@@ -196,9 +197,9 @@ measured numbers instead of their marketing.
 
 ## P1 — Core runtime · 7 slices · 9 weeks
 
-**Thesis.** **24 containers — measured, against their 2** — is the largest
-adoption barrier and a real cost line: **5.38 GiB resident against their
-905 MiB**. Five ports let the same code be a one-container product or the
+**Thesis.** **23 containers — measured, against their 2** — is the largest
+adoption barrier and a real cost line: **5.00 GiB resident against their
+733 MiB**. Five ports let the same code be a one-container product or the
 cluster we run today.
 
 **Non-goals.** Rewriting business logic.
@@ -331,18 +332,20 @@ in under a minute; the cluster path is unchanged; all pre-existing gates green.
 ## P2 — Storage engine · 6 slices · 6 weeks
 
 > **Rescoped after P0 measured it.** [BENCHMARK.md](../BENCHMARK.md): we write
-> **1.53 GiB per GiB ingested against their 187 MiB — 8.4×**, reproduced at 7.5×
-> on an independent clean build. The measurement also found the *cause*, which
-> is what changes this phase: it is **duplication, not format**.
+> **3.39 GiB per GiB ingested against their 309 MiB — 11.2×**. The measurement
+> also found the *cause*, which is what changes this phase: it is **duplication,
+> not format**. (Two earlier runs reported 8.4× and 7.5×; both under-measured
+> *us*, because the sampler skipped anonymous volumes. The gap was always this
+> size.)
 
 **Thesis.** The substrate is not the problem. Our log tier is Quickwit, which
 *is* tantivy — the same engine family as their Parquet + tantivy/puffin — so the
-8.4× is not columnar beating an inverted index. It decomposes into three things
+11.2× is not columnar beating an inverted index. It decomposes into three things
 we own:
 
 1. **Kafka retains a full second copy** of every log record after Quickwit has
-   indexed it. Pure duplication, and the same hop that makes our ingest 593 s
-   against their 76 s. Highest leverage item in the phase.
+   indexed it. Pure duplication, and the same hop that makes our ingest 572 s
+   against their 74 s. Highest leverage item in the phase.
 2. **Quickwit splits are never compacted.** Small splits carry per-split
    overhead and never merge, so the index grows superlinearly in file count.
 3. **Traces/metrics/RUM sit on SSD-primary ClickHouse** for the whole retention
@@ -436,12 +439,13 @@ Existing deployments also need the index recreated to pick up
 disruptive index change later.
 
 **P2.5 · Cost benchmark · S** — re-run `run-benchmark.sh`. The baseline is no
-longer hypothetical: **1.53 GiB/GiB, 3.06 GiB on disk, 593 s ingest, 24
-containers, 5.38 GiB RSS**, against their 187 MiB/GiB, 373 MiB, 76 s, 2, 905 MiB.
+longer hypothetical: **3.39 GiB/GiB, 6.78 GiB on disk, 572 s ingest, 23
+containers, 5.00 GiB RSS**, against their 309 MiB/GiB, 618 MiB, 74 s, 2, 733 MiB.
 **Exit gate: bytes-on-disk per GiB ingested ≤ theirs, with query p95 ≤ 1.2× of
 the P0 baseline** — and the four expressible query classes must not regress from
-their measured values (81/182, 16/27, 86/148, 62/88 ms p50/p95), two of which we
-currently win.
+their measured values (70/102, 13/27, 79/126, 43/64 ms p50/p95). Only
+trace-by-ID is a durable win; the other three sit inside run-to-run variance, so
+gate on *no regression*, not on holding a lead we cannot reproduce.
 
 ---
 
@@ -876,7 +880,7 @@ CI-enforced; a regression fails the build.
 
 **Decision (2026-08-13): the buyer is enterprise / regulated.** Compliance, audit
 and governance decide these deals; the buyer runs Helm and does not care that the
-stack is 24 containers. That inverts the naive phase order — §2's numbering is the
+stack is 23 containers. That inverts the naive phase order — §2's numbering is the
 *dependency* map, this section is the *execution* map, and this section wins.
 
 ### 5.1 The principle: threshold parity, not full parity

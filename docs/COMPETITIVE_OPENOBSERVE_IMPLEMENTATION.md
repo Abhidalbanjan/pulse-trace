@@ -484,6 +484,35 @@ cannot cross tenants — the data never enters the engine. That is the differenc
 between "we validate the query" and "the attack is inexpressible."
 
 ### P3.1 — Query core: parse, plan, isolate · L — *security-critical*
+
+> **In progress.** `gateway-service/internal/sqlq/` now carries the catalog,
+> policy, escape suite, budget, scanner interface and a working DuckDB engine —
+> 37 tests. The two benchmark classes that were *not expressible* (full-scan
+> aggregation, high-cardinality group-by) execute in tests. Remaining: the
+> concrete Quickwit/ClickHouse/Postgres scanners, and P3.2's endpoint.
+>
+> **Executor decision — DuckDB, local execution.** Scanners fetch tenant-bound
+> rows; user SQL runs only against those, so it never reaches a store and
+> cross-tenant access is unrepresentable rather than blocked. Two costs the plan
+> had not accounted for, both measured:
+>
+> - **Alpine cannot host it.** go-duckdb links a prebuilt static library built
+>   against glibc; on musl the link fails on `malloc_trim`, `backtrace_symbols`
+>   and `__res_init`. gateway-service moves to `golang:1.26.6` +
+>   `distroless/cc-debian12` with `CGO_ENABLED=1`. Every other service is
+>   unchanged.
+> - **Image size, which is dimension D1 — the one we already lose.** 68.2 MB →
+>   98.9 MB today, and DuckDB adds a further **+38 MB** once the endpoint links
+>   it (34.4 → 72.2 MB binary), so ~137 MB. distroless rather than debian-slim
+>   saves 100 MB of that; paying for D3 with D1 is a real trade and it is
+>   recorded rather than absorbed.
+>
+> **A rendering bug the tests caught, worth keeping in mind for P3.2:**
+> re-rendering the validated AST emitted MySQL charset introducers
+> (`_UTF8MB4'x'`) that DuckDB rejects. The tree was faithful; the text was not.
+> Any accepted query shape has to be exercised against the engine that runs it,
+> not merely validated.
+
 `gateway-service/internal/sqlq/`
 - `parse.go` — a real SQL parser (`pingcap/parser`; rationale recorded in-slice).
 - `policy.go` — `SELECT` only; no DDL/DML, no system schemas, no

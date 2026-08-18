@@ -34,6 +34,38 @@ Read the numbers with the sample size in mind: nearest-rank percentiles over
 `iterations` samples support less precision than three significant figures
 would suggest.
 
+## ⚠️ The footprint numbers below are under correction
+
+**The storage and container figures in this file undercount PulseTrace.** Found
+2026-08-18 while starting the Kafka-retention work, by asking the running stack
+where its bytes actually were:
+
+- `footprint.sh` enumerated volumes by matching the name prefix `pulse-trace_`.
+  Images that declare `VOLUME` in their Dockerfile — **Kafka, ClickHouse**,
+  ZooKeeper, Neo4j, Redis, Jaeger, Pyroscope — get an *anonymous* volume named
+  with a 64-hex hash, which matches no prefix and was skipped. That is
+  **4.86 GiB unmeasured, 4.32 GiB of it Kafka.** OpenObserve's two volumes are
+  both named, so *their* side was counted in full. The bias ran one way: toward
+  us.
+- It also counted a **stale** `pulse-trace_clickhouse_data` volume from a
+  superseded compose revision — charging us for disk nothing writes to, while
+  missing the volume ClickHouse actually uses.
+- The container count swept in an **orphaned** `clickhouse-enterprise`
+  container from that same old revision. The stack defines **23**, not the 24
+  reported here.
+
+So **1.53 GiB per GiB ingested is too low** and the real ratio is worse than
+8.4×. The direction of the headline finding is unchanged — and the cause is now
+even more clearly Kafka — but the magnitude is wrong and no arithmetic fixes it:
+the delta needs a baseline snapshot for those volumes, which was never taken.
+**It requires a re-run, which is in progress.** Until it lands, treat every
+number in the Footprint table as a lower bound on our own cost.
+
+The sampler is fixed: it now derives both stacks from their compose files and
+counts every volume those containers actually mount, named or not.
+**Query-latency and capability results are unaffected** — they never touched the
+footprint path.
+
 ## What this run says
 
 A clean run: both stacks rebuilt from empty volumes, 2 GiB corpus, **5,104,768

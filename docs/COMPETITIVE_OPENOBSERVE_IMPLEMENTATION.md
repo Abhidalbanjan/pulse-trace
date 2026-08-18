@@ -512,11 +512,20 @@ between "we validate the query" and "the attack is inexpressible."
 >   unchanged.
 > - **Image size, which is dimension D1 — the one we already lose.** Measured on
 >   linux: the gateway binary goes **33 MB → 100.6 MB** once DuckDB is linked
->   (104,772 symbols), taking the image from 68.2 MB to roughly **166 MB**.
+>   (104,772 symbols), taking the image from 68.2 MB to a measured **192 MB**.
 >   distroless rather than debian-slim saves ~100 MB of that. An earlier note
 >   here said +38 MB — that was measured on a darwin test binary and understated
 >   it; the real cost is +67 MB. Paying for D3 with D1 is a real trade and it is
 >   recorded rather than absorbed.
+>
+> **Builder and runtime must be the same Debian release.** `golang:1.26.6` is
+> trixie (glibc 2.41) and emits a binary needing `GLIBC_2.38`;
+> `distroless/cc-debian12` is bookworm (glibc 2.36). The image builds and links
+> cleanly and then every container exits at startup. Pinned to
+> `golang:1.26.6-bookworm`. The lesson generalises: **verifying that a cgo
+> binary links, or running it inside the builder, does not verify that it runs
+> in the runtime image** — only running it there does, and skipping that cost a
+> CI cycle.
 >
 > **A rendering bug the tests caught, worth keeping in mind for P3.2:**
 > re-rendering the validated AST emitted MySQL charset introducers

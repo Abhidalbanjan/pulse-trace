@@ -19,19 +19,31 @@
 #
 #   alpine + CGO_ENABLED=0   (before)            68.2 MB image, ~20 MB binary
 #   distroless/cc + CGO=1, sqlq not linked       98.9 MB image,  33 MB binary
-#   distroless/cc + CGO=1, DuckDB linked                 ~166 MB, 100.6 MB binary
+#   distroless/cc + CGO=1, DuckDB linked          192 MB image, 100.6 MB binary
 #
 # The middle row is what the image measured before cmd/ imported internal/sqlq —
 # the linker drops an unimported package, so DuckDB was not in it and calling
 # that "the cost of DuckDB" would have understated it badly. An earlier estimate
 # here said +38 MB, taken from a darwin test binary; the real linux figure is
-# +67 MB (33 -> 100.6 MB, 104,772 DuckDB symbols). The binary numbers are
-# measured; the image total is derived from them, because a local Docker network
-# fault blocked the final image build — CI's docker-build job is the check.
+# +67 MB (33 -> 100.6 MB, 104,772 DuckDB symbols). All three rows are measured,
+# and the last was confirmed by running the binary in the runtime image rather
+# than only building it — see the builder-tag note below for why that
+# distinction cost a CI cycle.
 #
 # Only this service is affected — every other service keeps CGO_ENABLED=0 on
 # Alpine.
-FROM golang:1.26.6 AS builder
+# The -bookworm tag is load-bearing, not cosmetic. The plain golang:1.26.6 tag
+# is Debian 13 (trixie, glibc 2.41) and produces a binary requiring GLIBC_2.38,
+# which distroless/cc-debian12 (bookworm, glibc 2.36) cannot satisfy: the image
+# builds and links cleanly, then every container exits with
+#
+#   /bin/gateway-service: /lib/x86_64-linux-gnu/libm.so.6:
+#   version `GLIBC_2.38' not found
+#
+# Builder and runtime must be the same Debian release. Verifying the link, or
+# running the binary inside the *builder*, does not catch this — only running it
+# in the runtime image does.
+FROM golang:1.26.6-bookworm AS builder
 
 WORKDIR /app
 

@@ -40,6 +40,7 @@ package sqlq
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -70,6 +71,41 @@ type Relation struct {
 	// global relation later is an explicit, reviewable decision rather than an
 	// omission.
 	TenantBound bool
+	// AttrPrefix declares that this relation carries open-ended, user-supplied
+	// attributes addressable as `<prefix>.<key>`.
+	//
+	// Columns above are a closed set decided by us. Attributes are the opposite:
+	// whatever the customer chose to attach to their records, known only at read
+	// time. They still cannot name an arbitrary thing — the key must match
+	// attrKeyPattern, and a relation without a prefix has no attributes at all —
+	// but the set is not enumerable in advance, which is why they are a separate
+	// mechanism rather than more entries in Columns.
+	AttrPrefix string
+}
+
+// attrKeyPattern is what an attribute key may contain.
+//
+// The key reaches Quickwit as a field name inside a query string, so this is a
+// value-becomes-syntax boundary and gets the same treatment as the tenant id:
+// an identifier-shaped allowlist, and a refusal rather than an escape for
+// anything outside it. Bounded length because a field name is not a payload.
+var attrKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+
+// AttrKey returns the attribute key when name addresses one of this relation's
+// open-ended attributes, or "" when it does not.
+//
+// The prefix match is exact and the key keeps its case: attribute keys are the
+// customer's spelling, and lowercasing `metadata.customerId` would resolve to a
+// field the index does not have and quietly return no rows.
+func (r Relation) AttrKey(name string) string {
+	if r.AttrPrefix == "" {
+		return ""
+	}
+	rest, ok := strings.CutPrefix(name, r.AttrPrefix+".")
+	if !ok || !attrKeyPattern.MatchString(rest) {
+		return ""
+	}
+	return rest
 }
 
 // Catalog resolves user-written names to logical relations.
@@ -94,6 +130,13 @@ func DefaultCatalog() *Catalog {
 		{
 			Name: "logs", Store: StoreLogs, TenantBound: true,
 			Columns: []string{"timestamp", "service_name", "level", "message", "trace_id"},
+			// Callers attach arbitrary key/values to a log record; they arrive
+			// as `metadata` and are addressed as `metadata.<key>`, e.g.
+			// `` `metadata.customer_id` `` (backticks because the dot would
+			// otherwise parse as a table qualifier). Nested rather than merged
+			// into the top level so a customer attribute named `level` cannot
+			// shadow the real log level.
+			AttrPrefix: "metadata",
 		},
 		// ClickHouse pulsetrace.otel_traces. Note this table has no TenantID
 		// column at all — the tenant lives in ResourceAttributes['tenant.id'],
@@ -169,15 +212,15 @@ func (c *Catalog) Names() []string {
 	return out
 }
 
-// HasColumn reports whether the relation exposes a column.
+// HasColumn reports whether the relation exposes a column, either as one of its
+// declared columns or as an open-ended attribute.
 func (r Relation) HasColumn(name string) bool {
-	lower := strings.ToLower(name)
 	for _, c := range r.Columns {
-		if c == lower {
+		if strings.EqualFold(c, name) {
 			return true
 		}
 	}
-	return false
+	return r.AttrKey(name) != ""
 }
 
 func (r Relation) String() string { return fmt.Sprintf("%s(%s)", r.Name, r.Store) }

@@ -109,9 +109,36 @@ func (s *PostgresScanner) Scan(ctx context.Context, tenantID string, limit int) 
 	return out, rows.Err()
 }
 
+// filterClause renders the pushed-down predicates as SQL and returns the values
+// to bind, starting at $next. Column expressions come from the compile-time
+// mapping; every value is a placeholder, so no user text enters the statement.
+func (t pgTable) filterClause(where []Predicate, next int) (string, []any, error) {
+	if len(where) == 0 {
+		return "", nil, nil
+	}
+	args := make([]any, 0, len(where))
+	var clause strings.Builder
+	for _, p := range where {
+		expr := ""
+		for _, c := range t.columns {
+			if strings.EqualFold(c.logical, p.Column) {
+				expr = c.expr
+				break
+			}
+		}
+		if expr == "" {
+			return "", nil, fmt.Errorf("postgres scanner: %q is not a mapped column of %s", p.Column, t.table)
+		}
+		clause.WriteString(fmt.Sprintf(" AND %s = $%d", expr, next))
+		args = append(args, p.Value)
+		next++
+	}
+	return clause.String(), args, nil
+}
+
 // ── Aggregator ───────────────────────────────────────────────────────────────
 
-func (s *PostgresScanner) CountAll(ctx context.Context, tenantID string) (int64, error) {
+func (s *PostgresScanner) CountAll(ctx context.Context, tenantID string, where []Predicate) (int64, error) {
 	t, ok := pgTables[s.Rel.Name]
 	if !ok {
 		return 0, fmt.Errorf("postgres scanner: no physical mapping for relation %q", s.Rel.Name)
@@ -119,13 +146,18 @@ func (s *PostgresScanner) CountAll(ctx context.Context, tenantID string) (int64,
 	if strings.TrimSpace(tenantID) == "" {
 		return 0, fmt.Errorf("postgres scanner %s: refusing to count with an empty tenant", s.Rel.Name)
 	}
+	filter, args, err := t.filterClause(where, 2)
+	if err != nil {
+		return 0, err
+	}
 	var n int64
-	err := s.DB.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT count(*) FROM %s WHERE tenant_id = $1", t.table), tenantID).Scan(&n)
+	err = s.DB.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT count(*) FROM %s WHERE tenant_id = $1%s", t.table, filter),
+		append([]any{tenantID}, args...)...).Scan(&n)
 	return n, err
 }
 
-func (s *PostgresScanner) GroupCount(ctx context.Context, tenantID, column string, limit int) (*Rows, error) {
+func (s *PostgresScanner) GroupCount(ctx context.Context, tenantID, column string, where []Predicate, limit int) (*Rows, error) {
 	t, ok := pgTables[s.Rel.Name]
 	if !ok {
 		return nil, fmt.Errorf("postgres scanner: no physical mapping for relation %q", s.Rel.Name)
@@ -135,7 +167,7 @@ func (s *PostgresScanner) GroupCount(ctx context.Context, tenantID, column strin
 	}
 	expr := ""
 	for _, c := range t.columns {
-		if c.logical == column {
+		if strings.EqualFold(c.logical, column) {
 			expr = c.expr
 			break
 		}
@@ -143,12 +175,19 @@ func (s *PostgresScanner) GroupCount(ctx context.Context, tenantID, column strin
 	if expr == "" {
 		return nil, fmt.Errorf("postgres scanner: %q is not a mapped column of %s", column, s.Rel.Name)
 	}
-	// expr and table come from the compile-time mapping; tenant and limit are
-	// bind parameters. Nothing here is user text.
+	// expr and table come from the compile-time mapping; tenant, filter values
+	// and limit are bind parameters. Nothing here is user text.
+	//
+	// The limit is bound last so the filter placeholders can occupy $2..$n
+	// without renumbering it by hand.
+	filter, args, err := t.filterClause(where, 2)
+	if err != nil {
+		return nil, err
+	}
 	stmt := fmt.Sprintf(
-		"SELECT %s AS %s, count(*) AS count FROM %s WHERE tenant_id = $1 GROUP BY %s ORDER BY count DESC LIMIT $2",
-		expr, column, t.table, expr)
-	rows, err := s.DB.QueryContext(ctx, stmt, tenantID, limit)
+		"SELECT %s AS %s, count(*) AS count FROM %s WHERE tenant_id = $1%s GROUP BY %s ORDER BY count DESC LIMIT $%d",
+		expr, column, t.table, filter, expr, len(args)+2)
+	rows, err := s.DB.QueryContext(ctx, stmt, append(append([]any{tenantID}, args...), limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres scanner %s: %w", s.Rel.Name, err)
 	}

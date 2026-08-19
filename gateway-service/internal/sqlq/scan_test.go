@@ -75,13 +75,13 @@ func TestQuickwitRefusesTenantIDsThatCouldBecomeSyntax(t *testing.T) {
 		"",
 		strings.Repeat("a", 51), // longer than the column permits
 	} {
-		if _, err := s.searchQuery(bad); err == nil {
+		if _, err := s.searchQuery(bad, nil); err == nil {
 			t.Errorf("accepted a tenant id that can alter the query: %q", bad)
 		}
 	}
 
 	for _, good := range []string{"acme", "default", "tenant-1", "tenant_1", "a.b", "A1"} {
-		q, err := s.searchQuery(good)
+		q, err := s.searchQuery(good, nil)
 		if err != nil {
 			t.Errorf("rejected a legitimate tenant id %q: %v", good, err)
 			continue
@@ -218,6 +218,72 @@ func assertSameColumns(t *testing.T, label string, catalog, mapped []string) {
 	for c := range inMapped {
 		if !inCatalog[c] {
 			t.Errorf("%s: %q is fetched but absent from the catalog", label, c)
+		}
+	}
+}
+
+// A pushed-down filter value is the first user-written *value* to reach a store
+// request. Quickwit 0.8 has no bind parameters, so the value is emitted into
+// the query string and this is the boundary that has to hold.
+func TestQuickwitRefusesFilterValuesThatCouldBecomeSyntax(t *testing.T) {
+	rel, _ := DefaultCatalog().Lookup("", "logs")
+	s := &QuickwitScanner{Rel: rel}
+
+	for _, bad := range []string{
+		`ERROR" OR tenant_id:"victim`, // closes the quoting and adds a clause
+		`ERROR\" OR tenant_id:\"x`,    // escaped quote
+		`back\slash`,
+		"new\nline",
+		"tab\there",
+		"nul\x00byte",
+		"",
+	} {
+		if _, err := s.searchQuery("acme", []Predicate{{Column: "level", Value: bad}}); err == nil {
+			t.Errorf("accepted a filter value that could alter the query: %q", bad)
+		}
+	}
+
+	// Quoted, these are inert and are ordinary things to filter on.
+	for _, good := range []string{"ERROR", "connection refused", "svc-30", "a:b", "AND", "cust-46786", "50%"} {
+		q, err := s.searchQuery("acme", []Predicate{{Column: "level", Value: good}})
+		if err != nil {
+			t.Errorf("rejected a legitimate filter value %q: %v", good, err)
+			continue
+		}
+		want := `tenant_id:acme AND level:"` + good + `"`
+		if q != want {
+			t.Errorf("query for %q = %s, want %s", good, q, want)
+		}
+	}
+}
+
+// The tenant clause must lead, and a filter must never be able to displace it.
+func TestQuickwitTenantClauseSurvivesEveryAcceptedFilter(t *testing.T) {
+	rel, _ := DefaultCatalog().Lookup("", "logs")
+	s := &QuickwitScanner{Rel: rel}
+	q, err := s.searchQuery("acme", []Predicate{
+		{Column: "level", Value: "ERROR"},
+		{Column: "metadata.customer_id", Value: "cust-1"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected refusal: %v", err)
+	}
+	if !strings.HasPrefix(q, "tenant_id:acme AND ") {
+		t.Errorf("tenant clause is not leading the query: %s", q)
+	}
+	if !strings.Contains(q, `metadata.customer_id:"cust-1"`) {
+		t.Errorf("attribute filter did not reach the index field: %s", q)
+	}
+}
+
+// A filter naming a column the relation does not expose must never reach the
+// store, even if a caller constructed the Predicate directly.
+func TestQuickwitRefusesFilterColumnsOutsideTheCatalog(t *testing.T) {
+	rel, _ := DefaultCatalog().Lookup("", "logs")
+	s := &QuickwitScanner{Rel: rel}
+	for _, col := range []string{"tenant_id", "nonexistent", "metadata.bad key"} {
+		if _, err := s.searchQuery("acme", []Predicate{{Column: col, Value: "x"}}); err == nil {
+			t.Errorf("accepted a filter on %q, which logs does not expose", col)
 		}
 	}
 }

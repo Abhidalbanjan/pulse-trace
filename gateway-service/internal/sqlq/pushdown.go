@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/opcode"
 )
 
 // Aggregation push-down.
@@ -34,16 +35,46 @@ import (
 // matched and which catalog column is grouped on; they never contribute syntax.
 // A column name is checked against the catalog before it is used, so it cannot
 // name anything the relation does not expose.
+//
+// # Filters, and the one thing that changed
+//
+// A pushed-down WHERE is the first time a *value* the user wrote crosses into a
+// store request; before this, only catalog-checked column names did. That is a
+// real widening and it is worth naming rather than burying.
+//
+// It does not reopen the tenant boundary, because of where the value lands.
+// ClickHouse and Postgres take it as a bind parameter, so it cannot become
+// syntax at all. Quickwit 0.8 has no bind parameters, so `scan_quickwit.go`
+// refuses any value it would have to escape rather than escaping it — the same
+// decision already made for the tenant id, for the same reason: an escaping
+// routine is a second thing to get right on the only path where getting it
+// wrong crosses a tenant boundary.
+
+// Predicate is one equality test the engine lifted out of a validated WHERE
+// clause: a catalog-checked column and a literal value.
+//
+// It is data, not syntax. A scanner receives this struct and builds its own
+// statement from it; no fragment of the user's SQL travels with it.
+type Predicate struct {
+	Column string
+	Value  string
+}
 
 // Aggregator is an optional Scanner capability. A store that can answer an
 // aggregate itself implements it; one that cannot simply does not, and the
 // engine falls back to fetching rows.
+//
+// Both methods take the filter as []Predicate rather than a string, so there is
+// no signature through which a caller could pass a fragment of SQL even by
+// mistake. An implementation that cannot honour a predicate must return an
+// error — never ignore it, because an ignored filter returns a larger number
+// than the user asked for and nothing about the response says so.
 type Aggregator interface {
-	// CountAll returns the exact number of rows for the tenant.
-	CountAll(ctx context.Context, tenantID string) (int64, error)
-	// GroupCount returns (value, count) pairs for one column, ordered by count
-	// descending, at most limit groups.
-	GroupCount(ctx context.Context, tenantID, column string, limit int) (*Rows, error)
+	// CountAll returns the exact number of rows for the tenant matching where.
+	CountAll(ctx context.Context, tenantID string, where []Predicate) (int64, error)
+	// GroupCount returns (value, count) pairs for one column over the rows
+	// matching where, ordered by count descending, at most limit groups.
+	GroupCount(ctx context.Context, tenantID, column string, where []Predicate, limit int) (*Rows, error)
 }
 
 // pushdownKind names a recognised aggregate shape.
@@ -61,6 +92,8 @@ type pushdownPlan struct {
 	rel  Relation
 	// column is the GROUP BY column, for pushGroupCount.
 	column string
+	// where is the conjunction of equality filters to apply in the store.
+	where []Predicate
 	// countAlias / groupAlias are the output column names the user asked for,
 	// so the result matches the statement they wrote rather than our internals.
 	groupAlias string
@@ -90,13 +123,22 @@ func planPushdown(a *Analysis) *pushdownPlan {
 	}
 	rel := a.Relations[0]
 
-	// Anything that filters, joins, or post-processes changes the answer, and
-	// none of it is translated here.
-	if sel.Where != nil || sel.Having != nil || sel.Distinct ||
+	// Joins and post-processing still change the answer and none of that is
+	// translated here.
+	if sel.Having != nil || sel.Distinct ||
 		sel.WindowSpecs != nil || sel.With != nil || sel.LockInfo != nil {
 		return nil
 	}
 	if !singleTableFrom(sel) {
+		return nil
+	}
+	// WHERE is translated, because an unfiltered aggregate is rarely the
+	// question anyone has. A clause this does not understand is not an error:
+	// the engine falls back to fetching rows and letting DuckDB apply it.
+	// Declining to translate is always safe; translating something subtly
+	// different is not.
+	where, ok := equalityPredicates(sel.Where, rel)
+	if !ok {
 		return nil
 	}
 
@@ -113,7 +155,7 @@ func planPushdown(a *Analysis) *pushdownPlan {
 			// refusing keeps the translated set to exactly what was verified.
 			return nil
 		}
-		return &pushdownPlan{kind: pushCountAll, rel: rel, countAlias: alias}
+		return &pushdownPlan{kind: pushCountAll, rel: rel, countAlias: alias, where: where}
 
 	// SELECT col, count(*) FROM rel GROUP BY col [ORDER BY count DESC] [LIMIT n]
 	case len(fields) == 2 && sel.GroupBy != nil && len(sel.GroupBy.Items) == 1:
@@ -152,6 +194,7 @@ func planPushdown(a *Analysis) *pushdownPlan {
 		return &pushdownPlan{
 			kind: pushGroupCount, rel: rel, column: colName,
 			groupAlias: groupAlias, countAlias: countAlias, limit: limit,
+			where: where,
 		}
 	}
 	return nil
@@ -215,7 +258,17 @@ func columnNameOf(e ast.ExprNode) (string, bool) {
 	if c.Name.Table.L != "" || c.Name.Schema.L != "" {
 		return "", false
 	}
-	return c.Name.Name.L, true
+	// The original spelling, not the lowercased one.
+	//
+	// Declared columns are matched case-insensitively downstream, so they are
+	// unaffected. Attribute keys are not ours to normalise: they are whatever
+	// the customer attached to the record, and Quickwit field names are
+	// case-sensitive. Returning `.L` here made `metadata.customerId` address
+	// `metadata.customerid`, which no document has — so the query resolved,
+	// pushed down, and returned zero buckets. An empty result that should have
+	// been an error is the worst outcome available, because nothing about it
+	// says the question was not asked.
+	return c.Name.Name.O, true
 }
 
 func ordersByCountDesc(o *ast.OrderByClause, countAlias string) bool {
@@ -246,4 +299,84 @@ func limitCount(l *ast.Limit) (int, bool) {
 		return 0, false
 	}
 	return int(n), true
+}
+
+// equalityPredicates decomposes a WHERE clause into a conjunction of
+// `column = 'literal'` tests, or reports that it cannot. A nil clause is a
+// successful decomposition into no predicates.
+//
+// Deliberately narrow, for the same reason planPushdown is: each shape admitted
+// here has to mean the same thing in Quickwit's query language, in ClickHouse
+// SQL and in Postgres SQL. Inequalities, OR, IN, NULL tests and pattern matches
+// each differ somewhere across those three — usually in collation or in NULL
+// handling — and a filter that means something slightly different in one store
+// returns a wrong number rather than an error.
+func equalityPredicates(e ast.ExprNode, rel Relation) ([]Predicate, bool) {
+	if e == nil {
+		return nil, true
+	}
+	switch x := e.(type) {
+	case *ast.ParenthesesExpr:
+		return equalityPredicates(x.Expr, rel)
+	case *ast.BinaryOperationExpr:
+		switch x.Op {
+		case opcode.LogicAnd:
+			left, ok := equalityPredicates(x.L, rel)
+			if !ok {
+				return nil, false
+			}
+			right, ok := equalityPredicates(x.R, rel)
+			if !ok {
+				return nil, false
+			}
+			return append(left, right...), true
+		case opcode.EQ:
+			p, ok := equalityTerm(x, rel)
+			if !ok {
+				return nil, false
+			}
+			return []Predicate{p}, true
+		}
+	}
+	return nil, false
+}
+
+// equalityTerm matches `col = 'literal'` in either operand order.
+func equalityTerm(x *ast.BinaryOperationExpr, rel Relation) (Predicate, bool) {
+	col, lit, ok := columnAndLiteral(x.L, x.R)
+	if !ok {
+		col, lit, ok = columnAndLiteral(x.R, x.L)
+	}
+	if !ok {
+		return Predicate{}, false
+	}
+	if !rel.HasColumn(col) {
+		// Cannot happen for a validated statement, but the name is about to be
+		// handed to a store; check it here rather than trust an earlier pass.
+		return Predicate{}, false
+	}
+	return Predicate{Column: col, Value: lit}, true
+}
+
+// columnAndLiteral matches a (column, string-literal) pair in that operand
+// order.
+//
+// String literals only. A numeric literal would have to be bound against a
+// column whose physical type this package does not track, and ClickHouse
+// coerces a type mismatch silently rather than erroring — so `status_code = 500`
+// is left to local execution, where DuckDB knows the column's real type.
+func columnAndLiteral(a, b ast.ExprNode) (col string, lit string, ok bool) {
+	name, ok := columnNameOf(a)
+	if !ok {
+		return "", "", false
+	}
+	v, ok := b.(ast.ValueExpr)
+	if !ok {
+		return "", "", false
+	}
+	s, ok := v.GetValue().(string)
+	if !ok {
+		return "", "", false
+	}
+	return name, s, true
 }

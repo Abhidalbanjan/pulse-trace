@@ -39,20 +39,63 @@ type QuickwitScanner struct {
 
 func (s *QuickwitScanner) Relation() Relation { return s.Rel }
 
-// searchQuery returns the Quickwit query string for one tenant. Split out so
-// the isolation property is assertable without a running Quickwit.
-func (s *QuickwitScanner) searchQuery(tenantID string) (string, error) {
+// indexField maps a catalog column to the field name Quickwit knows it by.
+//
+// Declared columns are stored lowercase and match one-to-one. Attribute columns
+// keep the customer's spelling and address a nested field, which the index
+// resolves because its dynamic mapping sets expand_dots.
+func (s *QuickwitScanner) indexField(column string) string {
+	if key := s.Rel.AttrKey(column); key != "" {
+		return s.Rel.AttrPrefix + "." + key
+	}
+	return strings.ToLower(column)
+}
+
+// termValuePattern is what a pushed-down filter value may contain.
+//
+// Quickwit 0.8 has no bind parameters, so a filter value becomes part of the
+// query string — the same problem the tenant id has, and it gets the same
+// answer: refuse rather than escape. The value is emitted inside double quotes,
+// where the only two characters that can end the quoting are `"` and `\`, so
+// those are excluded along with control characters. Everything else — spaces,
+// colons, the boolean keywords — is inert once quoted and stays allowed,
+// because a log message value like `connection refused` is an ordinary thing to
+// filter on.
+//
+// A value outside this set is not silently dropped or silently escaped; the
+// scanner errors, and the engine surfaces it. Refusing to answer is recoverable
+// for the user. Answering a different question is not.
+var termValuePattern = regexp.MustCompile(`^[^"\\\x00-\x1f]{1,256}$`)
+
+// searchQuery returns the Quickwit query string for one tenant and filter set.
+// Split out so the isolation property is assertable without a running Quickwit.
+func (s *QuickwitScanner) searchQuery(tenantID string, where []Predicate) (string, error) {
 	if !tenantIDPattern.MatchString(tenantID) {
 		return "", fmt.Errorf("quickwit scanner: refusing tenant id %q: outside the permitted character set", tenantID)
 	}
-	return "tenant_id:" + tenantID, nil
+	// The tenant clause is built first and joined with AND, so no filter can
+	// widen the set of tenants the query reaches — the worst a hostile value
+	// could do, if it escaped its quoting, is narrow or broaden within one
+	// tenant. It cannot escape its quoting, but the clause order means the
+	// isolation argument does not rest on that being true.
+	q := "tenant_id:" + tenantID
+	for _, p := range where {
+		if !s.Rel.HasColumn(p.Column) {
+			return "", fmt.Errorf("quickwit scanner: %q is not a column of %s", p.Column, s.Rel.Name)
+		}
+		if !termValuePattern.MatchString(p.Value) {
+			return "", fmt.Errorf("quickwit scanner: refusing filter value for %q: outside the permitted character set", p.Column)
+		}
+		q += fmt.Sprintf(` AND %s:"%s"`, s.indexField(p.Column), p.Value)
+	}
+	return q, nil
 }
 
 func (s *QuickwitScanner) Scan(ctx context.Context, tenantID string, limit int) (*Rows, error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return nil, fmt.Errorf("quickwit scanner: refusing to scan with an empty tenant")
 	}
-	q, err := s.searchQuery(tenantID)
+	q, err := s.searchQuery(tenantID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -116,15 +159,15 @@ func (s *QuickwitScanner) Scan(ctx context.Context, tenantID string, limit int) 
 // rows in 48 ms on the benchmark corpus), and a terms aggregation returns
 // grouped counts. Neither ships a single document.
 
-func (s *QuickwitScanner) CountAll(ctx context.Context, tenantID string) (int64, error) {
-	resp, err := s.searchAgg(ctx, tenantID, nil, 0)
+func (s *QuickwitScanner) CountAll(ctx context.Context, tenantID string, where []Predicate) (int64, error) {
+	resp, err := s.searchAgg(ctx, tenantID, where, nil, 0)
 	if err != nil {
 		return 0, err
 	}
 	return resp.NumHits, nil
 }
 
-func (s *QuickwitScanner) GroupCount(ctx context.Context, tenantID, column string, limit int) (*Rows, error) {
+func (s *QuickwitScanner) GroupCount(ctx context.Context, tenantID, column string, where []Predicate, limit int) (*Rows, error) {
 	if !s.Rel.HasColumn(column) {
 		// The column is about to be named in a request to the store. It was
 		// checked during planning; checking again here means a future caller
@@ -133,10 +176,10 @@ func (s *QuickwitScanner) GroupCount(ctx context.Context, tenantID, column strin
 	}
 	aggs := map[string]any{
 		"grouped": map[string]any{
-			"terms": map[string]any{"field": column, "size": limit},
+			"terms": map[string]any{"field": s.indexField(column), "size": limit},
 		},
 	}
-	resp, err := s.searchAgg(ctx, tenantID, aggs, 0)
+	resp, err := s.searchAgg(ctx, tenantID, where, aggs, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -162,11 +205,11 @@ type quickwitSearchResponse struct {
 // searchAgg posts a search whose body carries the tenant filter and optional
 // aggregations. The tenant still goes through searchQuery, so the same refusal
 // of ids that could become syntax applies here.
-func (s *QuickwitScanner) searchAgg(ctx context.Context, tenantID string, aggs map[string]any, maxHits int) (*quickwitSearchResponse, error) {
+func (s *QuickwitScanner) searchAgg(ctx context.Context, tenantID string, where []Predicate, aggs map[string]any, maxHits int) (*quickwitSearchResponse, error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return nil, fmt.Errorf("quickwit scanner: refusing to aggregate with an empty tenant")
 	}
-	q, err := s.searchQuery(tenantID)
+	q, err := s.searchQuery(tenantID, where)
 	if err != nil {
 		return nil, err
 	}

@@ -62,3 +62,23 @@ func (s *StaticScanner) Scan(_ context.Context, tenantID string, limit int) (*Ro
 	}
 	return rows, nil
 }
+
+// Compile-time proof that every scanner still satisfies the interfaces the
+// engine type-asserts for.
+//
+// The engine reaches push-down through `scanner.(Aggregator)`. A failed type
+// assertion is not a compile error and not a runtime error — it silently falls
+// back to fetching rows, which on the logs relation means hitting Quickwit's
+// max_hits ceiling and failing a query that used to work. Widening the
+// Aggregator interface without these lines would have done exactly that to all
+// three stores, and every test that does not stand up a real store would still
+// have passed.
+var (
+	_ Scanner    = (*StaticScanner)(nil)
+	_ Scanner    = (*QuickwitScanner)(nil)
+	_ Scanner    = (*ClickHouseScanner)(nil)
+	_ Scanner    = (*PostgresScanner)(nil)
+	_ Aggregator = (*QuickwitScanner)(nil)
+	_ Aggregator = (*ClickHouseScanner)(nil)
+	_ Aggregator = (*PostgresScanner)(nil)
+)

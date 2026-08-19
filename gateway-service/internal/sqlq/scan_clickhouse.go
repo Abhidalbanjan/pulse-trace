@@ -130,20 +130,26 @@ func (s *ClickHouseScanner) Scan(ctx context.Context, tenantID string, limit int
 	if err != nil {
 		return nil, err
 	}
-	return s.exec(ctx, tenantID, stmt)
+	return s.exec(ctx, tenantID, stmt, nil)
 }
 
 // exec runs one statement with the tenant bound as a parameter and decodes
 // JSONCompact. Shared by row scans and aggregate push-down so both reach
 // ClickHouse the same way — a second transport would be a second place to
 // forget the credentials or the bind parameter.
-func (s *ClickHouseScanner) exec(ctx context.Context, tenantID, stmt string) (*Rows, error) {
+func (s *ClickHouseScanner) exec(ctx context.Context, tenantID, stmt string, params map[string]string) (*Rows, error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return nil, fmt.Errorf("clickhouse scanner %s: refusing to query with an empty tenant", s.Rel.Name)
 	}
 
 	q := url.Values{}
 	q.Set("param_tenant", tenantID) // bound, not interpolated
+	for k, v := range params {
+		// Filter values bind exactly as the tenant does: they reach ClickHouse
+		// as query-string parameters referenced by {name:String} in the
+		// statement, so no filter value is ever part of the SQL text.
+		q.Set("param_"+k, v)
+	}
 	endpoint := s.URL
 	if !strings.Contains(endpoint, "?") {
 		endpoint += "?"
@@ -201,6 +207,35 @@ func (s *ClickHouseScanner) exec(ctx context.Context, tenantID, stmt string) (*R
 	return rows, nil
 }
 
+// filterClause renders the pushed-down predicates as ClickHouse SQL and returns
+// the values to bind alongside.
+//
+// Column expressions come from the compile-time mapping; every value becomes a
+// {pN:String} placeholder. Nothing user-written enters the statement text.
+func (t chTable) filterClause(where []Predicate) (string, map[string]string, error) {
+	if len(where) == 0 {
+		return "", nil, nil
+	}
+	params := make(map[string]string, len(where))
+	var clause strings.Builder
+	for i, p := range where {
+		expr := ""
+		for _, c := range t.columns {
+			if strings.EqualFold(c.logical, p.Column) {
+				expr = c.expr
+				break
+			}
+		}
+		if expr == "" {
+			return "", nil, fmt.Errorf("clickhouse scanner: %q is not a mapped column of %s", p.Column, t.table)
+		}
+		name := fmt.Sprintf("p%d", i)
+		clause.WriteString(fmt.Sprintf(" AND %s = {%s:String}", expr, name))
+		params[name] = p.Value
+	}
+	return clause.String(), params, nil
+}
+
 func firstBytes(b []byte, n int) string {
 	if len(b) > n {
 		return string(b[:n])
@@ -215,13 +250,17 @@ func firstBytes(b []byte, n int) string {
 // a row scan: the column name is validated against the catalog and then quoted
 // from the mapping's own expression, never from user text.
 
-func (s *ClickHouseScanner) CountAll(ctx context.Context, tenantID string) (int64, error) {
+func (s *ClickHouseScanner) CountAll(ctx context.Context, tenantID string, where []Predicate) (int64, error) {
 	t, ok := chTables[s.Rel.Name]
 	if !ok {
 		return 0, fmt.Errorf("clickhouse scanner: no physical mapping for relation %q", s.Rel.Name)
 	}
-	stmt := fmt.Sprintf("SELECT count() AS c FROM %s WHERE %s FORMAT JSONCompact", t.table, t.tenantPred)
-	rows, err := s.exec(ctx, tenantID, stmt)
+	filter, params, err := t.filterClause(where)
+	if err != nil {
+		return 0, err
+	}
+	stmt := fmt.Sprintf("SELECT count() AS c FROM %s WHERE %s%s FORMAT JSONCompact", t.table, t.tenantPred, filter)
+	rows, err := s.exec(ctx, tenantID, stmt, params)
 	if err != nil {
 		return 0, err
 	}
@@ -231,14 +270,14 @@ func (s *ClickHouseScanner) CountAll(ctx context.Context, tenantID string) (int6
 	return toInt64(rows.Values[0][0]), nil
 }
 
-func (s *ClickHouseScanner) GroupCount(ctx context.Context, tenantID, column string, limit int) (*Rows, error) {
+func (s *ClickHouseScanner) GroupCount(ctx context.Context, tenantID, column string, where []Predicate, limit int) (*Rows, error) {
 	t, ok := chTables[s.Rel.Name]
 	if !ok {
 		return nil, fmt.Errorf("clickhouse scanner: no physical mapping for relation %q", s.Rel.Name)
 	}
 	expr := ""
 	for _, c := range t.columns {
-		if c.logical == column {
+		if strings.EqualFold(c.logical, column) {
 			expr = c.expr
 			break
 		}
@@ -246,10 +285,14 @@ func (s *ClickHouseScanner) GroupCount(ctx context.Context, tenantID, column str
 	if expr == "" {
 		return nil, fmt.Errorf("clickhouse scanner: %q is not a mapped column of %s", column, s.Rel.Name)
 	}
+	filter, params, err := t.filterClause(where)
+	if err != nil {
+		return nil, err
+	}
 	stmt := fmt.Sprintf(
-		"SELECT %s AS %s, count() AS count FROM %s WHERE %s GROUP BY %s ORDER BY count DESC LIMIT %d FORMAT JSONCompact",
-		expr, column, t.table, t.tenantPred, expr, limit)
-	return s.exec(ctx, tenantID, stmt)
+		"SELECT %s AS %s, count() AS count FROM %s WHERE %s%s GROUP BY %s ORDER BY count DESC LIMIT %d FORMAT JSONCompact",
+		expr, column, t.table, t.tenantPred, filter, expr, limit)
+	return s.exec(ctx, tenantID, stmt, params)
 }
 
 func toInt64(v any) int64 {

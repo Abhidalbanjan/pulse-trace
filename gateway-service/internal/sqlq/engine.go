@@ -166,7 +166,7 @@ func (e *Engine) runPushdown(ctx context.Context, tenantID string, plan *pushdow
 
 	switch plan.kind {
 	case pushCountAll:
-		n, err := agg.CountAll(ctx, tenantID)
+		n, err := agg.CountAll(ctx, tenantID, plan.where)
 		if err != nil {
 			return nil, fmt.Errorf("sqlq: count %s: %w", plan.rel.Name, err)
 		}
@@ -174,7 +174,7 @@ func (e *Engine) runPushdown(ctx context.Context, tenantID string, plan *pushdow
 		res.Rows = [][]any{{n}}
 
 	case pushGroupCount:
-		rows, err := agg.GroupCount(ctx, tenantID, plan.column, plan.limit)
+		rows, err := agg.GroupCount(ctx, tenantID, plan.column, plan.where, plan.limit)
 		if err != nil {
 			return nil, fmt.Errorf("sqlq: group %s by %s: %w", plan.rel.Name, plan.column, err)
 		}

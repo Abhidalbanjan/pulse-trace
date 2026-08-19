@@ -108,3 +108,60 @@ func (s *PostgresScanner) Scan(ctx context.Context, tenantID string, limit int) 
 	}
 	return out, rows.Err()
 }
+
+// ── Aggregator ───────────────────────────────────────────────────────────────
+
+func (s *PostgresScanner) CountAll(ctx context.Context, tenantID string) (int64, error) {
+	t, ok := pgTables[s.Rel.Name]
+	if !ok {
+		return 0, fmt.Errorf("postgres scanner: no physical mapping for relation %q", s.Rel.Name)
+	}
+	if strings.TrimSpace(tenantID) == "" {
+		return 0, fmt.Errorf("postgres scanner %s: refusing to count with an empty tenant", s.Rel.Name)
+	}
+	var n int64
+	err := s.DB.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT count(*) FROM %s WHERE tenant_id = $1", t.table), tenantID).Scan(&n)
+	return n, err
+}
+
+func (s *PostgresScanner) GroupCount(ctx context.Context, tenantID, column string, limit int) (*Rows, error) {
+	t, ok := pgTables[s.Rel.Name]
+	if !ok {
+		return nil, fmt.Errorf("postgres scanner: no physical mapping for relation %q", s.Rel.Name)
+	}
+	if strings.TrimSpace(tenantID) == "" {
+		return nil, fmt.Errorf("postgres scanner %s: refusing to group with an empty tenant", s.Rel.Name)
+	}
+	expr := ""
+	for _, c := range t.columns {
+		if c.logical == column {
+			expr = c.expr
+			break
+		}
+	}
+	if expr == "" {
+		return nil, fmt.Errorf("postgres scanner: %q is not a mapped column of %s", column, s.Rel.Name)
+	}
+	// expr and table come from the compile-time mapping; tenant and limit are
+	// bind parameters. Nothing here is user text.
+	stmt := fmt.Sprintf(
+		"SELECT %s AS %s, count(*) AS count FROM %s WHERE tenant_id = $1 GROUP BY %s ORDER BY count DESC LIMIT $2",
+		expr, column, t.table, expr)
+	rows, err := s.DB.QueryContext(ctx, stmt, tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres scanner %s: %w", s.Rel.Name, err)
+	}
+	defer rows.Close()
+
+	out := &Rows{Columns: []string{column, "count"}}
+	for rows.Next() {
+		var key any
+		var n int64
+		if err := rows.Scan(&key, &n); err != nil {
+			return nil, err
+		}
+		out.Values = append(out.Values, []any{key, n})
+	}
+	return out, rows.Err()
+}

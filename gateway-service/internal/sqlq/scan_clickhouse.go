@@ -130,6 +130,17 @@ func (s *ClickHouseScanner) Scan(ctx context.Context, tenantID string, limit int
 	if err != nil {
 		return nil, err
 	}
+	return s.exec(ctx, tenantID, stmt)
+}
+
+// exec runs one statement with the tenant bound as a parameter and decodes
+// JSONCompact. Shared by row scans and aggregate push-down so both reach
+// ClickHouse the same way — a second transport would be a second place to
+// forget the credentials or the bind parameter.
+func (s *ClickHouseScanner) exec(ctx context.Context, tenantID, stmt string) (*Rows, error) {
+	if strings.TrimSpace(tenantID) == "" {
+		return nil, fmt.Errorf("clickhouse scanner %s: refusing to query with an empty tenant", s.Rel.Name)
+	}
 
 	q := url.Values{}
 	q.Set("param_tenant", tenantID) // bound, not interpolated
@@ -195,4 +206,63 @@ func firstBytes(b []byte, n int) string {
 		return string(b[:n])
 	}
 	return string(b)
+}
+
+// ── Aggregator ───────────────────────────────────────────────────────────────
+//
+// ClickHouse is SQL, so both shapes are a direct translation. The statement is
+// still built from the same compile-time mapping and the same bind parameter as
+// a row scan: the column name is validated against the catalog and then quoted
+// from the mapping's own expression, never from user text.
+
+func (s *ClickHouseScanner) CountAll(ctx context.Context, tenantID string) (int64, error) {
+	t, ok := chTables[s.Rel.Name]
+	if !ok {
+		return 0, fmt.Errorf("clickhouse scanner: no physical mapping for relation %q", s.Rel.Name)
+	}
+	stmt := fmt.Sprintf("SELECT count() AS c FROM %s WHERE %s FORMAT JSONCompact", t.table, t.tenantPred)
+	rows, err := s.exec(ctx, tenantID, stmt)
+	if err != nil {
+		return 0, err
+	}
+	if len(rows.Values) == 0 || len(rows.Values[0]) == 0 {
+		return 0, nil
+	}
+	return toInt64(rows.Values[0][0]), nil
+}
+
+func (s *ClickHouseScanner) GroupCount(ctx context.Context, tenantID, column string, limit int) (*Rows, error) {
+	t, ok := chTables[s.Rel.Name]
+	if !ok {
+		return nil, fmt.Errorf("clickhouse scanner: no physical mapping for relation %q", s.Rel.Name)
+	}
+	expr := ""
+	for _, c := range t.columns {
+		if c.logical == column {
+			expr = c.expr
+			break
+		}
+	}
+	if expr == "" {
+		return nil, fmt.Errorf("clickhouse scanner: %q is not a mapped column of %s", column, s.Rel.Name)
+	}
+	stmt := fmt.Sprintf(
+		"SELECT %s AS %s, count() AS count FROM %s WHERE %s GROUP BY %s ORDER BY count DESC LIMIT %d FORMAT JSONCompact",
+		expr, column, t.table, t.tenantPred, expr, limit)
+	return s.exec(ctx, tenantID, stmt)
+}
+
+func toInt64(v any) int64 {
+	switch x := v.(type) {
+	case float64:
+		return int64(x)
+	case int64:
+		return x
+	case string:
+		var n int64
+		_, _ = fmt.Sscanf(x, "%d", &n)
+		return n
+	default:
+		return 0
+	}
 }

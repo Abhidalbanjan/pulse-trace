@@ -88,32 +88,70 @@ func TestLiveScannersReachTheirStores(t *testing.T) {
 
 // The end-to-end path, against the real corpus.
 //
-// This test records a limitation rather than a success, because that is what
-// the stack currently does. Local execution means every row an aggregate covers
-// must be fetched first, and Quickwit caps a search at 10,000 hits:
-//
-//	Invalid argument: max value for max_hits is 10_000, but got 500001
-//
-// So `SELECT count(*) FROM logs` over the 5.1M-record benchmark corpus cannot
-// be answered by this path at all. D3 — the dimension this whole phase exists
-// to close — is therefore *not* closed by making the query expressible; it
-// needs the aggregation pushed into the store, which is P3.5.
-//
-// The property that matters in the meantime is the one asserted here: at a
-// scale it cannot serve, the engine fails **loudly**. An aggregate computed
-// over a silently truncated sample would be a correctness bug and strictly
-// worse than an error, because a wrong count looks exactly like a right one.
-func TestLiveAggregationOverTheFullCorpusFailsLoudlyRatherThanTruncating(t *testing.T) {
+// This used to record a limitation: local execution has to fetch every row an
+// aggregate covers, and Quickwit caps a search at max_hits = 10_000, so
+// `SELECT count(*) FROM logs` over the 5.1M-record benchmark corpus could not
+// be answered at all. Push-down fixed that by asking the store for the answer
+// instead of the rows, so the assertion is now the real one: the count is
+// exact, and it covers the whole corpus rather than a page of it.
+func TestLiveAggregationOverTheFullCorpus(t *testing.T) {
 	engine := liveEngine(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	res, err := engine.Query(ctx, "default", "SELECT count(*) AS n FROM logs")
-	if err == nil {
-		t.Fatalf("returned an answer (%v) for a corpus larger than it can fetch; "+
-			"a truncated aggregate is worse than an error", res.Rows)
+	if err != nil {
+		t.Fatalf("count over the full corpus: %v", err)
 	}
-	t.Logf("refused as expected: %v", err)
+	if len(res.Rows) != 1 || len(res.Rows[0]) != 1 {
+		t.Fatalf("want one scalar, got %v", res.Rows)
+	}
+	n := toInt64(res.Rows[0][0])
+	// The corpus is millions of rows; anything at or below Quickwit's 10k page
+	// size would mean we counted a page and called it a total, which is the
+	// failure mode that matters — a wrong count looks exactly like a right one.
+	if n <= 10000 {
+		t.Fatalf("count came back as %d, which is at or below the 10k page limit: "+
+			"this is a truncated page reported as a total", n)
+	}
+	// And nothing was pulled into the engine to get it.
+	if res.Scanned != 0 {
+		t.Errorf("push-down moved %d rows; it should move none", res.Scanned)
+	}
+	t.Logf("count(*) over the full corpus = %d in %s, 0 rows moved", n, res.Elapsed.Round(time.Millisecond))
+}
+
+// The high-cardinality group-by, likewise over the whole corpus.
+func TestLiveGroupByOverTheFullCorpus(t *testing.T) {
+	engine := liveEngine(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	res, err := engine.Query(ctx, "default",
+		"SELECT service_name, count(*) AS n FROM logs GROUP BY service_name ORDER BY n DESC LIMIT 10")
+	if err != nil {
+		t.Fatalf("group-by over the full corpus: %v", err)
+	}
+	if len(res.Rows) == 0 {
+		t.Fatal("group-by returned no buckets")
+	}
+	if len(res.Rows) > 10 {
+		t.Fatalf("LIMIT 10 was not honoured: %d buckets", len(res.Rows))
+	}
+	var total int64
+	for _, r := range res.Rows {
+		total += toInt64(r[1])
+	}
+	// Ten buckets of a multi-million-row corpus should still be substantial;
+	// if this only adds up to a page, the aggregation was done over a page.
+	if total <= 10000 {
+		t.Fatalf("top-10 buckets total %d rows, which suggests a truncated scan", total)
+	}
+	if res.Scanned != 0 {
+		t.Errorf("push-down moved %d rows; it should move none", res.Scanned)
+	}
+	t.Logf("top bucket %v=%v, %d buckets covering %d rows in %s",
+		res.Rows[0][0], res.Rows[0][1], len(res.Rows), total, res.Elapsed.Round(time.Millisecond))
 }
 
 // The same shapes over relations small enough to fetch must genuinely work —

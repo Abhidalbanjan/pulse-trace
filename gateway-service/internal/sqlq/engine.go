@@ -96,6 +96,20 @@ func (e *Engine) Query(ctx context.Context, tenantID, userSQL string) (*Result, 
 
 	start := time.Now()
 
+	// If the store can answer this shape itself, let it. Local execution has to
+	// fetch every row an aggregate covers, which for the log relation is not
+	// merely slow but impossible — Quickwit caps a search at 10,000 hits, so
+	// `count(*)` over the corpus fails outright without this path.
+	//
+	// Push-down sends no user SQL anywhere: a recognised shape becomes a typed
+	// method call on the scanner, which builds its own statement with the tenant
+	// bound exactly as a row scan does.
+	if plan := planPushdown(analysis); plan != nil {
+		if agg, ok := e.scanners[plan.rel.Name].(Aggregator); ok {
+			return e.runPushdown(ctx, tenantID, plan, agg, start)
+		}
+	}
+
 	// A fresh in-memory database per query. Reusing one across queries would
 	// mean one tenant's materialised rows outliving their request and being
 	// visible to the next — the exact leak this design removes everywhere else.
@@ -139,6 +153,43 @@ func (e *Engine) Query(ctx context.Context, tenantID, userSQL string) (*Result, 
 	for _, rel := range analysis.Relations {
 		res.Relations = append(res.Relations, rel.Name)
 	}
+	return res, nil
+}
+
+// runPushdown answers an aggregate from the store.
+//
+// Column names come from the plan, which took them from the user's statement,
+// so the result matches the query they wrote rather than exposing the internal
+// bucket names the store returned.
+func (e *Engine) runPushdown(ctx context.Context, tenantID string, plan *pushdownPlan, agg Aggregator, start time.Time) (*Result, error) {
+	res := &Result{Relations: []string{plan.rel.Name}}
+
+	switch plan.kind {
+	case pushCountAll:
+		n, err := agg.CountAll(ctx, tenantID)
+		if err != nil {
+			return nil, fmt.Errorf("sqlq: count %s: %w", plan.rel.Name, err)
+		}
+		res.Columns = []string{plan.countAlias}
+		res.Rows = [][]any{{n}}
+
+	case pushGroupCount:
+		rows, err := agg.GroupCount(ctx, tenantID, plan.column, plan.limit)
+		if err != nil {
+			return nil, fmt.Errorf("sqlq: group %s by %s: %w", plan.rel.Name, plan.column, err)
+		}
+		res.Columns = []string{plan.groupAlias, plan.countAlias}
+		res.Rows = rows.Values
+
+	default:
+		return nil, fmt.Errorf("sqlq: unrecognised push-down plan")
+	}
+
+	res.Elapsed = time.Since(start)
+	// Scanned stays zero deliberately. It counts rows pulled *into* the engine
+	// for cost attribution, and push-down pulls none — reporting the store's
+	// internal row count here would make an audit trail claim we moved data we
+	// did not.
 	return res, nil
 }
 

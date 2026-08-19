@@ -155,6 +155,12 @@ func (h *SQLQueryHandler) audit(r *http.Request, tenantID, actor, statement stri
 	if h.db == nil {
 		return
 	}
+	// pq.Array(nil) marshals to NULL, and query_audit.relations is NOT NULL.
+	// A refusal has no resolved relations, so this is the common path, not the
+	// edge case: every rejected query failed to audit until this was fixed.
+	if relations == nil {
+		relations = []string{}
+	}
 	_, err := h.db.ExecContext(r.Context(), `
 		INSERT INTO query_audit
 		  (tenant_id, actor, statement, relations, rows_scanned, rows_returned, duration_ms, outcome, reason)

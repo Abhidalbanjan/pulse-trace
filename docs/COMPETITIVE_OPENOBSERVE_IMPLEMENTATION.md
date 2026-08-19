@@ -491,22 +491,44 @@ between "we validate the query" and "the attack is inexpressible."
 > were *not expressible* now **parse, plan and execute** — but see the scale
 > limit below before treating D3 as closed.
 >
-> **⚠️ D3 is not closed by local execution alone.** Verified against the running
-> stack: `SELECT count(*) FROM logs` over the 5.1M-record benchmark corpus
-> **cannot be answered by this path at all**. Local execution means every row an
-> aggregate covers must be fetched first, and Quickwit caps a search at
-> `max_hits = 10_000`. So the query is now *expressible* and still not
-> *answerable* at corpus scale. Closing D3 for real needs the aggregation pushed
-> into the store — **P3.5 (query acceleration) should be promoted**, because
-> until it lands the headline capability works only on relations small enough to
-> pull. What *does* work end to end today, measured: aggregation and group-by
-> over `incidents` (33 ms / 22 ms), and a Postgres ⋈ ClickHouse cross-store join
-> scanning 11,968 rows in 1.06 s.
+> **D3 is closed — by push-down, not by local execution.** The first attempt was
+> not enough and the plan said so: local execution has to fetch every row an
+> aggregate covers, and Quickwit caps a search at `max_hits = 10_000`, so
+> `SELECT count(*) FROM logs` over the 5.1M corpus could not be answered *at
+> all*. The class was expressible and still not answerable.
 >
-> The property held in the meantime, and asserted by a test: at a scale it
-> cannot serve, the engine **fails loudly**. An aggregate over a silently
-> truncated sample would be a correctness bug and strictly worse than an error,
-> because a wrong count looks exactly like a right one.
+> The fix was to stop moving rows. Quickwit returns an exact `num_hits` for a
+> search with `max_hits: 0` and supports terms aggregations; ClickHouse and
+> Postgres are SQL. Measured against the running stack:
+>
+> | | result | time | rows moved |
+> | --- | --- | --- | --- |
+> | `count(*)` over the whole corpus | 5,104,773 | 15 ms | **0** |
+> | top-10 `GROUP BY service_name` | 10 buckets over 1,280,444 rows | 25 ms | **0** |
+>
+> For reference the benchmark measured OpenObserve at 71 ms and 118 ms p50 on
+> the same two classes — **but these numbers are not comparable**: theirs came
+> from the harness under matched resource caps, these are ad-hoc against a dev
+> stack. Re-running the harness is what would settle it, and until that happens
+> the honest claim is "answerable and fast", not "faster than theirs".
+>
+> **Push-down does not weaken the isolation argument.** No user SQL is sent
+> anywhere: a recognised shape in the validated AST becomes a *typed method
+> call* — `CountAll`, `GroupCount` — on the scanner, which builds its own
+> statement with the tenant bound exactly as a row scan does. The grouped column
+> is re-checked against the catalog before it is named to a store.
+>
+> **The matcher is deliberately narrow**, because this is the one place where a
+> bug returns a *wrong number* rather than an error. Six shapes push down;
+> eleven that would change the answer are refused and fall back to local
+> execution — `WHERE`, `HAVING`, joins, `count(DISTINCT)`, `count(col)`,
+> ascending order, `OFFSET`, and set operations among them. Both directions are
+> table-tested.
+>
+> The guarantee for everything still executed locally is unchanged and asserted
+> by a test: at a scale it cannot serve, the engine **fails loudly**. An
+> aggregate over a silently truncated sample would be strictly worse than an
+> error, because a wrong count looks exactly like a right one.
 >
 > **The catalog was rewritten against the live stores.** The first draft invented
 > columns. Reality: `otel_traces` has **no TenantID column** — the tenant lives

@@ -57,7 +57,12 @@ COPY gateway-service/ .
 # gateway-service/vendor/ directory — that made this the only service whose
 # Docker build couldn't reproduce from a fresh git checkout (CI included).
 # Every other service resolves modules normally; do the same here.
-RUN go mod download
+# Retried: the module proxy intermittently drops connections mid-handshake
+# ("local error: tls: bad record MAC"), which fails an otherwise correct build.
+# A transient network fault should not look like a broken commit.
+RUN for i in 1 2 3 4 5; do \
+      go mod download && break || { echo "go mod download attempt $i failed, retrying"; sleep 5; }; \
+    done && go mod download
 
 RUN CGO_ENABLED=1 GOOS=linux go build -o /bin/gateway-service ./cmd
 

@@ -3,7 +3,7 @@
   "name": "High-cardinality group-by",
   "why": "Top customers by error volume across 50k distinct customer_id values. This is where a columnar store and an inverted index diverge most, and the dimension vendor benchmarks usually omit.",
   "pulsetrace": {
-    "unsupported": "Same ceiling as the full-scan aggregation: no GROUP BY, so a 50k-cardinality ranking is not expressible against the log API."
+    "unsupported": "Still not expressible, for two specific reasons rather than the old blanket one. (1) The comparison query groups by customer_id, which reaches Quickwit through the index's dynamic mode and therefore has no fast-field index: a terms aggregation over it returns empty buckets, verified against the live index. Exposing it needs an explicit field mapping and a reindex. (2) It also carries WHERE level = 'ERROR', and the push-down matcher deliberately refuses filtered aggregates rather than translate them, so this would fall back to local execution and hit Quickwit's 10k max_hits ceiling. Substituting an easier query \u2014 grouping by the 40-value service_name with no filter \u2014 would have produced a flattering number for a different question."
   },
   "openobserve": {
     "method": "POST",

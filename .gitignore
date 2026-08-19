@@ -64,3 +64,9 @@ scripts/bench/corpus/corpus
 # Bench run artifact (regenerated every run)
 scripts/bench/.last-run.json
 scripts/bench/.footprint*.json
+
+# The generated corpus. Byte-reproducible from `corpus --seed 42`, so it is
+# cheaper to regenerate than to carry: the 2 GiB run is 2,147,484,283 bytes and
+# the documented default is 10 GiB.
+corpus.ndjson
+*.ndjson

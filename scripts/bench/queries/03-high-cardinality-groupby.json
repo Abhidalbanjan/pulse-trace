@@ -1,9 +1,13 @@
 {
   "id": "high_cardinality_groupby",
   "name": "High-cardinality group-by",
-  "why": "Top customers by error volume across 50k distinct customer_id values. This is where a columnar store and an inverted index diverge most, and the dimension vendor benchmarks usually omit.",
+  "why": "Top customers by error volume across 50k distinct customer_id values. This is where a columnar store and an inverted index diverge most, and the dimension vendor benchmarks usually omit. Both sides run the same question: filter to ERROR, group by a 50k-cardinality attribute, take the top 20. Against PulseTrace this reaches Quickwit as a filtered terms aggregation; the rows are counted in the index and only the 20 buckets travel.",
   "pulsetrace": {
-    "unsupported": "Still not expressible, for two specific reasons rather than the old blanket one. (1) The comparison query groups by customer_id, which reaches Quickwit through the index's dynamic mode and therefore has no fast-field index: a terms aggregation over it returns empty buckets, verified against the live index. Exposing it needs an explicit field mapping and a reindex. (2) It also carries WHERE level = 'ERROR', and the push-down matcher deliberately refuses filtered aggregates rather than translate them, so this would fall back to local execution and hit Quickwit's 10k max_hits ceiling. Substituting an easier query \u2014 grouping by the 40-value service_name with no filter \u2014 would have produced a flattering number for a different question."
+    "method": "POST",
+    "path": "/api/v1/query/sql",
+    "body": {
+      "sql": "SELECT `metadata.customer_id`, count(*) AS n FROM logs WHERE level = 'ERROR' GROUP BY `metadata.customer_id` ORDER BY n DESC LIMIT 20"
+    }
   },
   "openobserve": {
     "method": "POST",

@@ -301,9 +301,15 @@ export function QueryWorkbench() {
             aria-controls="sql-suggestions"
             aria-autocomplete="list"
             onChange={(e) => {
-              setSql(e.target.value);
-              setCaret(e.target.selectionStart);
-              setSuggestOpen(true);
+              const next = e.target.value;
+              const pos = e.target.selectionStart;
+              setSql(next);
+              setCaret(pos);
+              // Only offer suggestions while a name is actually being typed.
+              // Opening on every keystroke means the list is showing during
+              // whitespace and punctuation too, where it has nothing to narrow
+              // on and covers the editor with the same generic twelve entries.
+              setSuggestOpen(tokenAt(next, pos).word.length > 0);
               setActive(0);
             }}
             onKeyUp={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart)}

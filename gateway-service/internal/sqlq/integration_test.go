@@ -211,3 +211,66 @@ func liveEngine(t *testing.T) *Engine {
 	}
 	return engine
 }
+
+// Filtered push-down against the real index.
+//
+// The unit tests assert which shapes translate and that a hostile value is
+// refused; neither can tell whether Quickwit actually applies the filter it is
+// sent. This checks the arithmetic instead of the request shape: the filtered
+// count must be smaller than the total, non-zero, and the grouped buckets must
+// sum to no more than the filtered total. A filter silently dropped on either
+// path fails at least one of those.
+func TestLiveFilteredAggregatesNarrowTheAnswer(t *testing.T) {
+	_, _, _, qwURL, _ := storeEnv(t)
+	rel, _ := DefaultCatalog().Lookup("", "logs")
+	s := &QuickwitScanner{Rel: rel, URL: qwURL, Index: "pulsetrace-logs"}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tenant := os.Getenv("PULSETRACE_IT_TENANT")
+	if tenant == "" {
+		tenant = "default"
+	}
+
+	all, err := s.CountAll(ctx, tenant, nil)
+	if err != nil {
+		t.Fatalf("unfiltered count: %v", err)
+	}
+	if all == 0 {
+		t.Skip("index holds no rows for this tenant; load a corpus first")
+	}
+
+	filter := []Predicate{{Column: "level", Value: "ERROR"}}
+	errs, err := s.CountAll(ctx, tenant, filter)
+	if err != nil {
+		t.Fatalf("filtered count: %v", err)
+	}
+	if errs == 0 {
+		t.Fatal("filtered count is zero: the predicate reached the store but matched nothing")
+	}
+	if errs >= all {
+		t.Fatalf("filter narrowed nothing: %d of %d", errs, all)
+	}
+
+	grouped, err := s.GroupCount(ctx, tenant, "service_name", filter, 1000)
+	if err != nil {
+		t.Fatalf("filtered group-by: %v", err)
+	}
+	if len(grouped.Values) == 0 {
+		t.Fatal("filtered group-by returned no buckets")
+	}
+	var sum int64
+	for _, row := range grouped.Values {
+		n, ok := row[1].(int64)
+		if !ok {
+			t.Fatalf("bucket count is %T, want int64", row[1])
+		}
+		sum += n
+	}
+	// Equality is expected when the limit covers every bucket; exceeding the
+	// filtered total means one of the two paths ignored the filter, which is
+	// the failure this test exists to catch.
+	if sum > errs {
+		t.Errorf("buckets sum to %d but the filtered total is %d: the filter was dropped on one path", sum, errs)
+	}
+}

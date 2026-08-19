@@ -187,13 +187,11 @@ func loadRelation(ctx context.Context, db *sql.DB, rel Relation, rows *Rows) err
 		quoted[i] = `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
 	}
 
-	// Columns are typed VARCHAR only where we have no better information; DuckDB
-	// infers from the inserted values otherwise. Relation names come from the
-	// catalog, never from user input, so they are safe to interpolate — but they
-	// are still quoted so a future catalog entry cannot change the statement's
-	// shape.
+	// Relation names come from the catalog, never from user input, so they are
+	// safe to interpolate — but they are still quoted so a future catalog entry
+	// cannot change the statement's shape.
 	create := fmt.Sprintf(`CREATE TABLE %q (%s)`,
-		rel.Name, strings.Join(typedColumns(quoted), ", "))
+		rel.Name, strings.Join(typedColumns(quoted, cols, rows.Values), ", "))
 	if _, err := db.ExecContext(ctx, create); err != nil {
 		return fmt.Errorf("create: %w", err)
 	}
@@ -210,23 +208,85 @@ func loadRelation(ctx context.Context, db *sql.DB, rel Relation, rows *Rows) err
 	}
 	defer stmt.Close()
 
+	bind := make([]any, len(cols))
 	for _, v := range rows.Values {
 		if len(v) != len(cols) {
 			return fmt.Errorf("row has %d values for %d columns", len(v), len(cols))
 		}
-		if _, err := stmt.ExecContext(ctx, v...); err != nil {
+		for i, cell := range v {
+			bind[i] = normalise(cell)
+		}
+		if _, err := stmt.ExecContext(ctx, bind...); err != nil {
 			return fmt.Errorf("insert: %w", err)
 		}
 	}
 	return nil
 }
 
-func typedColumns(quoted []string) []string {
+// normalise converts a scanned value into something the DuckDB driver can bind.
+//
+// Scanners return whatever their store's driver produced: database/sql yields
+// []byte for text columns and time.Time for timestamps, and ClickHouse's JSON
+// decodes into float64 and nil. Passing those through unchanged fails with
+// "could not bind parameter" — found by running against real Postgres, not by
+// any unit test, because the in-memory fixtures were all strings.
+func normalise(v any) any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case []byte:
+		return string(x)
+	case time.Time:
+		return x
+	default:
+		return v
+	}
+}
+
+// typedColumns gives each column a DuckDB type inferred from the data.
+//
+// Declaring everything VARCHAR would load without error and then quietly break
+// arithmetic: avg(duration_ms) over strings is either a cast failure or, worse,
+// a lexicographic comparison that returns a plausible wrong number. Types are
+// inferred from the first non-nil value in each column, which is what the
+// store's own driver already decided; a column that is entirely NULL falls back
+// to VARCHAR because there is nothing to infer from.
+func typedColumns(quoted, names []string, values [][]any) []string {
 	out := make([]string, len(quoted))
-	for i, q := range quoted {
-		out[i] = q + " VARCHAR"
+	for i := range quoted {
+		out[i] = quoted[i] + " " + duckType(columnSample(values, i))
 	}
 	return out
+}
+
+// columnSample returns the first non-nil value in a column, or nil.
+func columnSample(values [][]any, col int) any {
+	for _, row := range values {
+		if col < len(row) && row[col] != nil {
+			return row[col]
+		}
+	}
+	return nil
+}
+
+func duckType(sample any) string {
+	switch sample.(type) {
+	case nil:
+		return "VARCHAR"
+	case bool:
+		return "BOOLEAN"
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return "BIGINT"
+	case float32, float64:
+		// ClickHouse's JSONCompact decodes every number as float64, so integer
+		// columns arrive here as floats. DOUBLE is the honest type for what was
+		// actually received; claiming BIGINT would truncate.
+		return "DOUBLE"
+	case time.Time:
+		return "TIMESTAMP"
+	default:
+		return "VARCHAR"
+	}
 }
 
 func runQuery(ctx context.Context, db *sql.DB, query string) (*Result, error) {

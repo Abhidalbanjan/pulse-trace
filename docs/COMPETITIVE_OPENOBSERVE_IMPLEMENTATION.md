@@ -487,9 +487,26 @@ between "we validate the query" and "the attack is inexpressible."
 
 > **In progress.** `gateway-service/internal/sqlq/` now carries the catalog,
 > policy, escape suite, budget, scanner interface and a working DuckDB engine —
-> 45 tests, including the concrete Quickwit/ClickHouse/Postgres scanners. The
-> two benchmark classes that were *not expressible* (full-scan aggregation,
-> high-cardinality group-by) execute in tests. Remaining: P3.2's endpoint.
+> 47 tests plus a live-store integration suite. The two benchmark classes that
+> were *not expressible* now **parse, plan and execute** — but see the scale
+> limit below before treating D3 as closed.
+>
+> **⚠️ D3 is not closed by local execution alone.** Verified against the running
+> stack: `SELECT count(*) FROM logs` over the 5.1M-record benchmark corpus
+> **cannot be answered by this path at all**. Local execution means every row an
+> aggregate covers must be fetched first, and Quickwit caps a search at
+> `max_hits = 10_000`. So the query is now *expressible* and still not
+> *answerable* at corpus scale. Closing D3 for real needs the aggregation pushed
+> into the store — **P3.5 (query acceleration) should be promoted**, because
+> until it lands the headline capability works only on relations small enough to
+> pull. What *does* work end to end today, measured: aggregation and group-by
+> over `incidents` (33 ms / 22 ms), and a Postgres ⋈ ClickHouse cross-store join
+> scanning 11,968 rows in 1.06 s.
+>
+> The property held in the meantime, and asserted by a test: at a scale it
+> cannot serve, the engine **fails loudly**. An aggregate over a silently
+> truncated sample would be a correctness bug and strictly worse than an error,
+> because a wrong count looks exactly like a right one.
 >
 > **The catalog was rewritten against the live stores.** The first draft invented
 > columns. Reality: `otel_traces` has **no TenantID column** — the tenant lives
@@ -526,6 +543,15 @@ between "we validate the query" and "the attack is inexpressible."
 > binary links, or running it inside the builder, does not verify that it runs
 > in the runtime image** — only running it there does, and skipping that cost a
 > CI cycle.
+>
+> **Two bugs only real stores could find**, both invisible to the unit suite:
+> `ClickHouseScanner` sent no credentials, so every ClickHouse relation failed
+> with `Code: 516 Authentication failed` while `httptest` — which does not check
+> credentials — passed; and loading Postgres rows into DuckDB failed with
+> `could not bind parameter`, because every column was declared VARCHAR while
+> the driver returns `time.Time`, `int64` and `[]byte`. The second mattered
+> beyond the crash: VARCHAR columns would have made `avg(duration_ms)`
+> arithmetic over strings. Columns are now typed from the data.
 >
 > **A rendering bug the tests caught, worth keeping in mind for P3.2:**
 > re-rendering the validated AST emitted MySQL charset introducers

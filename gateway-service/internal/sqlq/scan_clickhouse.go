@@ -99,6 +99,8 @@ var chTables = map[string]chTable{
 type ClickHouseScanner struct {
 	Rel    Relation
 	URL    string // ClickHouse HTTP endpoint
+	User   string // HTTP Basic credentials; ClickHouse rejects anonymous reads
+	Pass   string
 	Client *http.Client
 }
 
@@ -142,6 +144,13 @@ func (s *ClickHouseScanner) Scan(ctx context.Context, tenantID string, limit int
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(stmt))
 	if err != nil {
 		return nil, err
+	}
+	// ClickHouse refuses anonymous reads ("Authentication failed: password is
+	// incorrect, or there is no user with such name"). Omitting this made every
+	// ClickHouse-backed relation fail against a real server while every unit
+	// test passed, because httptest does not check credentials.
+	if s.User != "" {
+		req.SetBasicAuth(s.User, s.Pass)
 	}
 	client := s.Client
 	if client == nil {

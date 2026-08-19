@@ -590,7 +590,11 @@ func buildQueryEngine(db *sql.DB, clickhouseURL, quickwitURL string) (*sqlq.Engi
 			})
 		case sqlq.StoreAnalytics:
 			scanners = append(scanners, &sqlq.ClickHouseScanner{
-				Rel: rel, URL: clickhouseURL, Client: httpClient,
+				Rel:    rel,
+				URL:    clickhouseURL,
+				User:   getEnv("CLICKHOUSE_USER", "pulsetrace"),
+				Pass:   getEnv("CLICKHOUSE_PASSWORD", "pulsetrace_secret"),
+				Client: httpClient,
 			})
 		case sqlq.StoreMeta:
 			scanners = append(scanners, &sqlq.PostgresScanner{Rel: rel, DB: db})

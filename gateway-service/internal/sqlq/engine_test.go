@@ -266,3 +266,54 @@ func asBudget(err error, target **BudgetError) bool {
 	}
 	return false
 }
+
+// The described schema must be exactly what the validator accepts.
+//
+// This is the whole reason the endpoint exists rather than the UI carrying its
+// own copy: an editor offers what this returns, so anything it names must
+// resolve, and anything it omits must not. A drift here is a user being offered
+// a column and then refused for using it.
+func TestSchemaDescribesExactlyWhatResolves(t *testing.T) {
+	cat := DefaultCatalog()
+	schema := cat.Schema()
+	if len(schema) == 0 {
+		t.Fatal("schema is empty")
+	}
+	if len(schema) != len(cat.Names()) {
+		t.Fatalf("schema describes %d relations, catalog has %d", len(schema), len(cat.Names()))
+	}
+
+	for _, rel := range schema {
+		r, ok := cat.Lookup("", rel.Name)
+		if !ok {
+			t.Errorf("schema names %q, which does not resolve", rel.Name)
+			continue
+		}
+		if len(rel.Columns) == 0 {
+			t.Errorf("%s: described with no columns", rel.Name)
+		}
+		for _, col := range rel.Columns {
+			if !r.HasColumn(col) {
+				t.Errorf("%s: schema offers column %q, which the relation does not expose", rel.Name, col)
+			}
+		}
+		// An advertised attribute prefix must actually address attributes.
+		if rel.AttrPrefix != "" && !r.HasColumn(rel.AttrPrefix+".example_key") {
+			t.Errorf("%s: advertises attr prefix %q that resolves nothing", rel.Name, rel.AttrPrefix)
+		}
+		if rel.AttrPrefix == "" && r.AttrKey("metadata.x") != "" {
+			t.Errorf("%s: carries attributes but the schema does not say so", rel.Name)
+		}
+		if rel.Store == "" {
+			t.Errorf("%s: described with no store", rel.Name)
+		}
+	}
+
+	// Mutating the returned columns must not reach the catalog: the schema is a
+	// description handed to callers, and a caller that sorts it in place must
+	// not be able to change what the validator accepts.
+	schema[0].Columns[0] = "mutated"
+	if r, _ := cat.Lookup("", schema[0].Name); r.HasColumn("mutated") {
+		t.Error("schema shares backing storage with the catalog")
+	}
+}

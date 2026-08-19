@@ -56,6 +56,7 @@ export const NAV_ICONS: Record<string, string> = {
   deployments: 'shield',
   onboarding: 'bolt',
   explorer: 'manage_search',
+  query: 'terminal',
   traces: 'timeline',
   services: 'monitor_heart',
   metrics: 'show_chart',

@@ -362,6 +362,7 @@ func main() {
 		} else {
 			sqlQueryHandler := handler.NewSQLQueryHandler(authHandler.GetDB(), engine)
 			mux.HandleFunc("POST /api/v1/query/sql", sqlQueryHandler.Execute)
+			mux.HandleFunc("GET /api/v1/query/schema", sqlQueryHandler.Schema)
 			log.Printf("SQL query endpoint ready at POST /api/v1/query/sql")
 		}
 	}

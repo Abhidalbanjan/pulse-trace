@@ -369,3 +369,6 @@ func runQuery(ctx context.Context, db *sql.DB, query string) (*Result, error) {
 	}
 	return out, nil
 }
+
+// Schema describes the relations this engine will accept in a statement.
+func (e *Engine) Schema() []SchemaRelation { return e.catalog.Schema() }

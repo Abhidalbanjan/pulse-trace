@@ -21,6 +21,7 @@ export function GlobalSidebar({ isCollapsed, onToggle }: { isCollapsed?: boolean
     { key: 'deployments', label: 'Deploy Gates', path: '/deployments' },
     { key: 'onboarding', label: 'Onboarding', path: '/onboarding' },
     { key: 'explorer', label: 'Log Explorer', path: '/explorer' },
+    { key: 'query', label: 'Query', path: '/query' },
     { key: 'traces', label: 'Distributed Traces', path: '/traces' },
     { key: 'services', label: 'Services', path: '/services' },
     { key: 'metrics', label: 'Metrics', path: '/metrics' },

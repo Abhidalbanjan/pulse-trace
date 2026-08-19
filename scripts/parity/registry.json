@@ -28,8 +28,7 @@
   "POST /api/v1/slo/evaluate-pr": "CI/PR shift-left gate caller, not a screen",
   "/scim/v2": "SCIM 2.0 user provisioning (F18) — machine-to-machine, driven by the enterprise IdP's directory sync, not a UI screen",
   "GET /api/v1/auth/saml/metadata": "SAML SP metadata XML consumed by the IdP admin, not a UI screen",
-  "POST /api/v1/auth/saml/acs": "SAML assertion consumer — the IdP POSTs the signed response here, not a UI call",
-  "POST /api/v1/query/sql": "user-authored SQL (P3.1/P3.2) — API-first by design; the query workbench UI is P3.6"
+  "POST /api/v1/auth/saml/acs": "SAML assertion consumer — the IdP POSTs the signed response here, not a UI call"
  },
  "proxyUpstreams": {
   "_doc": "Gateway prefixes reverse-proxied to non-Go upstreams (Pyroscope/Quickwit/Jaeger/etc). Frontend calls under these prefixes are 'covered' even with no Go HandleFunc. Prefix match.",

@@ -224,3 +224,43 @@ func (r Relation) HasColumn(name string) bool {
 }
 
 func (r Relation) String() string { return fmt.Sprintf("%s(%s)", r.Name, r.Store) }
+
+// SchemaRelation is one relation as described to a client.
+//
+// This is a *description* surface, not a query surface: it exists so an editor
+// can offer what the engine will actually accept. It is deliberately built from
+// the same Catalog the validator resolves against, rather than being written
+// out a second time — a hand-maintained copy in a UI drifts from the engine
+// silently, and the first symptom is a user being offered a column that is then
+// rejected.
+//
+// Physical names never appear here, for the same reason they never appear in a
+// user's SQL: the indirection is what stops a query naming a physical object.
+type SchemaRelation struct {
+	Name string `json:"name"`
+	// Store is the engine backing the relation, exposed because it tells a user
+	// which relations a join will cross — the thing most likely to be slow.
+	Store   string   `json:"store"`
+	Columns []string `json:"columns"`
+	// AttrPrefix is non-empty when the relation also carries open-ended
+	// user attributes, addressed as `prefix.key` in backquotes. Their keys are
+	// not enumerable in advance, which is why this reports the prefix and not
+	// a column list.
+	AttrPrefix string `json:"attr_prefix,omitempty"`
+}
+
+// Schema describes every relation the catalog exposes, sorted by name.
+func (c *Catalog) Schema() []SchemaRelation {
+	out := make([]SchemaRelation, 0, len(c.byName))
+	for _, name := range c.Names() {
+		r := c.byName[name]
+		cols := append([]string(nil), r.Columns...)
+		out = append(out, SchemaRelation{
+			Name:       r.Name,
+			Store:      string(r.Store),
+			Columns:    cols,
+			AttrPrefix: r.AttrPrefix,
+		})
+	}
+	return out
+}

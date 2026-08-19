@@ -113,6 +113,22 @@ func (h *SQLQueryHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		result.Scanned, len(result.Rows), time.Since(started))
 }
 
+// Schema serves GET /api/v1/query/schema — the relations a statement may name.
+//
+// Unauthenticated callers never reach this (the route sits behind the same auth
+// as Execute), but note what it does *not* depend on: the tenant. The catalog
+// is the same for every tenant because it describes the shape of the data, not
+// any of it. Returning it per-tenant would imply a per-tenant schema we do not
+// have, and inviting a tenant id into this path would create a parameter that
+// looks like it should affect the answer.
+func (h *SQLQueryHandler) Schema(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	// The catalog changes only on deploy, so a short cache is safe and keeps an
+	// editor that refetches on focus from hitting the gateway repeatedly.
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	_ = json.NewEncoder(w).Encode(map[string]any{"relations": h.engine.Schema()})
+}
+
 // reject maps an engine error onto a status code and records it.
 //
 // A policy refusal is 400: the user asked something they may not ask, and the

@@ -114,6 +114,30 @@ var deniedFunctions = map[string]string{
 	"get_lock":     "lock acquisition",
 	"sys_exec":     "process execution",
 	"sys_eval":     "process execution",
+
+	// DuckDB's namespace. The list above is ClickHouse/MySQL, which is the
+	// grammar this validator parses — but DuckDB is the engine that runs the
+	// statement, and its file readers are named differently. They were all
+	// accepted here until now, unreachable only because they are table
+	// functions and the MySQL grammar cannot put a function in FROM.
+	//
+	// Naming them makes the refusal explicit rather than incidental, so the
+	// escape suite asserts "denied" instead of "happens not to parse".
+	// engine.go additionally runs DuckDB with external access disabled, which
+	// is the guarantee that does not depend on this list being complete.
+	"read_csv":       "filesystem access",
+	"read_csv_auto":  "filesystem access",
+	"read_parquet":   "filesystem access",
+	"parquet_scan":   "filesystem access",
+	"read_json":      "filesystem access",
+	"read_json_auto": "filesystem access",
+	"read_ndjson":    "filesystem access",
+	"read_text":      "filesystem access",
+	"read_blob":      "filesystem access",
+	"glob":           "filesystem access",
+	"getenv":         "environment access",
+	"install":        "extension loading",
+	"load_extension": "extension loading",
 }
 
 // Analysis is what a caller gets for an accepted statement.

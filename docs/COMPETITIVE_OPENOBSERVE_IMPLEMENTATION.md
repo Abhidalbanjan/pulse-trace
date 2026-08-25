@@ -484,6 +484,103 @@ cannot cross tenants — the data never enters the engine. That is the differenc
 between "we validate the query" and "the attack is inexpressible."
 
 ### P3.1 — Query core: parse, plan, isolate · L — *security-critical*
+
+> **In progress.** `gateway-service/internal/sqlq/` now carries the catalog,
+> policy, escape suite, budget, scanner interface and a working DuckDB engine —
+> 47 tests plus a live-store integration suite. The two benchmark classes that
+> were *not expressible* now **parse, plan and execute** — but see the scale
+> limit below before treating D3 as closed.
+>
+> **D3 is closed — by push-down, not by local execution.** The first attempt was
+> not enough and the plan said so: local execution has to fetch every row an
+> aggregate covers, and Quickwit caps a search at `max_hits = 10_000`, so
+> `SELECT count(*) FROM logs` over the 5.1M corpus could not be answered *at
+> all*. The class was expressible and still not answerable.
+>
+> The fix was to stop moving rows. Quickwit returns an exact `num_hits` for a
+> search with `max_hits: 0` and supports terms aggregations; ClickHouse and
+> Postgres are SQL. Measured against the running stack:
+>
+> | | result | time | rows moved |
+> | --- | --- | --- | --- |
+> | `count(*)` over the whole corpus | 5,104,773 | 15 ms | **0** |
+> | top-10 `GROUP BY service_name` | 10 buckets over 1,280,444 rows | 25 ms | **0** |
+>
+> For reference the benchmark measured OpenObserve at 71 ms and 118 ms p50 on
+> the same two classes — **but these numbers are not comparable**: theirs came
+> from the harness under matched resource caps, these are ad-hoc against a dev
+> stack. Re-running the harness is what would settle it, and until that happens
+> the honest claim is "answerable and fast", not "faster than theirs".
+>
+> **Push-down does not weaken the isolation argument.** No user SQL is sent
+> anywhere: a recognised shape in the validated AST becomes a *typed method
+> call* — `CountAll`, `GroupCount` — on the scanner, which builds its own
+> statement with the tenant bound exactly as a row scan does. The grouped column
+> is re-checked against the catalog before it is named to a store.
+>
+> **The matcher is deliberately narrow**, because this is the one place where a
+> bug returns a *wrong number* rather than an error. Six shapes push down;
+> eleven that would change the answer are refused and fall back to local
+> execution — `WHERE`, `HAVING`, joins, `count(DISTINCT)`, `count(col)`,
+> ascending order, `OFFSET`, and set operations among them. Both directions are
+> table-tested.
+>
+> The guarantee for everything still executed locally is unchanged and asserted
+> by a test: at a scale it cannot serve, the engine **fails loudly**. An
+> aggregate over a silently truncated sample would be strictly worse than an
+> error, because a wrong count looks exactly like a right one.
+>
+> **The catalog was rewritten against the live stores.** The first draft invented
+> columns. Reality: `otel_traces` has **no TenantID column** — the tenant lives
+> in `ResourceAttributes['tenant.id']`, so a shared "add WHERE TenantID" helper
+> would have been silently wrong for the largest table; Quickwit's index has no
+> `span_id`; and there is **no `otel_metrics` table at all**, only five typed
+> ones. `metrics` is therefore *removed* from the catalog rather than shipped as
+> a name that resolves and then fails — a modelling decision (which unifying
+> schema? union across five shapes?) masquerading as a mapping.
+>
+> **Executor decision — DuckDB, local execution.** Scanners fetch tenant-bound
+> rows; user SQL runs only against those, so it never reaches a store and
+> cross-tenant access is unrepresentable rather than blocked. Two costs the plan
+> had not accounted for, both measured:
+>
+> - **Alpine cannot host it.** go-duckdb links a prebuilt static library built
+>   against glibc; on musl the link fails on `malloc_trim`, `backtrace_symbols`
+>   and `__res_init`. gateway-service moves to `golang:1.26.6` +
+>   `distroless/cc-debian12` with `CGO_ENABLED=1`. Every other service is
+>   unchanged.
+> - **Image size, which is dimension D1 — the one we already lose.** Measured on
+>   linux: the gateway binary goes **33 MB → 100.6 MB** once DuckDB is linked
+>   (104,772 symbols), taking the image from 68.2 MB to a measured **192 MB**.
+>   distroless rather than debian-slim saves ~100 MB of that. An earlier note
+>   here said +38 MB — that was measured on a darwin test binary and understated
+>   it; the real cost is +67 MB. Paying for D3 with D1 is a real trade and it is
+>   recorded rather than absorbed.
+>
+> **Builder and runtime must be the same Debian release.** `golang:1.26.6` is
+> trixie (glibc 2.41) and emits a binary needing `GLIBC_2.38`;
+> `distroless/cc-debian12` is bookworm (glibc 2.36). The image builds and links
+> cleanly and then every container exits at startup. Pinned to
+> `golang:1.26.6-bookworm`. The lesson generalises: **verifying that a cgo
+> binary links, or running it inside the builder, does not verify that it runs
+> in the runtime image** — only running it there does, and skipping that cost a
+> CI cycle.
+>
+> **Two bugs only real stores could find**, both invisible to the unit suite:
+> `ClickHouseScanner` sent no credentials, so every ClickHouse relation failed
+> with `Code: 516 Authentication failed` while `httptest` — which does not check
+> credentials — passed; and loading Postgres rows into DuckDB failed with
+> `could not bind parameter`, because every column was declared VARCHAR while
+> the driver returns `time.Time`, `int64` and `[]byte`. The second mattered
+> beyond the crash: VARCHAR columns would have made `avg(duration_ms)`
+> arithmetic over strings. Columns are now typed from the data.
+>
+> **A rendering bug the tests caught, worth keeping in mind for P3.2:**
+> re-rendering the validated AST emitted MySQL charset introducers
+> (`_UTF8MB4'x'`) that DuckDB rejects. The tree was faithful; the text was not.
+> Any accepted query shape has to be exercised against the engine that runs it,
+> not merely validated.
+
 `gateway-service/internal/sqlq/`
 - `parse.go` — a real SQL parser (`pingcap/parser`; rationale recorded in-slice).
 - `policy.go` — `SELECT` only; no DDL/DML, no system schemas, no
@@ -506,7 +603,18 @@ A cannot retrieve tenant B's row through **any** accepted query.
 cover `sqlq`. If isolation cannot be *demonstrated*, this ships single-tenant /
 on-prem only and the docs say so plainly.
 
-### P3.2 — SQL endpoint · M
+### P3.2 — SQL endpoint · M ✅ *shipped*
+`POST /api/v1/query/sql`, migration **027** (`query_audit`, `query_budgets`),
+NDJSON streaming, cancellable via request context, every execution audited —
+**including refusals**, because a run of rejections against system schemas is
+the signal you most want and a success-only log discards it. Registered in the
+parity registry as API-first; the workbench UI is P3.6.
+
+**Honest limit:** the response streams, the *computation* does not. `sqlq`
+materialises the result before returning, so this is not incremental execution
+and the memory profile is that of the whole result set. Saying otherwise would
+misrepresent it.
+
 Migration **027**. `POST /api/v1/query/sql` — streaming NDJSON, cancellable via
 request context, every execution recorded in `query_audit` (who, what, bytes
 scanned, duration). Saved queries extend `saved_search_handler.go` rather than

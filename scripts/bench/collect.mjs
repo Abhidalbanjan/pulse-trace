@@ -50,12 +50,25 @@ async function timed(fn) {
 async function runPulseTrace(spec, token, ctx) {
   if (spec.unsupported) return { unsupported: spec.unsupported };
   const path = spec.path.replaceAll('${TRACE_ID}', ctx.traceId ?? '');
+  // Some classes are now expressed as SQL against POST /api/v1/query/sql, so a
+  // request body has to be supported on this side too. Until the query engine
+  // shipped, every PulseTrace class was a parameterised GET.
+  const body = spec.body
+    ? JSON.stringify(JSON.parse(JSON.stringify(spec.body).replaceAll('${TRACE_ID}', ctx.traceId ?? '')))
+    : undefined;
+  const headers = { Authorization: `Bearer ${token}` };
+  if (body) headers['Content-Type'] = 'application/json';
   const call = async () => {
     const res = await fetch(`${PT}${path}`, {
       method: spec.method || 'GET',
-      headers: { Authorization: `Bearer ${token}` },
+      headers,
+      body,
     });
-    return res.ok;
+    // A streaming NDJSON response is only complete once drained; returning on
+    // headers alone would time the time-to-first-byte and call it the query.
+    if (!res.ok) return false;
+    await res.text();
+    return true;
   };
   return sample(call);
 }

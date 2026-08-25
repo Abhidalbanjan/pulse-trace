@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -22,6 +24,7 @@ import (
 	"github.com/pulsetrace/gateway-service/internal/pii"
 	"github.com/pulsetrace/gateway-service/internal/proxy"
 	"github.com/pulsetrace/gateway-service/internal/quota"
+	"github.com/pulsetrace/gateway-service/internal/sqlq"
 	"github.com/pulsetrace/gateway-service/internal/tenantdata"
 	gatewaymigrations "github.com/pulsetrace/gateway-service/migrations"
 	"github.com/pulsetrace/shared/bus"
@@ -346,6 +349,22 @@ func main() {
 		mux.HandleFunc("POST /api/v1/saved-searches", savedSearchHandler.Create)
 		mux.HandleFunc("PUT /api/v1/saved-searches/{id}", savedSearchHandler.Update)
 		mux.HandleFunc("DELETE /api/v1/saved-searches/{id}", savedSearchHandler.Delete)
+
+		// User-authored SQL (P3.1/P3.2).
+		//
+		// The engine is built here rather than lazily so a misconfiguration —
+		// a relation with no scanner — fails at startup instead of on someone's
+		// first query. If it cannot be built the endpoint is simply not
+		// registered: a query surface that 500s is worse than one that is
+		// visibly absent, and the log says which relations were unserved.
+		if engine, err := buildQueryEngine(authHandler.GetDB(), clickhouseURL, quickwitURL); err != nil {
+			log.Printf("WARNING: SQL query endpoint unavailable: %v", err)
+		} else {
+			sqlQueryHandler := handler.NewSQLQueryHandler(authHandler.GetDB(), engine)
+			mux.HandleFunc("POST /api/v1/query/sql", sqlQueryHandler.Execute)
+			mux.HandleFunc("GET /api/v1/query/schema", sqlQueryHandler.Schema)
+			log.Printf("SQL query endpoint ready at POST /api/v1/query/sql")
+		}
 	}
 
 	// Analytics APIs (powered by ClickHouse)
@@ -551,4 +570,38 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// buildQueryEngine wires each catalog relation to the scanner that serves it.
+//
+// Relations are taken from the catalog rather than listed here, so adding one
+// without a scanner is caught by NewEngine at startup instead of surfacing as a
+// runtime failure on a query that passed validation.
+func buildQueryEngine(db *sql.DB, clickhouseURL, quickwitURL string) (*sqlq.Engine, error) {
+	catalog := sqlq.DefaultCatalog()
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+
+	var scanners []sqlq.Scanner
+	for _, name := range catalog.Names() {
+		rel, _ := catalog.Lookup("", name)
+		switch rel.Store {
+		case sqlq.StoreLogs:
+			scanners = append(scanners, &sqlq.QuickwitScanner{
+				Rel: rel, URL: quickwitURL, Index: "pulsetrace-logs", Client: httpClient,
+			})
+		case sqlq.StoreAnalytics:
+			scanners = append(scanners, &sqlq.ClickHouseScanner{
+				Rel:    rel,
+				URL:    clickhouseURL,
+				User:   getEnv("CLICKHOUSE_USER", "pulsetrace"),
+				Pass:   getEnv("CLICKHOUSE_PASSWORD", "pulsetrace_secret"),
+				Client: httpClient,
+			})
+		case sqlq.StoreMeta:
+			scanners = append(scanners, &sqlq.PostgresScanner{Rel: rel, DB: db})
+		default:
+			return nil, fmt.Errorf("relation %q has no store binding", rel.Name)
+		}
+	}
+	return sqlq.NewEngine(catalog, sqlq.DefaultPolicy(), sqlq.DefaultBudget(), scanners...)
 }

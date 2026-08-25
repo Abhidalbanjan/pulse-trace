@@ -32,6 +32,7 @@ test.describe('Accessibility baseline (authenticated)', () => {
     ['settings', '/settings'],
     ['incidents', '/incidents'],
     ['explorer', '/explorer'],
+    ['query', '/query'],
   ];
 
   for (const [name, path] of PAGES) {

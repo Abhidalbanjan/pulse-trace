@@ -42,6 +42,34 @@ transform:
       }
     }
 
+    # `metadata` arrives as a JSON-encoded *string*, because LogEntry carries it
+    # as one (`Metadata string`, set by log-service from the request's map).
+    # Left alone it is an opaque blob: the index stores one long string, so no
+    # attribute inside it is a field, and no filter or aggregation can reach any
+    # of them. A user could attach customer_id to every record and never once
+    # search on it.
+    #
+    # Parsing it here turns each attribute into a real field under `metadata.`,
+    # which the index picks up through its dynamic mapping — already configured
+    # `fast` with `expand_dots`, so these are aggregatable with no per-field
+    # mapping and no allowlist of blessed attribute names.
+    #
+    # Nested rather than merged into the top level on purpose: a caller who
+    # sends `{"level": "..."}` as metadata must not be able to overwrite the log
+    # record's real level. Collision is impossible when the attributes live
+    # under their own key.
+    #
+    # `is_string` guards the infallible `string!`: without it, a record whose
+    # metadata is already an object would abort the whole VRL program and be
+    # dropped rather than indexed. A transform that discards telemetry to tidy
+    # up a field is a worse bug than the one being fixed.
+    if is_string(.metadata) {
+      meta, meta_err = parse_json(string!(.metadata))
+      if meta_err == null && is_object(meta) {
+        .metadata = object!(meta)
+      }
+    }
+
     # Ensure timestamp is a valid datetime for the timestamp_field
     if exists(.timestamp) == false {
        .timestamp = now()

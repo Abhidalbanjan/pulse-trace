@@ -36,73 +36,104 @@ would suggest.
 
 ## What this run says
 
-A clean run: both stacks rebuilt from empty volumes, 2 GiB corpus, **5,104,768
-log records ingested by each side**, both verified to hold that count before
-querying, 20 iterations per class.
+**This run measured queries only.** Nothing was reloaded, so there is no
+before/after footprint snapshot and the footprint table below is empty rather
+than guessed — the figures from the 2026-08-19T09:36 run (**3.32 GiB per GiB
+ingested against 302 MiB**, **23 containers against 2**, **4.16 GiB resident
+against 917 MiB**) are the last measured ones and still stand. The corpus is
+byte-identical to that run, hash-verified: `5a505252e666571d…`.
 
-This is the first run whose footprint numbers can be trusted. The two before it
-under-measured PulseTrace, and the correction is recorded at the bottom of this
-section rather than quietly folded in.
+**The finding is a capability, not a latency.** All six query classes are now
+expressible against PulseTrace. The high-cardinality group-by — top customers by
+error volume across 50k distinct `customer_id` values — was unaskable in every
+previous run, and answers in **4 ms** against OpenObserve's 56 ms. The full-scan
+aggregation is **4 ms against 32 ms**. Both are answered *in the store*: the
+gateway reports `rows_scanned: 0`, because push-down turns the aggregate into a
+Quickwit terms aggregation and only the buckets travel. That is dimension **D3**
+closed, and it closed exactly the way §1.2 said it would have to — by giving
+users a query language, not by tuning anything.
 
-**Storage is the clear loss, and it is larger than we published.** PulseTrace
-writes **3.39 GiB per GiB ingested** against OpenObserve's **309 MiB** —
-**11.2× more disk for the same data**. Earlier runs reported 8.4× and 7.5×;
-both were measured with a sampler that skipped our anonymous volumes, so the
-gap was always this size and we were reporting a lower bound as if it were the
-figure. The direction never changed, only our ability to see it.
+### Do not compare these latencies against the previous run
 
-The useful part is the cause, and it is unchanged: this is **amplification, not
-format**. Our log tier is Quickwit, which *is* tantivy — the same substrate as
-their index — so it was never "columnar beats inverted index". Kafka retains a
-full second copy of the corpus and the Quickwit splits are never compacted.
-Both are fixable without replacing an engine, so **P2 stays rescoped** from an
-object-store-primary rewrite to deduplication and compaction.
+OpenObserve's numbers moved by 2–7× between the 09:36 run and this one, in
+every class, **with nothing changed in OpenObserve**: trace-by-ID 506 → 248 ms,
+regex 49 → 6 ms, the time-narrowed filter 58 → 7 ms. Restarting their container
+to drop any in-memory cache did **not** move them back — two runs an hour apart,
+one before the restart and one after, agree with each other to within a
+millisecond or two and disagree with the 09:36 run entirely.
 
-**Deployability:** **23 containers against 2**, and **5.00 GiB resident against
-733 MiB** — 7× the memory. Dimension D1, measured.
+So the difference is environmental, not a property of either product: the 09:36
+run was taken minutes after a full 2 GiB load on both stacks, with background
+merges and a cold page cache still settling. This run was taken on a quiescent
+machine.
 
-**Ingest throughput differs by ~7.7×**: OpenObserve took 74 s for the corpus,
-PulseTrace 572 s. Theirs is HTTP straight to storage; ours traverses gateway →
-Kafka → Quickwit. That is each product's native path, which is the comparison
-this harness exists to make — and the same Kafka hop implicated in the storage
-amplification shows up here too. One architectural decision, two measurements.
+The consequence is worth stating plainly, because it is a limit on this whole
+file: **absolute latencies are only comparable within a single run.** The
+harness does not currently control for machine state, and until it does, a
+number here can be compared with the other column beside it and not with the
+same cell in an earlier table.
 
-### Query latency — read the small differences as noise
+### The regex class is now a large, honest loss
 
-| Class | PulseTrace | OpenObserve | Robust? |
-| --- | --- | --- | --- |
-| Trace by ID | 13 / 27 ms | 579 / 701 ms | **yes — ~45×, ours** |
-| Needle in a haystack | 70 / 102 ms | 63 / 95 ms | no |
-| Regex scan | 79 / 126 ms | 47 / 65 ms | no |
-| Time-narrowed service filter | 43 / 64 ms | 36 / 53 ms | no |
-| Full-scan aggregation | *not expressible* | 71 / 91 ms | **yes — theirs** |
-| High-cardinality group-by | *not expressible* | 118 / 149 ms | **yes — theirs** |
+**96 / 140 ms against their 6 / 8 ms — 17×.** The previous run had this at 1.68×.
+Our side barely moved (68 → 96 ms p50); theirs improved eightfold, for the
+environmental reason above.
 
-Only three of these six survive a second run. **Trace-by-ID is decisively ours**
-— Quickwit serves it from a term index while OpenObserve scans, though this
-compares *default configurations*: `trace_id` could be indexed on their side and
-the gap would narrow. It is fair, not damning.
+Two things are true and should not be conflated. The direction is real and has
+been in every run: we evaluate regex in Go over an index-narrowed candidate set
+because Quickwit 0.8 has no regex, and that will lose to an engine that pushes it
+into the index. The magnitude of *17×* is not trustworthy, for the same reason
+the 1.68× was not.
 
-**The three near-parity classes move between runs and should not be quoted.**
-The previous run had us *winning* the time-narrowed service filter on p95
-(88 ms vs 136 ms); this one has OpenObserve ahead (64 ms vs 53 ms). Nothing
-changed in either product between those runs. An earlier draft of this file
-claimed we win two of the four expressible classes — **on this evidence it is
-one**, and the honest statement is that at 5.1 M records the everyday
-interactive queries are close enough that run-to-run variance exceeds the
-difference between the products.
+There is also a hypothesis this run cannot rule out: the reindex that made
+attributes queryable changed the document shape, so the regex path now
+deserialises a nested `metadata` object per candidate where it previously
+deserialised one string. That path decodes only `message`, so the cost should be
+small — but "should be" is what the corrections in this file keep punishing.
+**Measuring it is owed.**
 
-**The regex class runs at all now**, which is the finding that matters there. It
-previously failed 20/20: Quickwit 0.8 has no regex and parsed the `field:/…/`
-syntax we emitted as a wildcard, so any metacharacter returned 502. It is now
-evaluated in Go over an index-narrowed candidate set. It is slower than theirs;
-it used to be impossible.
+### What is not measured here
 
-**Two of six classes remain not expressible against PulseTrace at all.** That is
-dimension D3, and no tuning closes it — it is what phase **P3** (query engine)
-exists to fix. Latency is not our problem; expressibility is.
+- **Footprint after the shape change.** Indexing every attribute as its own
+  field costs index space that a single opaque string did not. Nobody has
+  measured how much. The next clean run must, because it is a real cost of the
+  capability above and publishing the capability without it is the kind of
+  one-sided accounting the footprint correction already caught us doing.
+- **Cold start to first query**, still, in either product.
 
-Cold start is still unmeasured; the sampler records disk, containers and RSS.
+### Correction: why the high-cardinality class could not be asked
+
+Found 2026-08-19 while closing it, by asking the running index what fields it
+actually had.
+
+The run above recorded the cause as `customer_id` reaching Quickwit "through the
+index's dynamic mode and therefore has no fast-field index". **That is wrong, and
+it would have sent the fix in the wrong direction** — toward an explicit field
+mapping and an allowlist of blessed attribute names.
+
+Dynamic fields *are* fast fields here: the index's `dynamic_mapping` already sets
+`fast` with `expand_dots`, and a terms aggregation on `tenant_tier` — a dynamic
+field, in no `field_mappings` entry — returns correct buckets against the live
+index. Nothing about dynamic mode was the problem.
+
+The actual cause was one level down. `LogEntry.Metadata` is a **JSON-encoded
+string**, so the index stored the whole attribute set as one opaque blob:
+`"{\"customer_id\":\"cust-46786\",…}"`. `customer_id` was not a field with a
+missing index — it was **not a field at all**, and no mapping could have made it
+one. The consequence was larger than this benchmark: any customer could attach
+attributes to every record and never filter or aggregate on one of them.
+
+The fix is in the Kafka source's VRL, which now parses that string into an
+object; the dynamic mapping picks the attributes up with no per-field
+configuration. Attributes are nested under `metadata.` rather than merged into
+the top level, so a caller sending `{"level": …}` cannot shadow the real log
+level.
+
+**The lesson is the one the footprint correction already taught.** Both wrong
+explanations were plausible, both were written from how the system was supposed
+to work, and both survived until someone asked the running stack a question it
+could answer directly. A measured number with a reasoned-about cause is half a
+measurement.
 
 ### Correction: what the first two runs got wrong
 
@@ -145,7 +176,7 @@ EXPECT_SHA256=<hash> ./scripts/bench/load.sh --target openobserve --corpus corpu
 
 _Generated by `scripts/bench/run-benchmark.sh` — do not edit by hand._
 
-- Run: **2026-08-18T05:38:52.428Z**
+- Run: **2026-08-19T11:04:01.963Z**
 - Corpus: **2 GiB (5.10M log records)**, seed `42`, sha256 `5a505252e666571d…`
 - Iterations per query: **20**
 - Resource cap (both sides): **4 CPU / 8g memory**
@@ -155,29 +186,22 @@ _Generated by `scripts/bench/run-benchmark.sh` — do not edit by hand._
 
 | Query class | PulseTrace p50 / p95 | OpenObserve p50 / p95 | Verdict |
 | --- | --- | --- | --- |
-| Needle in a haystack | 70 ms / 102 ms | 63 ms / 95 ms | OpenObserve faster (1.07×) |
-| Full-scan aggregation | **not expressible** | 71 ms / 91 ms | OpenObserve only |
-| High-cardinality group-by | **not expressible** | 118 ms / 149 ms | OpenObserve only |
-| Trace by ID | 13 ms / 27 ms | 579 ms / 701 ms | PulseTrace faster (0.04×) |
-| Regex scan | 79 ms / 126 ms | 47 ms / 65 ms | OpenObserve faster (1.92×) |
-| Time-narrowed service filter | 43 ms / 64 ms | 36 ms / 53 ms | OpenObserve faster (1.20×) |
+| Needle in a haystack | 33 ms / 83 ms | 13 ms / 21 ms | OpenObserve faster (4.02×) |
+| Full-scan aggregation | 4 ms / 5 ms | 32 ms / 41 ms | PulseTrace faster (0.12×) |
+| High-cardinality group-by | 4 ms / 5 ms | 56 ms / 66 ms | PulseTrace faster (0.08×) |
+| Trace by ID | 7 ms / 8 ms | 248 ms / 342 ms | PulseTrace faster (0.02×) |
+| Regex scan | 96 ms / 140 ms | 6 ms / 8 ms | OpenObserve faster (17.00×) |
+| Time-narrowed service filter | 2 ms / 2 ms | 7 ms / 8 ms | PulseTrace faster (0.33×) |
 
 ### Footprint
 
 | Measure | PulseTrace | OpenObserve |
 | --- | --- | --- |
-| Bytes on disk (after ingest) | 6.78 GiB | 618 MiB |
-| Bytes per GiB ingested | 3.39 GiB | 309 MiB |
-| Containers | 23 | 2 |
+| Bytes on disk (after ingest) | — | — |
+| Bytes per GiB ingested | — | — |
+| Containers | — | — |
 | Cold start to first query | — | — |
-| Peak RSS (loaded) | 5.00 GiB | 733 MiB |
-
-### Capability gaps
-
-2 of 6 query classes cannot be expressed against PulseTrace at all:
-
-- **Full-scan aggregation** — PulseTrace has no aggregation API for logs. The log surface exposes filters and a row limit, not GROUP BY — a user cannot ask this question at all. This is dimension D3 (query power) measured rather than asserted, and it is what phase P3 exists to fix.
-- **High-cardinality group-by** — Same ceiling as the full-scan aggregation: no GROUP BY, so a 50k-cardinality ranking is not expressible against the log API.
+| Peak RSS (loaded) | — | — |
 
 <!-- BENCH:END -->
 

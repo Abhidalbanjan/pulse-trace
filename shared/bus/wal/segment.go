@@ -217,6 +217,17 @@ func (s *segment) count() int {
 	return len(s.starts)
 }
 
+// isDirty reports whether anything has been appended since the last sync.
+//
+// Exists so a caller can observe sync state under the segment's own lock. The
+// field is guarded by s.mu, and reading it through the Log's lock instead — as
+// a test here originally did — is a data race the race detector catches.
+func (s *segment) isDirty() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dirty
+}
+
 // size is the number of intact bytes on disk.
 func (s *segment) size() int64 {
 	s.mu.RLock()

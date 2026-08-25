@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"unicode"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -314,6 +314,42 @@ type quickwitSearchRequest struct {
 	SortByField string `json:"sort_by_field,omitempty"`
 }
 
+// Sort directions for `sort_by_field`, named rather than spelled inline.
+//
+// **The `-` prefix does not mean descending.** Quickwit 0.8.1 sorts a fast
+// field descending by default and uses `-` to select *ascending* — the opposite
+// of the convention the syntax suggests, and the opposite of what this file
+// assumed everywhere it was used. Verified against the running 0.8.1 index, on
+// two independent datasets:
+//
+//	sort_by_field: "timestamp"   -> 08:51:03.80, 08:51:03.80, 08:51:03.77  (newest first)
+//	sort_by_field: "-timestamp"  -> 07:43:00.38, 07:43:00.81, 07:43:00.81  (oldest first)
+//
+// These constants exist so that no call site has to remember that. A raw
+// "-timestamp" in a search request reads as "newest first" to every Go
+// developer who will ever touch this file, which is exactly how the bug got in
+// and how it would get back in.
+const (
+	sortNewestFirst = "timestamp"
+	sortOldestFirst = "-timestamp"
+)
+
+// contextOverFetch is how many extra hits each context window requests.
+//
+// The index's timestamp fast field is second-precision (quickwit/logs-index.yaml
+// sets `fast_precision: seconds`), so a range bounded at the anchor cannot
+// exclude the anchor's own second — `[anchor TO *]` matches everything in that
+// second, including records *earlier* than the anchor. The "after" window was
+// returning those: neighbours from the wrong side of the anchor, presented as
+// what happened next.
+//
+// The index cannot make that distinction, so assembleContext makes it by exact
+// timestamp. This over-fetch is what lets it: enough slack that discarding the
+// same-second records still leaves a full window. A second carrying more than
+// this many records from one service will under-fill rather than show the wrong
+// neighbours — the right way round, and the caller can see the count it got.
+const contextOverFetch = 200
+
 type quickwitSearchResponse struct {
 	Hits []json.RawMessage `json:"hits"`
 }
@@ -531,7 +567,7 @@ func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 	req := quickwitSearchRequest{
 		Query:       query,
 		MaxHits:     maxHits,
-		SortByField: "-timestamp",
+		SortByField: sortNewestFirst,
 	}
 
 	hits, err := h.searchQuickwit(ctx, req)
@@ -560,7 +596,6 @@ func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, models.OK(hits))
 }
-
 
 // Regex scanning bounds. The multiplier over-fetches because the index can only
 // narrow by literal prefix, so most candidates will not match; the cap stops an
@@ -710,15 +745,42 @@ func buildContextQuery(tenantID, service, anchorTS, direction string) string {
 }
 
 // assembleContext turns the two raw Quickwit result sets into chronological
-// neighbour lists. `beforeDesc` arrives newest-first (Quickwit -timestamp) and
-// is reversed to chronological order; `afterAsc` arrives oldest-first. The
+// neighbour lists. `beforeDesc` arrives newest-first (sortNewestFirst) and is
+// reversed to chronological order; `afterAsc` arrives oldest-first
+// (sortOldestFirst). Both orderings are the ones the callers now actually
+// request — this comment described the intent correctly while the requests
+// asked for the opposite. The
 // anchor is dropped and every log is emitted at most once — a log sharing the
 // anchor's exact timestamp can appear on both sides of the inclusive range, and
 // showing it twice would mislead an operator reading the window.
-func assembleContext(anchorID string, beforeDesc, afterAsc []json.RawMessage) (before, after []json.RawMessage) {
+func assembleContext(anchorID, anchorTS string, beforeDesc, afterAsc []json.RawMessage) (before, after []json.RawMessage) {
 	seen := map[string]bool{}
 	if anchorID != "" {
 		seen[anchorID] = true
+	}
+	// Records from the anchor's own second arrive on both sides regardless of
+	// which side they belong to, because the index range is second-granular.
+	// An unparseable anchor timestamp disables the check rather than dropping
+	// every neighbour: a wider window is a worse answer, an empty one is no
+	// answer at all.
+	anchorAt, anchorOK := parseLogTime(anchorTS)
+	onSide := func(raw json.RawMessage, wantBefore bool) bool {
+		if !anchorOK {
+			return true
+		}
+		at, ok := parseLogTime(hitMeta(raw).Timestamp)
+		if !ok {
+			return true
+		}
+		// A record sharing the anchor's exact timestamp is genuinely adjacent
+		// and is kept — assigned to `before`, so the existing dedupe shows it
+		// once rather than on both sides. Only records on the *wrong* side of
+		// the anchor are dropped, which is what the second-granular range could
+		// not express.
+		if wantBefore {
+			return !at.After(anchorAt)
+		}
+		return at.After(anchorAt)
 	}
 	keep := func(raw json.RawMessage) bool {
 		id := hitMeta(raw).ID
@@ -732,12 +794,12 @@ func assembleContext(anchorID string, beforeDesc, afterAsc []json.RawMessage) (b
 		return true
 	}
 	for i := len(beforeDesc) - 1; i >= 0; i-- { // reverse newest-first → chronological
-		if keep(beforeDesc[i]) {
+		if onSide(beforeDesc[i], true) && keep(beforeDesc[i]) {
 			before = append(before, beforeDesc[i])
 		}
 	}
 	for _, raw := range afterAsc {
-		if keep(raw) {
+		if onSide(raw, false) && keep(raw) {
 			after = append(after, raw)
 		}
 	}
@@ -807,9 +869,13 @@ func (h *LogHandler) LogContext(w http.ResponseWriter, r *http.Request) {
 	// 2. Fetch each side. Over-fetch by one to absorb the anchor itself, which
 	//    sits on the inclusive boundary of both ranges.
 	beforeHits, err := h.searchQuickwit(ctx, quickwitSearchRequest{
-		Query:       buildContextQuery(tenantID, meta.ServiceName, meta.Timestamp, contextBefore),
-		MaxHits:     before + 1,
-		SortByField: "-timestamp",
+		Query: buildContextQuery(tenantID, meta.ServiceName, meta.Timestamp, contextBefore),
+		// The before-range is `[* TO anchor]` — unbounded backwards — so the
+		// direction is not cosmetic here. Newest-first takes the neighbours
+		// adjacent to the anchor; oldest-first took the oldest records that
+		// service ever wrote, which is what this asked for until now.
+		MaxHits:     before + 1 + contextOverFetch,
+		SortByField: sortNewestFirst,
 	})
 	if err != nil {
 		span.RecordError(err)
@@ -819,9 +885,12 @@ func (h *LogHandler) LogContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	afterHits, err := h.searchQuickwit(ctx, quickwitSearchRequest{
-		Query:       buildContextQuery(tenantID, meta.ServiceName, meta.Timestamp, contextAfter),
-		MaxHits:     after + 1,
-		SortByField: "timestamp",
+		Query: buildContextQuery(tenantID, meta.ServiceName, meta.Timestamp, contextAfter),
+		// Mirror image: `[anchor TO *]` is unbounded forwards, so oldest-first
+		// is what takes the neighbours just after the anchor rather than the
+		// most recent records in the index.
+		MaxHits:     after + 1 + contextOverFetch,
+		SortByField: sortOldestFirst,
 	})
 	if err != nil {
 		span.RecordError(err)
@@ -831,7 +900,7 @@ func (h *LogHandler) LogContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	b, a := assembleContext(meta.ID, beforeHits, afterHits)
+	b, a := assembleContext(meta.ID, meta.Timestamp, beforeHits, afterHits)
 	// Trim back to the requested per-side window, keeping the neighbours closest
 	// to the anchor (the tail of `before`, the head of `after`).
 	if len(b) > before {
@@ -848,6 +917,21 @@ func (h *LogHandler) LogContext(w http.ResponseWriter, r *http.Request) {
 		attribute.Int("context.after", len(a)),
 	)
 	writeJSON(w, http.StatusOK, models.OK(logContextResponse{Before: b, Anchor: anchor, After: a}))
+}
+
+// parseLogTime reads a log document's timestamp, accepting either RFC3339
+// precision the index emits.
+func parseLogTime(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 // searchQuickwit posts a search request to Quickwit's REST API and returns

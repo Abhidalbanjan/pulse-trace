@@ -252,7 +252,12 @@ export function ExplorerView() {
     const requestBody = {
       query: buildEffectiveQuery(),
       max_hits: 100,
-      sort_by_field: "-timestamp",
+      // "timestamp", not "-timestamp": Quickwit 0.8.1 sorts a fast field
+      // descending by default and uses `-` to select *ascending*, the opposite
+      // of what the syntax suggests. This asked for "-timestamp" meaning
+      // newest-first and received the 100 oldest matching logs — with max_hits
+      // capped at 100, the recent ones were not reachable by scrolling either.
+      sort_by_field: "timestamp",
       aggs: {
         service_counts: {
           terms: { field: "service_name" }

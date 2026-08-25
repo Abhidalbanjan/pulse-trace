@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,12 @@ const (
 	// one.
 	DefaultSyncInterval = 100 * time.Millisecond
 
+	// DefaultFullTimeout is how long a publisher waits for a full log to drain
+	// before being refused. Long enough to ride out a consumer's GC pause or a
+	// slow batch, short enough that a caller's own request deadline is not
+	// silently consumed by it.
+	DefaultFullTimeout = 2 * time.Second
+
 	segmentSuffix = ".seg"
 	// offsetDigits zero-pads segment names so lexical order is numeric order —
 	// a directory listing is then already sorted, and an operator reading `ls`
@@ -37,6 +44,23 @@ type Options struct {
 	// default; negative disables the timer, leaving durability to rotation and
 	// Close (used by tests that drive sync explicitly).
 	SyncInterval time.Duration
+	// MaxBytes bounds the topic's total on-disk size. Zero means unbounded.
+	//
+	// The bound is what makes back-pressure possible at all: without it a
+	// consumer that stops consuming turns into a disk that fills, and the
+	// failure surfaces as the whole host wedging rather than as this topic
+	// refusing writes.
+	MaxBytes int64
+	// FullTimeout is how long Append waits for space before refusing. Zero uses
+	// the default; negative refuses immediately.
+	FullTimeout time.Duration
+}
+
+func (o Options) fullTimeout() time.Duration {
+	if o.FullTimeout != 0 {
+		return o.FullTimeout
+	}
+	return DefaultFullTimeout
 }
 
 func (o Options) segmentBytes() int64 {
@@ -126,6 +150,10 @@ func (l *Log) Append(r Record) (int64, error) {
 		return 0, fmt.Errorf("wal: log is closed")
 	}
 
+	if l.opts.MaxBytes > 0 && l.totalBytes() >= l.opts.MaxBytes {
+		return 0, errAtCapacity
+	}
+
 	active := l.segments[len(l.segments)-1]
 	if active.size() >= l.opts.segmentBytes() && active.count() > 0 {
 		var err error
@@ -134,6 +162,97 @@ func (l *Log) Append(r Record) (int64, error) {
 		}
 	}
 	return active.append(r)
+}
+
+// ErrLogFull is returned when the topic is at its size bound and nothing can be
+// reclaimed within the deadline.
+//
+// It is an error rather than a silent drop, and that is the entire point.
+// Telemetry discarded quietly does not show up as missing — it shows up as a
+// smaller number, and every count, rate and SLO computed downstream of it is
+// then wrong with nothing anywhere saying so. A publisher that is refused can
+// retry, shed deliberately, or surface a 429; a publisher whose record vanished
+// cannot do any of those, because it was told it succeeded.
+var ErrLogFull = errors.New("wal: log is full")
+
+// Append writes a record, waiting for space if the log is at its bound.
+//
+// The wait is bounded and then it refuses. Blocking forever would convert a
+// stalled consumer into a stalled *producer* — the gateway's ingest handler
+// holding connections open until it runs out of them, which is a worse and much
+// less legible failure than a 429.
+func (l *Log) AppendWithBackpressure(r Record) (int64, error) {
+	deadline := time.Now().Add(l.opts.fullTimeout())
+	for {
+		off, err := l.Append(r)
+		if !errors.Is(err, errAtCapacity) {
+			return off, err
+		}
+		if l.opts.FullTimeout < 0 || !time.Now().Before(deadline) {
+			return 0, fmt.Errorf("%w: %s is at its %d-byte bound and the slowest "+
+				"consumer has not advanced", ErrLogFull, l.dir, l.opts.MaxBytes)
+		}
+		// Somebody else's Reclaim may free space while we wait.
+		time.Sleep(pollInterval)
+	}
+}
+
+// errAtCapacity is the internal signal that the bound is reached. Callers see
+// ErrLogFull from AppendWithBackpressure, or this from Append if they chose the
+// non-blocking path.
+var errAtCapacity = errors.New("wal: at capacity")
+
+// totalBytes is the topic's on-disk size across every segment.
+func (l *Log) totalBytes() int64 {
+	var n int64
+	for _, s := range l.segments {
+		n += s.size()
+	}
+	return n
+}
+
+// Reclaim deletes whole segments whose records are all below upTo.
+//
+// Whole segments only. Reclaiming individual records would mean rewriting a
+// file that is being appended to and re-indexing every offset after it — the
+// reason log-structured storage deletes by segment everywhere it appears.
+//
+// The active segment is never removed, even when fully consumed: it is the
+// append target, and deleting it mid-write is how a log loses the records it is
+// in the middle of accepting.
+func (l *Log) Reclaim(upTo int64) (int64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var freed int64
+	for len(l.segments) > 1 {
+		oldest := l.segments[0]
+		// Keep it unless every record it holds has been consumed.
+		if oldest.nextOffset() > upTo {
+			break
+		}
+		size := oldest.size()
+		if err := oldest.Close(); err != nil {
+			return freed, err
+		}
+		if err := os.Remove(oldest.path); err != nil {
+			return freed, fmt.Errorf("wal: remove reclaimed segment %s: %w", oldest.path, err)
+		}
+		l.segments = l.segments[1:]
+		freed += size
+	}
+	return freed, nil
+}
+
+// OldestOffset is the lowest offset still readable. Records below it have been
+// reclaimed; a consumer committed below this has fallen off the log.
+func (l *Log) OldestOffset() int64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if len(l.segments) == 0 {
+		return 0
+	}
+	return l.segments[0].base
 }
 
 // rotate syncs the active segment and starts a new one. Caller holds l.mu.

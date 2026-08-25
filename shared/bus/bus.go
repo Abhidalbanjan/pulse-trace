@@ -40,6 +40,16 @@ import (
 // downstream of it, and a dropped record is not recoverable later.
 var ErrBusUnavailable = errors.New("bus: transport unavailable")
 
+// ErrBusFull is returned when the transport cannot accept a record because it
+// is at its bound and the slowest consumer has not advanced.
+//
+// Distinct from ErrBusUnavailable because the remedy differs: unavailable means
+// retry elsewhere or later, full means the system is keeping up with neither
+// its producers nor its consumers and the caller should shed load — a 429 with
+// Retry-After rather than a 503. Neither is a silent drop, which is the one
+// outcome this package will not produce.
+var ErrBusFull = errors.New("bus: transport is full")
+
 // Message is one record delivered to a Handler.
 //
 // Deliberately not a Kafka type. Partition and Offset are kept even though they

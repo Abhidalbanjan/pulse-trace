@@ -2,9 +2,11 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import { queryHrefFromLogSearch } from '@/components/Query/fromLogSearch';
 import { fetchWithAuth } from '@/lib/api';
 import { BarChart, Bar, Tooltip, ResponsiveContainer, Brush } from 'recharts';
 import { useTheme } from '@/context/ThemeContext';
+import { useToast } from '@/components/ui';
 
 interface LogEntry {
   id: string;
@@ -60,6 +62,7 @@ interface SavedSearch {
 export function ExplorerView() {
   const { tokens: t } = useTheme();
   const router = useRouter();
+  const toast = useToast();
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("*");
@@ -209,6 +212,22 @@ export function ExplorerView() {
     if (regex === 'true') setRegexMode(true);
     if (range && TIME_RANGES.some((r) => r.key === range)) setTimeRange(range as TimeRange);
   }, []);
+
+  // openInSql hands this search to the query workbench (P3.6).
+  //
+  // Only the terms that map exactly to a SQL filter are carried over. Anything
+  // else is reported rather than translated approximately — arriving in a new
+  // tool with a filter that quietly means something different is worse than
+  // arriving with fewer filters and being told which.
+  const openInSql = () => {
+    const { href, dropped } = queryHrefFromLogSearch(query);
+    if (dropped.length > 0) {
+      toast.info(
+        `Opened in SQL. ${dropped.length === 1 ? 'One term' : `${dropped.length} terms`} could not be expressed as SQL and ${dropped.length === 1 ? 'was' : 'were'} not carried over: ${dropped.join(' ')}`,
+      );
+    }
+    router.push(href);
+  };
 
   // copySearchLink builds a shareable URL encoding the current search state.
   const copySearchLink = async () => {
@@ -590,6 +609,22 @@ export function ExplorerView() {
               </div>
             )}
           </div>
+
+          <button
+            onClick={openInSql}
+            title="Open this search in the SQL workbench"
+            data-testid="open-in-sql"
+            style={{
+              display: 'flex', alignItems: 'center', gap: '8px',
+              padding: '11px 16px', borderRadius: '14px',
+              border: `1px solid ${t.panelBorder}`,
+              background: 'transparent', color: t.text2,
+              fontSize: '13px', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+            }}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>terminal</span>
+            Open in SQL
+          </button>
 
           <button
             onClick={copySearchLink}

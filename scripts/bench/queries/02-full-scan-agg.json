@@ -1,9 +1,13 @@
 {
   "id": "full_scan_agg",
   "name": "Full-scan aggregation",
-  "why": "Count every record in the window grouped by level. No index helps; this is raw scan throughput over the whole corpus.",
+  "why": "Count every record grouped by level. No index helps; this is raw scan throughput over the whole corpus. Was 'not expressible' against PulseTrace until the query engine shipped \u2014 note the two sides bound the window differently: OpenObserve is given an explicit 48h range, PulseTrace aggregates the whole index, which holds only this corpus.",
   "pulsetrace": {
-    "unsupported": "PulseTrace has no aggregation API for logs. The log surface exposes filters and a row limit, not GROUP BY \u2014 a user cannot ask this question at all. This is dimension D3 (query power) measured rather than asserted, and it is what phase P3 exists to fix."
+    "method": "POST",
+    "path": "/api/v1/query/sql",
+    "body": {
+      "sql": "SELECT level, count(*) AS n FROM logs GROUP BY level ORDER BY n DESC"
+    }
   },
   "openobserve": {
     "method": "POST",

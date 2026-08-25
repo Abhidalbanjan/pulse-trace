@@ -1,9 +1,13 @@
 {
   "id": "high_cardinality_groupby",
   "name": "High-cardinality group-by",
-  "why": "Top customers by error volume across 50k distinct customer_id values. This is where a columnar store and an inverted index diverge most, and the dimension vendor benchmarks usually omit.",
+  "why": "Top customers by error volume across 50k distinct customer_id values. This is where a columnar store and an inverted index diverge most, and the dimension vendor benchmarks usually omit. Both sides run the same question: filter to ERROR, group by a 50k-cardinality attribute, take the top 20. Against PulseTrace this reaches Quickwit as a filtered terms aggregation; the rows are counted in the index and only the 20 buckets travel.",
   "pulsetrace": {
-    "unsupported": "Same ceiling as the full-scan aggregation: no GROUP BY, so a 50k-cardinality ranking is not expressible against the log API."
+    "method": "POST",
+    "path": "/api/v1/query/sql",
+    "body": {
+      "sql": "SELECT `metadata.customer_id`, count(*) AS n FROM logs WHERE level = 'ERROR' GROUP BY `metadata.customer_id` ORDER BY n DESC LIMIT 20"
+    }
   },
   "openobserve": {
     "method": "POST",

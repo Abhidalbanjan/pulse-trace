@@ -189,7 +189,7 @@ func (b *InProcessBus) Subscribe(group string, topics []string, h Handler) (Subs
 			if b.startEarliest {
 				start = l.OldestOffset()
 			}
-			if err := g.Seek(start); err != nil {
+			if err := g.StartAt(start); err != nil {
 				return nil, err
 			}
 		}

@@ -93,15 +93,20 @@ func (g *Group) HasCommitted() bool {
 	return g.committed
 }
 
-// Seek sets the starting position of a group that has never committed.
+// StartAt sets the initial position of a group that has never committed.
+//
+// Named StartAt rather than Seek because `Seek` has a meaning in Go — vet flags
+// any method of that name whose signature is not io.Seeker's — and because
+// this is not a seek: it is only legal once, before the group has consumed
+// anything.
 //
 // Refused once a group has a committed position: moving a live consumer is how
 // records get skipped, and it must not be reachable by accident.
-func (g *Group) Seek(next int64) error {
+func (g *Group) StartAt(next int64) error {
 	g.mu.Lock()
 	if g.committed {
 		g.mu.Unlock()
-		return fmt.Errorf("wal: refusing to seek group %q, which has already committed at %d", g.name, g.next)
+		return fmt.Errorf("wal: refusing to set the start of group %q, which has already committed at %d", g.name, g.next)
 	}
 	g.next = next
 	g.mu.Unlock()

@@ -24,7 +24,7 @@ import (
 	"github.com/pulsetrace/gateway-service/internal/quota"
 	"github.com/pulsetrace/gateway-service/internal/tenantdata"
 	gatewaymigrations "github.com/pulsetrace/gateway-service/migrations"
-	"github.com/pulsetrace/shared/kafka"
+	"github.com/pulsetrace/shared/bus"
 	"github.com/pulsetrace/shared/metering"
 	"github.com/pulsetrace/shared/middleware"
 	"github.com/pulsetrace/shared/migrate"
@@ -481,28 +481,28 @@ func main() {
 	// reaching ClickHouse otel_logs (which the explorer never queries). If Kafka
 	// isn't reachable at startup, we log and leave the proxy on its OTLP fallback
 	// rather than blocking gateway boot on the optional migration feature.
-	if logProducer, err := kafka.NewProducer(); err != nil {
-		log.Printf("WARNING: log publishing to Quickwit disabled (kafka unavailable); migration + OTLP logs fall back to ClickHouse otel_logs: %v", err)
-		// No Kafka: the synthetics + error-regression workers still run, they just
+	if logBus, err := bus.NewKafkaBus(); err != nil {
+		log.Printf("WARNING: log publishing to Quickwit disabled (bus unavailable); migration + OTLP logs fall back to ClickHouse otel_logs: %v", err)
+		// No bus: the synthetics + error-regression workers still run, they just
 		// can't page.
 		syntheticsHandler.StartWorker()
 		errorTrackingHandler.StartRegressionWorker()
 	} else {
-		defer logProducer.Close()
-		migrationProxy.SetLogSink(logProducer, usageMeter.Record, quotaEnforcer.Allow)
+		defer logBus.Close()
+		migrationProxy.SetLogSink(logBus, usageMeter.Record, quotaEnforcer.Allow)
 		// Route OTLP-native logs (gRPC + HTTP) to the same Kafka → Quickwit path so
 		// they surface in the log explorer alongside migration and app logs, instead
 		// of only reaching the unqueried ClickHouse otel_logs table. Metering/quota
 		// are applied by the OTLP receiver before the bridge publishes.
-		logBridge := logbridge.New(logProducer)
+		logBridge := logbridge.New(logBus)
 		otlpReceiver.SetLogSink(logBridge.Publish)
 		otlpHTTP.SetLogSink(logBridge.Publish)
 		log.Printf("logs (migration + OTLP-native) → Kafka topic 'logs' → Quickwit (log explorer)")
 		// Wire the synthetics failure→alert and error-regression→alert paths onto
 		// the same logs topic, then start their workers (wiring before start avoids
 		// racing the first poll).
-		syntheticsHandler.WithAlertPublisher(logProducer).StartWorker()
-		errorTrackingHandler.WithAlertPublisher(logProducer).StartRegressionWorker()
+		syntheticsHandler.WithAlertPublisher(logBus).StartWorker()
+		errorTrackingHandler.WithAlertPublisher(logBus).StartRegressionWorker()
 	}
 	migrationProxy.RegisterRoutes(mux)
 	// Optional TLS/mTLS for the OTLP/gRPC listener, so the per-tenant ingestion

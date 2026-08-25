@@ -14,16 +14,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"unicode"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
+	"github.com/pulsetrace/shared/bus"
 	"github.com/pulsetrace/shared/jsonpool"
-	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/metering"
 	"github.com/pulsetrace/shared/models"
 )
@@ -36,7 +36,7 @@ const (
 
 // LogHandler exposes HTTP endpoints for log ingestion and querying.
 type LogHandler struct {
-	producer      *kafka.Producer
+	bus           bus.Bus
 	logQueue      chan *models.LogEntry
 	batchSize     int
 	flushInterval time.Duration
@@ -53,9 +53,9 @@ type LogHandler struct {
 }
 
 // NewLogHandler creates a handler with high-performance buffered queue and worker pool.
-func NewLogHandler(producer *kafka.Producer, quickwitURL string, meter *metering.Meter) *LogHandler {
+func NewLogHandler(b bus.Bus, quickwitURL string, meter *metering.Meter) *LogHandler {
 	h := &LogHandler{
-		producer:      producer,
+		bus:           b,
 		logQueue:      make(chan *models.LogEntry, 100000), // 100k buffered elements shock absorber
 		batchSize:     2000,                                // bulk pgx/kafka batch threshold
 		flushInterval: 100 * time.Millisecond,              // maximum latency threshold
@@ -284,9 +284,9 @@ func (h *LogHandler) flushBatch(batch []*models.LogEntry) {
 	// by Quickwit via its native Kafka source.
 
 	// 2. Publish batch to Kafka in a single TCP operation
-	if h.producer != nil {
+	if h.bus != nil {
 		_, kafkaSpan := tracer.Start(ctx, "kafka.publish_batch")
-		err := h.producer.PublishBatch(ctx, logsTopic, batch)
+		err := h.bus.PublishBatch(ctx, logsTopic, batch)
 		kafkaSpan.End()
 		if err != nil {
 			span.RecordError(err)
@@ -560,7 +560,6 @@ func (h *LogHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, models.OK(hits))
 }
-
 
 // Regex scanning bounds. The multiplier over-fetches because the index can only
 // narrow by literal prefix, so most candidates will not match; the cap stops an

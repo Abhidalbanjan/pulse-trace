@@ -24,9 +24,10 @@ import (
 // queries, so migrated customers couldn't see their logs in the product UI.
 const logsTopic = "logs"
 
-// LogPublisher publishes a batch of native LogEntry records to Kafka (satisfied
-// by *kafka.Producer). Injected so this package stays decoupled from Kafka and
-// unit-testable; when it's nil the log handlers fall back to the OTLP forward.
+// LogPublisher publishes a batch of native LogEntry records to the message bus
+// (satisfied by bus.Bus). Injected so this package stays decoupled from the
+// transport and unit-testable; when it's nil the log handlers fall back to the
+// OTLP forward.
 type LogPublisher interface {
 	PublishBatch(ctx context.Context, topic string, entries []*models.LogEntry) error
 }

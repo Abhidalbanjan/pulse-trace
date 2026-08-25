@@ -35,7 +35,8 @@ import (
 // topic Quickwit's native source indexes into pulsetrace-logs.
 const logsTopic = "logs"
 
-// LogPublisher publishes a LogEntry batch to Kafka (satisfied by *kafka.Producer).
+// LogPublisher publishes a LogEntry batch to the message bus (satisfied by
+// bus.Bus).
 type LogPublisher interface {
 	PublishBatch(ctx context.Context, topic string, entries []*models.LogEntry) error
 }

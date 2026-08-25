@@ -1,6 +1,9 @@
 package sqlq
 
 import (
+	"database/sql"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -328,5 +331,68 @@ func TestAcceptedStatementsOnlyEverReferenceCatalogRelations(t *testing.T) {
 				t.Fatalf("accepted relation %q that is not tenant-bound: %s", r.Name, sql)
 			}
 		}
+	}
+}
+
+// ── The executor's own namespace ─────────────────────────────────────────────
+//
+// The denylist above names ClickHouse and MySQL functions, because that is the
+// grammar the validator parses. The engine that runs the statement is DuckDB,
+// whose file readers are named differently — and every one of them passed
+// validation until they were added. They were unreachable only because they are
+// table functions and the MySQL grammar cannot express `FROM read_text(...)`,
+// which is precisely the "denial that only works because of the current parser"
+// the policy warns against.
+func TestDuckDBFileFunctionsAreRefusedByName(t *testing.T) {
+	cat := DefaultCatalog()
+	pol := DefaultPolicy()
+	for _, fn := range []string{
+		"read_csv", "read_csv_auto", "read_parquet", "parquet_scan",
+		"read_json", "read_json_auto", "read_ndjson", "read_text",
+		"read_blob", "glob", "getenv", "install", "load_extension",
+	} {
+		sql := "SELECT " + fn + "('/etc/passwd') FROM logs"
+		_, err := Validate(sql, cat, pol)
+		if err == nil {
+			t.Errorf("%s: accepted — it reaches the execution engine", fn)
+			continue
+		}
+		if r, ok := ReasonOf(err); !ok || r != ReasonDeniedFunction {
+			t.Errorf("%s: refused as %v, want %v — a refusal for an incidental "+
+				"reason disappears the moment that reason stops applying",
+				fn, r, ReasonDeniedFunction)
+		}
+	}
+}
+
+// The backstop: even if a file reader became reachable — a swapped parser, a
+// name not on the list, a DuckDB release promoting a table function to scalar —
+// the engine must not be able to open anything.
+//
+// Asserted against the same DSN the engine uses, so the two cannot drift.
+func TestLocalEngineHasExternalAccessDisabled(t *testing.T) {
+	db, err := sql.Open("duckdb", duckDSN)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	var setting string
+	if err := db.QueryRow("SELECT current_setting('enable_external_access')").Scan(&setting); err != nil {
+		t.Fatalf("read setting: %v", err)
+	}
+	if setting != "false" {
+		t.Fatalf("enable_external_access = %s, want false (DuckDB defaults it to true)", setting)
+	}
+
+	// And prove the setting actually bites, rather than trusting the flag.
+	secret := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(secret, []byte("SUPER-SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var leaked string
+	err = db.QueryRow("SELECT content FROM read_text('" + secret + "')").Scan(&leaked)
+	if err == nil {
+		t.Fatalf("read a local file despite external access being disabled: %q", leaked)
 	}
 }

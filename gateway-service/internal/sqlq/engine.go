@@ -79,6 +79,29 @@ type Result struct {
 
 // Query validates, scans, loads and executes. tenantID must come from the
 // authenticated request — never from anything the user sent as data.
+// duckDSN opens the local execution engine with filesystem and network access
+// switched off.
+//
+// # Why this is not redundant with the function denylist
+//
+// `deniedFunctions` names ClickHouse and MySQL functions, because that is the
+// grammar the validator parses. The engine that actually *runs* the statement
+// is DuckDB, whose file readers live in a different namespace — `read_csv_auto`,
+// `read_text`, `read_blob`, `read_parquet`, `glob`. None of them were denied,
+// and all of them passed validation.
+//
+// They were not reachable, for two reasons that are both accidents of the
+// current front end: every one is a *table* function, and the MySQL grammar
+// cannot express `FROM read_text('/etc/passwd')`. The policy's own comment
+// warns against exactly this — "a denial that only works because of the current
+// parser is a denial that disappears quietly when the parser changes" — and the
+// DuckDB namespace is where that warning had not been applied.
+//
+// So the guarantee moves to the engine, where it does not depend on a parser or
+// on a list being complete: with external access off, a file reader that somehow
+// became reachable still cannot open anything. DuckDB defaults this to true.
+const duckDSN = "?enable_external_access=false"
+
 func (e *Engine) Query(ctx context.Context, tenantID, userSQL string) (*Result, error) {
 	if strings.TrimSpace(tenantID) == "" {
 		// Fail closed. An empty tenant that reached a scanner would be a request
@@ -113,7 +136,7 @@ func (e *Engine) Query(ctx context.Context, tenantID, userSQL string) (*Result, 
 	// A fresh in-memory database per query. Reusing one across queries would
 	// mean one tenant's materialised rows outliving their request and being
 	// visible to the next — the exact leak this design removes everywhere else.
-	db, err := sql.Open("duckdb", "")
+	db, err := sql.Open("duckdb", duckDSN)
 	if err != nil {
 		return nil, fmt.Errorf("sqlq: open engine: %w", err)
 	}

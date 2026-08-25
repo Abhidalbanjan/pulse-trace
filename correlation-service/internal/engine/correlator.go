@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/IBM/sarama"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -16,11 +15,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/pulsetrace/correlation-service/internal/repository"
+	"github.com/pulsetrace/shared/bus"
 	"github.com/pulsetrace/shared/causal"
 	"github.com/pulsetrace/shared/client"
 	"github.com/pulsetrace/shared/models"
 	"github.com/pulsetrace/shared/rabbitmq"
-	"github.com/pulsetrace/shared/telemetry"
 )
 
 const (
@@ -59,7 +58,7 @@ type Correlator struct {
 	router     *AutomationRouter
 	// inflight dedupes concurrent analyses for the same incident — a burst of
 	// alerts hitting the same open incident only triggers one in-flight call.
-	inflight   sync.Map // map[string]struct{}
+	inflight sync.Map // map[string]struct{}
 }
 
 func NewCorrelator(repo *repository.IncidentRepository, publisher *rabbitmq.Publisher, analyzer causal.Analyzer, topoclient *client.TopologyClient, forwarder *SaaSForwarder, router *AutomationRouter) *Correlator {
@@ -72,15 +71,15 @@ func NewCorrelator(repo *repository.IncidentRepository, publisher *rabbitmq.Publ
 	return &Correlator{repo: repo, publisher: publisher, analyzer: analyzer, topoclient: topoclient, forwarder: forwarder, router: router}
 }
 
-// Handle is the Kafka MessageHandler for the alerts topic.
-func (c *Correlator) Handle(msg *sarama.ConsumerMessage) error {
-	ctx := telemetry.ExtractKafkaContext(context.Background(), msg)
-
+// Handle is the bus.Handler for the alerts topic. The ctx already carries the
+// producer's trace context, applied by the bus adapter.
+func (c *Correlator) Handle(ctx context.Context, msg bus.Message) error {
 	tracer := otel.Tracer(serviceName)
 	ctx, span := tracer.Start(ctx, "correlation.process_alert",
 		trace.WithSpanKind(trace.SpanKindConsumer),
 		trace.WithAttributes(
-			attribute.String("messaging.system", "kafka"),
+			// `messaging.system` is no longer hardcoded: the whole point of the
+			// port is that this may not be Kafka.
 			attribute.String("messaging.destination", msg.Topic),
 		),
 	)

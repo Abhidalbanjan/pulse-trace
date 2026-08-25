@@ -5,13 +5,12 @@ import (
 	"encoding/json"
 	"log"
 
-	"github.com/IBM/sarama"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/pulsetrace/shared/kafka"
+	"github.com/pulsetrace/shared/bus"
 	"github.com/pulsetrace/shared/models"
 	"github.com/pulsetrace/shared/telemetry"
 )
@@ -39,26 +38,29 @@ type alertStore interface {
 // ERROR and FATAL entries, then publishes them to the alerts topic for
 // the correlation engine to consume.
 type LogConsumer struct {
-	repo     alertStore
-	producer *kafka.Producer // may be nil — degrades gracefully
+	repo alertStore
+	// bus may be nil — this service degrades to alerting without forwarding
+	// rather than failing, which is the existing behaviour.
+	bus bus.Bus
 }
 
-func NewLogConsumer(repo alertStore, producer *kafka.Producer) *LogConsumer {
-	return &LogConsumer{repo: repo, producer: producer}
+func NewLogConsumer(repo alertStore, b bus.Bus) *LogConsumer {
+	return &LogConsumer{repo: repo, bus: b}
 }
 
-// Handle is the MessageHandler passed to kafka.ConsumerGroup.
-func (c *LogConsumer) Handle(msg *sarama.ConsumerMessage) error {
-	ctx := telemetry.ExtractKafkaContext(context.Background(), msg)
-
+// Handle is the bus.Handler for the logs topic. The ctx already carries the
+// producer's trace context, applied by the bus adapter.
+func (c *LogConsumer) Handle(ctx context.Context, msg bus.Message) error {
 	tracer := otel.Tracer(serviceName)
 	ctx, span := tracer.Start(ctx, "alert.process_log_event",
 		trace.WithSpanKind(trace.SpanKindConsumer),
 		trace.WithAttributes(
-			attribute.String("messaging.system", "kafka"),
+			// No `messaging.system` — the port exists precisely so this may
+			// not be Kafka. Partition/offset stay: every durable transport has
+			// an equivalent, and they are what make a stuck consumer findable.
 			attribute.String("messaging.destination", msg.Topic),
-			attribute.Int64("messaging.kafka.partition", int64(msg.Partition)),
-			attribute.Int64("messaging.kafka.offset", msg.Offset),
+			attribute.Int64("messaging.partition", int64(msg.Partition)),
+			attribute.Int64("messaging.offset", msg.Offset),
 		),
 	)
 	defer span.End()
@@ -102,7 +104,7 @@ func (c *LogConsumer) Handle(msg *sarama.ConsumerMessage) error {
 	}
 
 	// Publish alert to the alerts topic so the correlation engine can group it.
-	if c.producer != nil {
+	if c.bus != nil {
 		go func() {
 			_, kafkaSpan := tracer.Start(ctx, "kafka.publish_alert")
 			defer kafkaSpan.End()
@@ -113,7 +115,7 @@ func (c *LogConsumer) Handle(msg *sarama.ConsumerMessage) error {
 				log.Printf("log_consumer: failed to marshal alert for kafka: %v", err)
 				return
 			}
-			if err := c.producer.PublishWithContext(ctx, alertsTopic, alert.ServiceName, payload); err != nil {
+			if err := c.bus.Publish(ctx, alertsTopic, alert.ServiceName, payload); err != nil {
 				kafkaSpan.RecordError(err)
 				log.Printf("log_consumer: failed to publish alert %s to kafka: %v", alert.ID, err)
 			}

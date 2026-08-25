@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"log"
 
-	"github.com/IBM/sarama"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/pulsetrace/shared/bus"
 	"github.com/pulsetrace/shared/models"
-	"github.com/pulsetrace/shared/telemetry"
 	"github.com/pulsetrace/topology-service/internal/repository"
 )
 
@@ -22,9 +21,10 @@ func NewGraphBuilder(repo *repository.Neo4jRepository) *GraphBuilder {
 	return &GraphBuilder{repo: repo}
 }
 
-func (g *GraphBuilder) Handle(msg *sarama.ConsumerMessage) error {
-	ctx := context.Background()
-	ctx = telemetry.ExtractKafkaContext(ctx, msg)
+// Handle is the bus.Handler for the logs topic. The ctx already carries the
+// producer's trace context — the bus adapter extracts it, which is why this
+// file no longer knows what Kafka is.
+func (g *GraphBuilder) Handle(ctx context.Context, msg bus.Message) error {
 	tracer := otel.Tracer("topology-service")
 	ctx, span := tracer.Start(ctx, "topology.infer_node", trace.WithSpanKind(trace.SpanKindConsumer))
 	defer span.End()
@@ -45,5 +45,3 @@ func (g *GraphBuilder) Handle(msg *sarama.ConsumerMessage) error {
 	}
 	return nil
 }
-
-

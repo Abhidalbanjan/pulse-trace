@@ -12,6 +12,7 @@ import (
 
 	"github.com/grafana/pyroscope-go"
 	"github.com/pulsetrace/log-service/internal/handler"
+	"github.com/pulsetrace/shared/bus"
 	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/metering"
 	"github.com/pulsetrace/shared/middleware"
@@ -54,13 +55,18 @@ func main() {
 		},
 	})
 
-	// ── Kafka producer ────────────────────────────────────────────────────────
-	producer, err := kafka.NewProducer()
-	if err != nil {
-		log.Printf("WARNING: kafka producer unavailable, continuing without event publishing: %v", err)
-		producer = nil
+	// ── Bus producer ──────────────────────────────────────────────────────────
+	//
+	// Held as the interface and left unassigned on failure: a nil *KafkaBus
+	// stored in a bus.Bus is not == nil, so the handler's guard would pass and
+	// publish through a nil pointer. Unassigned means ingestion continues and
+	// publishing is skipped, which is the existing degradation.
+	var msgbus bus.Bus
+	if kb, err := bus.NewKafkaBus(); err != nil {
+		log.Printf("WARNING: bus unavailable, continuing without event publishing: %v", err)
 	} else {
-		defer producer.Close()
+		msgbus = kb
+		defer msgbus.Close()
 	}
 
 	// ── Kafka retention watchdog ──────────────────────────────────────────────
@@ -76,6 +82,10 @@ func main() {
 	// loudly, when records have been dropped unread. Failure to start is not
 	// fatal — log-service's job is ingestion, and refusing to serve because the
 	// watchdog could not connect would trade a monitoring gap for an outage.
+	// Still shared/kafka, deliberately: the watchdog inspects broker segments and
+	// consumer-group offsets. That is an operational property of Kafka, not of
+	// message transport, so it does not belong behind the bus port — a lite
+	// deployment with an in-process bus simply has no retention watchdog.
 	if watcher, err := kafka.NewRetentionWatcher([]string{"logs"}); err != nil {
 		log.Printf("WARNING: kafka retention watchdog unavailable, retention is unmonitored: %v", err)
 	} else {
@@ -96,7 +106,7 @@ func main() {
 		redisAddr = "redis:6379"
 	}
 	usageMeter := metering.New(redisAddr, nil)
-	logHandler := handler.NewLogHandler(producer, quickwitURL, usageMeter)
+	logHandler := handler.NewLogHandler(msgbus, quickwitURL, usageMeter)
 
 	mux := http.NewServeMux()
 	logHandler.RegisterRoutes(mux)

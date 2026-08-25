@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -396,7 +397,7 @@ func TestAssembleContext_OrdersAndDropsAnchor(t *testing.T) {
 		rawLog(t, "a2", "2026-01-01T00:00:07Z"),
 	}
 
-	before, after := assembleContext("anchor", beforeDesc, afterAsc)
+	before, after := assembleContext("anchor", "2026-01-01T00:00:05Z", beforeDesc, afterAsc)
 
 	// before must be chronological (oldest→newest) and anchor-free.
 	if got := ids(before); len(got) != 2 || got[0] != "b1" || got[1] != "b2" {
@@ -414,7 +415,7 @@ func TestAssembleContext_DedupesAcrossSides(t *testing.T) {
 	beforeDesc := []json.RawMessage{rawLog(t, "anchor", "2026-01-01T00:00:05Z"), shared}
 	afterAsc := []json.RawMessage{rawLog(t, "anchor", "2026-01-01T00:00:05Z"), shared, rawLog(t, "a1", "2026-01-01T00:00:06Z")}
 
-	before, after := assembleContext("anchor", beforeDesc, afterAsc)
+	before, after := assembleContext("anchor", "2026-01-01T00:00:05Z", beforeDesc, afterAsc)
 
 	seen := map[string]int{}
 	for _, id := range append(ids(before), ids(after)...) {
@@ -544,5 +545,187 @@ func TestLeadingToken_StopsAtTokenBoundary(t *testing.T) {
 		if got := leadingToken(tc.in); got != tc.want {
 			t.Errorf("leadingToken(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// ── Sort direction ───────────────────────────────────────────────────────────
+//
+// Quickwit 0.8.1's `-` prefix selects *ascending*, not descending. Every search
+// in this file asked for "-timestamp" meaning newest-first and received
+// oldest-first: the log list showed the 100 oldest matching records (with
+// max_hits capped at 100, the recent ones were not reachable at all), and both
+// sides of the surrounding-context view were drawn from the wrong end of an
+// unbounded range.
+//
+// Two tests, because neither alone is enough. The first pins what the call
+// sites *ask for* — a fake Quickwit cannot know which direction is correct, but
+// it can catch a call site being changed back. The second asks the real engine
+// which direction it actually gives, which is the only thing that can catch a
+// Quickwit upgrade quietly restoring the conventional meaning and re-inverting
+// every one of those call sites.
+
+// captureQuickwit stands in for Quickwit and records the request bodies it is
+// sent, answering each with an empty hit list.
+func captureQuickwit(t *testing.T, bodies *[]quickwitSearchRequest) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req quickwitSearchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("undecodable search request: %v", err)
+		}
+		*bodies = append(*bodies, req)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"num_hits":0,"hits":[]}`))
+	}))
+}
+
+func TestListLogsAsksForNewestFirst(t *testing.T) {
+	var bodies []quickwitSearchRequest
+	srv := captureQuickwit(t, &bodies)
+	defer srv.Close()
+
+	h := &LogHandler{quickwitURL: srv.URL, httpClient: srv.Client()}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/logs?limit=100", nil)
+	req.Header.Set("X-Tenant-ID", "acme")
+	h.ListLogs(httptest.NewRecorder(), req)
+
+	if len(bodies) != 1 {
+		t.Fatalf("expected one search, got %d", len(bodies))
+	}
+	if bodies[0].SortByField != sortNewestFirst {
+		t.Errorf("log list sorts by %q, want %q (newest first)", bodies[0].SortByField, sortNewestFirst)
+	}
+}
+
+// The two context windows must ask for opposite directions, and specifically
+// these two: each range is unbounded on one side, so the direction is what
+// decides whether the neighbours returned are adjacent to the anchor or are the
+// oldest/newest records the service ever wrote.
+func TestContextWindowsAskForOppositeDirections(t *testing.T) {
+	if sortNewestFirst == sortOldestFirst {
+		t.Fatal("the two sort directions are the same value")
+	}
+	// A guard against the pair being swapped wholesale, which would leave the
+	// call sites reading correctly while every result came back reversed.
+	if sortNewestFirst != "timestamp" || sortOldestFirst != "-timestamp" {
+		t.Errorf("sort constants changed: newest=%q oldest=%q — Quickwit 0.8.1 gives "+
+			"descending for the bare field name and ascending for the `-` prefix; "+
+			"if that changed, TestLiveQuickwitSortDirection is the test that proves it",
+			sortNewestFirst, sortOldestFirst)
+	}
+}
+
+// TestLiveQuickwitSortDirection asks the running index which order it actually
+// returns, because nothing else can.
+//
+//	QUICKWIT_IT=1 QUICKWIT_URL=http://127.0.0.1:7280 go test ./internal/handler/ -run Live -v
+func TestLiveQuickwitSortDirection(t *testing.T) {
+	if os.Getenv("QUICKWIT_IT") == "" {
+		t.Skip("set QUICKWIT_IT=1 with a running Quickwit to verify the sort direction")
+	}
+	base := os.Getenv("QUICKWIT_URL")
+	if base == "" {
+		base = "http://127.0.0.1:7280"
+	}
+	index := os.Getenv("QUICKWIT_INDEX")
+	if index == "" {
+		index = "pulsetrace-logs"
+	}
+
+	timestamps := func(sort string) []string {
+		t.Helper()
+		body, _ := json.Marshal(quickwitSearchRequest{Query: "*", MaxHits: 10, SortByField: sort})
+		resp, err := http.Post(base+"/api/v1/"+index+"/search", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("search (%s): %v", sort, err)
+		}
+		defer resp.Body.Close()
+		var out struct {
+			Hits []struct {
+				Timestamp string `json:"timestamp"`
+			} `json:"hits"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode (%s): %v", sort, err)
+		}
+		ts := make([]string, 0, len(out.Hits))
+		for _, h := range out.Hits {
+			ts = append(ts, h.Timestamp)
+		}
+		return ts
+	}
+
+	newest := timestamps(sortNewestFirst)
+	oldest := timestamps(sortOldestFirst)
+	if len(newest) < 2 || len(oldest) < 2 {
+		t.Skip("index holds too few documents to establish an ordering")
+	}
+
+	// RFC3339 with a fixed offset sorts correctly as a string.
+	if !(newest[0] > newest[len(newest)-1]) {
+		t.Errorf("sortNewestFirst (%q) returned %s … %s — that is not newest-first",
+			sortNewestFirst, newest[0], newest[len(newest)-1])
+	}
+	if !(oldest[0] < oldest[len(oldest)-1]) {
+		t.Errorf("sortOldestFirst (%q) returned %s … %s — that is not oldest-first",
+			sortOldestFirst, oldest[0], oldest[len(oldest)-1])
+	}
+}
+
+// The index's timestamp fast field is second-precision, so a range bounded at
+// the anchor matches the anchor's whole second — including records on the wrong
+// side of it. The "after" window was returning logs that happened *before* the
+// anchor, presented as what happened next; during an incident that is a causal
+// story told backwards.
+func TestAssembleContext_DropsWrongSideOfTheAnchorWithinTheSameSecond(t *testing.T) {
+	anchorTS := "2026-01-01T00:00:05.500000Z"
+
+	// Both fetches see the whole of second 05, because the range cannot be
+	// narrower than that.
+	sameSecondEarlier := rawLog(t, "earlier", "2026-01-01T00:00:05.100000Z")
+	sameSecondLater := rawLog(t, "later", "2026-01-01T00:00:05.900000Z")
+
+	beforeDesc := []json.RawMessage{
+		sameSecondLater,                                // after the anchor — must not appear in `before`
+		rawLog(t, "anchor", anchorTS),                  // the anchor itself
+		sameSecondEarlier,                              // genuinely before
+		rawLog(t, "b1", "2026-01-01T00:00:04.000000Z"), // genuinely before
+	}
+	afterAsc := []json.RawMessage{
+		sameSecondEarlier,                              // before the anchor — must not appear in `after`
+		rawLog(t, "anchor", anchorTS),                  // the anchor itself
+		sameSecondLater,                                // genuinely after
+		rawLog(t, "a1", "2026-01-01T00:00:06.000000Z"), // genuinely after
+	}
+
+	before, after := assembleContext("anchor", anchorTS, beforeDesc, afterAsc)
+
+	if got := ids(before); len(got) != 2 || got[0] != "b1" || got[1] != "earlier" {
+		t.Errorf("before = %v, want [b1 earlier] in chronological order", got)
+	}
+	if got := ids(after); len(got) != 2 || got[0] != "later" || got[1] != "a1" {
+		t.Errorf("after = %v, want [later a1] in chronological order", got)
+	}
+	for _, id := range ids(after) {
+		if id == "earlier" {
+			t.Error("a record from before the anchor appeared in the after-window")
+		}
+	}
+	for _, id := range ids(before) {
+		if id == "later" {
+			t.Error("a record from after the anchor appeared in the before-window")
+		}
+	}
+}
+
+// An anchor whose timestamp cannot be parsed must widen the window, not empty
+// it: a few extra neighbours is a worse answer, none at all is no answer.
+func TestAssembleContext_UnparseableAnchorKeepsNeighbours(t *testing.T) {
+	beforeDesc := []json.RawMessage{rawLog(t, "b1", "2026-01-01T00:00:04Z")}
+	afterAsc := []json.RawMessage{rawLog(t, "a1", "2026-01-01T00:00:06Z")}
+
+	before, after := assembleContext("anchor", "not-a-timestamp", beforeDesc, afterAsc)
+	if len(before) != 1 || len(after) != 1 {
+		t.Errorf("unparseable anchor dropped neighbours: before=%v after=%v", ids(before), ids(after))
 	}
 }

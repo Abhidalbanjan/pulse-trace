@@ -73,6 +73,82 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: go test ./... -race -coverprofile=coverage.out
 
+  bus-conformance:
+    name: bus conformance (kafka + in-process)
+    runs-on: ubuntu-latest
+    # The bus port has two implementations, and the compiler checks only the
+    # shape of the interface — a transport that dropped every other record, or
+    # delivered out of order, or lost trace context would satisfy it perfectly.
+    # The conformance suite is what forces them to agree, and it is only doing
+    # that job when it runs against *both*. Without a broker the Kafka half
+    # skips, which is a green tick that proves half of what it appears to.
+    #
+    # The broker matches docker-compose's (cp-kafka 7.6.1) rather than a
+    # lighter KRaft image: the point is exercising our client against the
+    # broker we actually run.
+    env:
+      GOWORK: "off"
+      KAFKA_CONFORMANCE: "1"
+      KAFKA_BROKERS: localhost:9092
+    services:
+      zookeeper:
+        image: confluentinc/cp-zookeeper:7.6.1
+        env:
+          ZOOKEEPER_CLIENT_PORT: 2181
+          ZOOKEEPER_TICK_TIME: 2000
+        options: >-
+          --health-cmd "nc -z localhost 2181"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      kafka:
+        image: confluentinc/cp-kafka:7.6.1
+        env:
+          KAFKA_BROKER_ID: 1
+          KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+          # The job's steps run on the host and reach the broker through the
+          # mapped port, so the advertised address has to be the host's.
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+        ports:
+          - 9092:9092
+        options: >-
+          --health-cmd "kafka-topics --bootstrap-server localhost:9092 --list"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.6"
+          cache-dependency-path: shared/go.sum
+
+      - name: Download dependencies
+        working-directory: shared
+        run: go mod download
+
+      - name: Conformance — every assertion against both transports
+        working-directory: shared
+        # One run, then assert the Kafka half was actually part of it. A skip is
+        # the failure mode this job exists to prevent: the suite going green
+        # while silently proving only one implementation, which is exactly what
+        # it does on a developer machine with no broker.
+        run: |
+          set -o pipefail
+          go test ./bus/ -run Conformance -v -timeout 15m 2>&1 | tee /tmp/conf.log
+          if ! grep -q -- "--- PASS: .*/kafka" /tmp/conf.log; then
+            echo "::error::No Kafka conformance subtests ran — the suite proved only the in-process side."
+            exit 1
+          fi
+          echo "Kafka subtests that passed:"
+          grep -- "--- PASS: .*/kafka" /tmp/conf.log
+
+
   frontend:
     name: frontend
     runs-on: ubuntu-latest

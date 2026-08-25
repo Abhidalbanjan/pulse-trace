@@ -9,6 +9,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	_ "github.com/pulsetrace/shared/db/driver/postgres"
+	_ "github.com/pulsetrace/shared/db/driver/sqlite"
 )
 
 // The golden schema test.

@@ -1,5 +1,14 @@
 // Package db is the storage-dialect layer (P1.3).
 //
+// # Drivers are not imported here
+//
+// The binary chooses which engines it links, by importing
+// `db/driver/postgres` and/or `db/driver/sqlite`. This package deliberately
+// imports neither, and CI is what forced that: blank-importing both here linked
+// SQLite — a translated C library, and not small — into all eight service
+// binaries to be used by one, which is the wrong direction for D1, the very
+// dimension this phase exists to improve.
+//
 // # Why this exists
 //
 // The cluster deployment runs Postgres. A single-binary deployment cannot, and
@@ -22,9 +31,6 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-
-	_ "github.com/jackc/pgx/v5/stdlib" // postgres driver
-	_ "modernc.org/sqlite"             // sqlite driver, pure Go — no cgo in the lite binary
 )
 
 // Kind names a supported backend.
@@ -78,7 +84,11 @@ func Open(ctx context.Context, dsn string) (*sql.DB, Dialect, error) {
 	}
 	conn, err := sql.Open(driver, driverDSN)
 	if err != nil {
-		return nil, nil, fmt.Errorf("db: open %s: %w", kind, err)
+		// The commonest cause is a binary that did not import the driver
+		// package for the backend its DSN names, so say so rather than
+		// surfacing database/sql's bare "unknown driver".
+		return nil, nil, fmt.Errorf("db: open %s: %w (does this binary import "+
+			"github.com/pulsetrace/shared/db/driver/%s?)", kind, err, kind)
 	}
 	if err := conn.PingContext(ctx); err != nil {
 		conn.Close()

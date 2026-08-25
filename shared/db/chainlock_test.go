@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	_ "github.com/pulsetrace/shared/db/driver/postgres"
+	_ "github.com/pulsetrace/shared/db/driver/sqlite"
 )
 
 // The merge gate for this slice.

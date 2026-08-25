@@ -10,22 +10,22 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/grafana/pyroscope-go"
 	"github.com/pulsetrace/correlation-service/internal/engine"
 	"github.com/pulsetrace/correlation-service/internal/handler"
 	"github.com/pulsetrace/correlation-service/internal/llm"
 	"github.com/pulsetrace/correlation-service/internal/query"
 	"github.com/pulsetrace/correlation-service/internal/repository"
 	correlationmigrations "github.com/pulsetrace/correlation-service/migrations"
+	"github.com/pulsetrace/shared/bus"
 	"github.com/pulsetrace/shared/causal"
 	"github.com/pulsetrace/shared/client"
 	"github.com/pulsetrace/shared/db"
-	"github.com/pulsetrace/shared/kafka"
 	"github.com/pulsetrace/shared/middleware"
 	"github.com/pulsetrace/shared/migrate"
 	"github.com/pulsetrace/shared/rabbitmq"
 	"github.com/pulsetrace/shared/remediation"
 	"github.com/pulsetrace/shared/telemetry"
-	"github.com/grafana/pyroscope-go"
 )
 
 const (
@@ -195,17 +195,20 @@ func main() {
 		log.Printf("correlator: auto-resolve disabled (AUTO_RESOLVE_QUIET=0)")
 	}
 
-	// ── Kafka consumer (alerts topic) ─────────────────────────────────────────
-	cg, err := kafka.NewConsumerGroup(groupID, []string{alertsTopic}, correlator.Handle)
+	// ── Bus consumer (alerts topic) ───────────────────────────────────────────
+	// Consumer-only: no producer, so the bus carries none. Subscribe opens its
+	// own connection and fails fast here rather than inside the goroutine.
+	msgbus := bus.NewKafkaBusWith(nil)
+	cg, err := msgbus.Subscribe(groupID, []string{alertsTopic}, correlator.Handle)
 	if err != nil {
-		log.Fatalf("kafka consumer group failed: %v", err)
+		log.Fatalf("bus subscribe failed: %v", err)
 	}
 	defer cg.Close()
 
 	go func() {
 		log.Printf("correlation-service: consuming %q as group %q", alertsTopic, groupID)
-		if err := cg.Start(ctx); err != nil {
-			log.Printf("kafka consumer stopped: %v", err)
+		if err := cg.Run(ctx); err != nil {
+			log.Printf("bus consumer stopped: %v", err)
 		}
 	}()
 

@@ -9,12 +9,12 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/pulsetrace/shared/kafka"
+	"github.com/grafana/pyroscope-go"
+	"github.com/pulsetrace/shared/bus"
 	"github.com/pulsetrace/shared/telemetry"
 	"github.com/pulsetrace/topology-service/internal/consumer"
 	"github.com/pulsetrace/topology-service/internal/handler"
 	"github.com/pulsetrace/topology-service/internal/repository"
-	"github.com/grafana/pyroscope-go"
 )
 
 const serviceName = "topology-service"
@@ -104,7 +104,12 @@ func main() {
 	}
 
 	graphBuilder := consumer.NewGraphBuilder(repo)
-	cg, err := kafka.NewConsumerGroup(groupID, []string{"logs"}, graphBuilder.Handle)
+
+	// A consumer-only service needs no producer, so the bus is constructed
+	// without one: Subscribe does its own connection. Publishing through this
+	// value would return ErrBusUnavailable rather than panic.
+	msgbus := bus.NewKafkaBusWith(nil)
+	cg, err := msgbus.Subscribe(groupID, []string{"logs"}, graphBuilder.Handle)
 	if err != nil {
 		log.Fatalf("failed to create consumer group: %v", err)
 	}
@@ -119,7 +124,7 @@ func main() {
 
 	go func() {
 		log.Printf("topology-service: starting kafka consumer group %s", groupID)
-		if err := cg.Start(ctx); err != nil {
+		if err := cg.Run(ctx); err != nil {
 			log.Printf("error from consumer: %v", err)
 		}
 	}()

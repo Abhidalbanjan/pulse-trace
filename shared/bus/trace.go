@@ -21,6 +21,16 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 )
 
+// traceCarrier is a propagation carrier over a plain string map.
+type traceCarrier = propagation.MapCarrier
+
+// injectTrace writes ctx's outgoing trace context into the carrier, so a
+// transport with no client library of its own still propagates identically to
+// the Kafka one.
+func injectTrace(ctx context.Context, carrier traceCarrier) {
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+}
+
 // contextWithTrace returns ctx continuing whatever trace the message's headers
 // carry. Headers without a `traceparent` yield ctx unchanged, which starts a
 // new trace — correct for a record published by something that does not

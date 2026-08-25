@@ -225,7 +225,11 @@ export function QueryWorkbench() {
   return (
     <div style={{ display: 'flex', gap: 14, height: '100%', minHeight: 0, padding: 16 }}>
       {/* Schema */}
-      <aside style={{ ...panel, width: 232, flexShrink: 0, overflowY: 'auto', padding: 14 }}>
+      <aside
+        aria-label="Query schema"
+        data-testid="schema-sidebar"
+        style={{ ...panel, width: 232, flexShrink: 0, overflowY: 'auto', padding: 14 }}
+      >
         <h2 style={{ fontSize: 12, fontWeight: 700, letterSpacing: 0.4, color: t.text2, margin: '0 0 10px' }}>
           SCHEMA
         </h2>
@@ -511,6 +515,7 @@ function RefusalNotice({ refusal }: { refusal: Refusal }) {
   return (
     <div
       role="alert"
+      data-testid="refusal"
       style={{
         border: `1px solid ${budget ? t.amber : t.red}`,
         background: budget ? 'transparent' : t.redSoft,

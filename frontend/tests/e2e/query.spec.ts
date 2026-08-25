@@ -25,7 +25,7 @@ test.describe('Query workbench', () => {
 
   test('the schema sidebar lists what the engine will accept', async ({ page }) => {
     await page.goto('/query');
-    const sidebar = page.getByRole('complementary');
+    const sidebar = page.getByTestId('schema-sidebar');
     await expect(sidebar).toContainText('logs', { timeout: 15000 });
     await expect(sidebar).toContainText('incidents');
     // Attributes are advertised by shape, since their keys are the customer's.
@@ -37,7 +37,7 @@ test.describe('Query workbench', () => {
     await page.getByTestId('sql-editor').fill('DELETE FROM logs');
     await page.getByTestId('run-query').click();
 
-    const alert = page.getByRole('alert');
+    const alert = page.getByTestId('refusal');
     await expect(alert).toBeVisible({ timeout: 20000 });
     await expect(alert).toContainText(/read-only|only SELECT/i);
     await expect(page.getByTestId('refusal-message')).toBeVisible();
@@ -47,7 +47,7 @@ test.describe('Query workbench', () => {
     await page.goto('/query');
     await page.getByTestId('sql-editor').fill('SELECT * FROM not_a_real_table');
     await page.getByTestId('run-query').click();
-    await expect(page.getByRole('alert')).toContainText(/not in the catalog/i, { timeout: 20000 });
+    await expect(page.getByTestId('refusal')).toContainText(/not in the catalog/i, { timeout: 20000 });
   });
 
   test('a shared link reproduces the statement', async ({ page }) => {
@@ -60,7 +60,7 @@ test.describe('Query workbench', () => {
     await page.goto('/query');
     const editor = page.getByTestId('sql-editor');
     // Wait for the catalog before typing, so the list is populated.
-    await expect(page.getByRole('complementary')).toContainText('logs', { timeout: 15000 });
+    await expect(page.getByTestId('schema-sidebar')).toContainText('logs', { timeout: 15000 });
 
     await editor.fill('SELECT * FROM log');
     const listbox = page.getByRole('listbox', { name: /schema suggestions/i });

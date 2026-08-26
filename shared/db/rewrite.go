@@ -88,8 +88,25 @@ var (
 )
 
 // rewriteForSQLite translates one Postgres statement.
+//
+// Only the code parts. Every rule below is a regex over statement text, and
+// applied to the whole statement they rewrite the *words* inside string
+// literals too — `('the jsonb column')` became `('the TEXT column')`, silently,
+// with no error anywhere. See segments.go.
 func rewriteForSQLite(stmt string) string {
-	out := stmt
+	// Statement-aware rules need to see the whole statement to decide, so they
+	// are evaluated here and applied inside.
+	_, body := splitLeadingComments(stmt)
+	isIndex := reCreateIndex.MatchString(body)
+
+	return mapCode(stmt, func(out string) string {
+		return rewriteCodeForSQLite(out, isIndex)
+	})
+}
+
+// rewriteCodeForSQLite applies the translation rules to one code segment.
+func rewriteCodeForSQLite(code string, isIndex bool) string {
+	out := code
 
 	// Order matters: the PRIMARY KEY form must be matched before the bare one,
 	// or `BIGSERIAL PRIMARY KEY` becomes `BIGINT PRIMARY KEY` and stops
@@ -116,8 +133,9 @@ func rewriteForSQLite(stmt string) string {
 	out = reIfNotExist.ReplaceAllString(out, "CREATE INDEX")
 
 	out = reCast.ReplaceAllString(out, "")
-	// Statement-aware: see reNullsOrder.
-	if _, body := splitLeadingComments(out); reCreateIndex.MatchString(body) {
+	// Statement-aware: see reNullsOrder. The decision was made by the caller,
+	// which can see the whole statement; this segment may be only part of it.
+	if isIndex {
 		out = reNullsOrder.ReplaceAllString(out, "")
 	}
 	out = reAddColumnIfNotExists.ReplaceAllString(out, "ADD COLUMN")
@@ -153,7 +171,13 @@ func fixInsertSelectUpsert(stmt string) string {
 // them would mean running a dozen DDL regexes over every query the process ever
 // executes.
 func RewritePlaceholders(query string) string {
-	return rePlaceholder.ReplaceAllString(query, "?")
+	// Literals are skipped for the same reason as in rewriteForSQLite, and the
+	// consequence here is worse: `'costs $5 and $10'` became `'costs ? and ?'`,
+	// which corrupts the string *and* shifts every bind parameter after it, so
+	// the arguments land in the wrong columns.
+	return mapCode(query, func(code string) string {
+		return rePlaceholder.ReplaceAllString(code, "?")
+	})
 }
 
 // Rebind converts a Postgres-style query for the given dialect, leaving it

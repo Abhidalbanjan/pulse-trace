@@ -195,3 +195,28 @@ func TestSanitizeIdent(t *testing.T) {
 		}
 	}
 }
+
+// An engine-specific sibling must never be applied as a migration of its own.
+//
+// Regression: `015_saved_search_permissions.sqlite.sql` matches `*.sql`, so the
+// runner picked it up as an extra version and applied it to Postgres, which
+// failed on `function json_each(jsonb) does not exist` and took out every test
+// that migrates a throwaway schema. The sibling exists precisely because that
+// SQL is *not* valid on Postgres.
+func TestEngineSiblingsAreNotVersions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sibling bool
+	}{
+		{"015_saved_search_permissions.sqlite.sql", true},
+		{"015_saved_search_permissions.sql", false},
+		{"001_create_incidents.sql", false},
+		// A dot in an ordinary name must not be mistaken for a sibling marker.
+		{"003_add_v1.2_columns.sql", false},
+		{"020_audit_hash_chain.sql", false},
+	} {
+		if got := isEngineSibling(tc.name); got != tc.sibling {
+			t.Errorf("isEngineSibling(%q) = %v, want %v", tc.name, got, tc.sibling)
+		}
+	}
+}

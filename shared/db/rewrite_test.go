@@ -174,3 +174,30 @@ func TestUpsertFixSurvivesLiteralsInTheSpan(t *testing.T) {
 		t.Errorf("a literal containing WHERE suppressed the fix: %s", got)
 	}
 }
+
+// A CREATE EXTENSION statement must be replaced entirely, not partially.
+//
+// Regression: extension names are quoted, and a quoted identifier is a literal
+// to the segment scanner — so a per-segment rule rewrote only
+// `CREATE EXTENSION IF NOT EXISTS ` and left `"pgcrypto"` behind, producing
+// `SELECT 1"pgcrypto"`. SQLite reads that as `SELECT 1 AS "pgcrypto"` and
+// accepts it, so every test passed. Working by coincidence is not working.
+func TestCreateExtensionIsReplacedWholly(t *testing.T) {
+	for _, in := range []string{
+		`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`,
+		`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`,
+		`CREATE EXTENSION pgcrypto`,
+		`CREATE EXTENSION IF NOT EXISTS "pgcrypto" WITH SCHEMA public`,
+	} {
+		got := rewriteForSQLite(in)
+		if got != "SELECT 1" {
+			t.Errorf("\n  in:  %s\n  got: %q, want \"SELECT 1\"", in, got)
+		}
+	}
+	// A leading comment is kept; only the statement is replaced.
+	withComment := "-- for gen_random_uuid() fallback\nCREATE EXTENSION IF NOT EXISTS \"pgcrypto\""
+	if got := rewriteForSQLite(withComment); !strings.HasSuffix(got, "SELECT 1") ||
+		!strings.Contains(got, "-- for gen_random_uuid") {
+		t.Errorf("comment or replacement lost: %q", got)
+	}
+}

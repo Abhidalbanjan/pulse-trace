@@ -64,7 +64,7 @@ var (
 	reBoolDefF        = regexp.MustCompile(`(?i)\bdefault\s+false\b`)
 	reGenRandom       = regexp.MustCompile(`(?i)\bgen_random_uuid\s*\(\s*\)`)
 	reIfNotExist      = regexp.MustCompile(`(?i)\bcreate\s+(unique\s+)?index\s+concurrently\b`)
-	reCreateExtension = regexp.MustCompile(`(?is)\bCREATE\s+EXTENSION\b[^;]*`)
+	reCreateExtension = regexp.MustCompile(`(?is)\bCREATE\s+EXTENSION\b`)
 
 	// $1, $2 … → ?. Applied only to statements, never to string literals, so
 	// the caller must not pass user text through here.
@@ -111,8 +111,9 @@ func rewriteForSQLite(stmt string) string {
 	out := mapCode(stmt, func(code string) string {
 		return rewriteCodeForSQLite(code, isIndex)
 	})
-	// Statement-spanning, so applied after the segment-wise pass and against
-	// the code mask rather than a single run.
+	// Statement-spanning rules run after the segment-wise pass, against the
+	// code mask rather than a single run.
+	out = neutraliseExtension(out)
 	return fixInsertSelectUpsert(out)
 }
 
@@ -130,8 +131,6 @@ func rewriteCodeForSQLite(code string, isIndex bool) string {
 	out = reGenRandom.ReplaceAllString(out, "(lower(hex(randomblob(16))))")
 	// Types only where a type can be: see reTypeInPosition.
 	out = replaceTypesInPosition(out)
-	// Postgres extensions have no SQLite counterpart and no effect there.
-	out = reCreateExtension.ReplaceAllString(out, "SELECT 1")
 
 	out = reCurrentTSFunc.ReplaceAllString(out, "CURRENT_TIMESTAMP")
 	out = reNow.ReplaceAllString(out, "CURRENT_TIMESTAMP")
@@ -441,4 +440,36 @@ func replaceTypesInPosition(sql string) string {
 		}
 		return g[1] + "TEXT"
 	})
+}
+
+// neutraliseExtension replaces a whole CREATE EXTENSION statement.
+//
+// # Why the whole statement, and why this is not a per-segment rule
+//
+// Extension names are quoted — `CREATE EXTENSION IF NOT EXISTS "pgcrypto"` —
+// and a quoted identifier is a literal as far as the scanner is concerned. A
+// per-segment rule therefore sees only `CREATE EXTENSION IF NOT EXISTS ` and
+// rewrites that, leaving the name behind:
+//
+//	CREATE EXTENSION IF NOT EXISTS "pgcrypto"  ->  SELECT 1"pgcrypto"
+//
+// SQLite happens to read that as `SELECT 1 AS "pgcrypto"` and accept it, which
+// is why the migrations applied and the tests passed. Depending on an implicit
+// alias to absorb a mangled statement is not a translation; it is a coincidence
+// that holds until the name is unquoted or the statement carries a
+// `WITH SCHEMA` clause.
+//
+// Extensions have no SQLite counterpart and nothing here uses what pgcrypto
+// provides (the one call site is a comment about a `gen_random_uuid()`
+// fallback, and that function is rewritten separately), so the statement is
+// replaced outright.
+func neutraliseExtension(stmt string) string {
+	mask := codeMask(stmt)
+	loc := reCreateExtension.FindStringIndex(mask)
+	if loc == nil {
+		return stmt
+	}
+	// Keep any leading comments; replace from CREATE to the end of the
+	// statement, since everything after it belongs to the extension clause.
+	return stmt[:loc[0]] + "SELECT 1"
 }

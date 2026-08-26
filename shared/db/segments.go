@@ -138,3 +138,24 @@ func mapCode(sql string, f func(string) string) string {
 	}
 	return b.String()
 }
+
+// codeMask returns sql with every non-code rune replaced by a space.
+//
+// Same length as the input, so an offset found in the mask indexes the original
+// exactly. This is how a rule that must see a whole *statement* — rather than
+// one code run — can still avoid matching inside a literal: match on the mask,
+// splice into the original.
+func codeMask(sql string) string {
+	var b strings.Builder
+	b.Grow(len(sql))
+	for _, seg := range scanSegments(sql) {
+		if seg.code {
+			b.WriteString(seg.text)
+			continue
+		}
+		for range []rune(seg.text) {
+			b.WriteByte(' ')
+		}
+	}
+	return b.String()
+}

@@ -58,7 +58,7 @@ func (postgresDialect) Placeholder(n int) string { return fmt.Sprintf("$%d", n) 
 func (postgresDialect) Rewrite(stmt string) string { return stmt }
 
 // EnsureChainLock is a no-op: advisory locks need no storage.
-func (postgresDialect) EnsureChainLock(context.Context, *sql.DB) error { return nil }
+func (postgresDialect) EnsureChainLock(context.Context, *sql.DB, ...string) error { return nil }
 
 func (postgresDialect) LockChain(ctx context.Context, tx *sql.Tx, name string) error {
 	// The lock is transaction-scoped, so it is released by commit or rollback
@@ -91,7 +91,7 @@ func (sqliteDialect) Placeholder(int) string { return "?" }
 func (sqliteDialect) Rewrite(stmt string) string { return rewriteForSQLite(stmt) }
 
 // EnsureChainLock creates the table whose rows are the locks.
-func (sqliteDialect) EnsureChainLock(ctx context.Context, db *sql.DB) error {
+func (sqliteDialect) EnsureChainLock(ctx context.Context, db *sql.DB, names ...string) error {
 	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS chain_lock (
 			name TEXT PRIMARY KEY,
@@ -99,10 +99,19 @@ func (sqliteDialect) EnsureChainLock(ctx context.Context, db *sql.DB) error {
 		)`); err != nil {
 		return fmt.Errorf("db: create chain_lock: %w", err)
 	}
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO chain_lock (name, holder_seq) VALUES (?, 0) ON CONFLICT (name) DO NOTHING`,
-		auditChainName); err != nil {
-		return fmt.Errorf("db: seed chain_lock: %w", err)
+	// Every chain the caller intends to use, not just the audit one.
+	//
+	// Seeding a single hard-coded name made named chains a comment rather than
+	// a feature: LockChain on any other name hits the `n == 0` branch and
+	// returns "chain lock does not exist" forever, because nothing ever inserts
+	// its row. The doc above offers named chains as the extension point for
+	// P9's remediation ledger, so it has to actually extend.
+	for _, name := range append([]string{auditChainName}, names...) {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO chain_lock (name, holder_seq) VALUES (?, 0) ON CONFLICT (name) DO NOTHING`,
+			name); err != nil {
+			return fmt.Errorf("db: seed chain_lock %q: %w", name, err)
+		}
 	}
 	return nil
 }

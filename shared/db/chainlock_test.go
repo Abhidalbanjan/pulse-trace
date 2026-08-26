@@ -428,3 +428,42 @@ func TestNaiveAppendForksTheChainPostgres(t *testing.T) {
 		t.Errorf("locked run wrote %d rows, want 160 — the lock lost writes", lockedRows)
 	}
 }
+
+// A chain other than the audit one must work, because the design offers named
+// chains as the extension point.
+//
+// Regression: EnsureChainLock seeded only auditChainName, so LockChain on any
+// other name found no row, took the fail-closed branch, and returned "chain
+// lock does not exist" forever — making named chains a comment rather than a
+// feature.
+func TestAdditionalChainsCanBeLocked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chain.db")
+	conn, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer conn.Close()
+
+	d := sqliteDialect{}
+	if err := d.EnsureChainLock(context.Background(), conn, "remediation"); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+
+	for _, name := range []string{auditChainName, "remediation"} {
+		tx, err := conn.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := d.LockChain(context.Background(), tx, name); err != nil {
+			t.Errorf("LockChain(%q): %v", name, err)
+		}
+		_ = tx.Rollback()
+	}
+
+	// An unseeded chain must still fail closed rather than proceed unlocked.
+	tx, _ := conn.BeginTx(context.Background(), nil)
+	if err := d.LockChain(context.Background(), tx, "never-seeded"); err == nil {
+		t.Error("an unseeded chain acquired a lock that does not exist")
+	}
+	_ = tx.Rollback()
+}

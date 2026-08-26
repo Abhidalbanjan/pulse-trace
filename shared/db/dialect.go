@@ -1,13 +1,19 @@
 // Package db is the storage-dialect layer (P1.3).
 //
-// # Drivers are not imported here
+// # Which drivers this package links
 //
-// The binary chooses which engines it links, by importing
-// `db/driver/postgres` and/or `db/driver/sqlite`. This package deliberately
-// imports neither, and CI is what forced that: blank-importing both here linked
-// SQLite — a translated C library, and not small — into all eight service
-// binaries to be used by one, which is the wrong direction for D1, the very
-// dimension this phase exists to improve.
+// SQLite is not imported here. Blank-importing it linked a translated C
+// library — and not a small one — into all eight service binaries to be used by
+// one, which is the wrong direction for D1, the very dimension this phase
+// exists to improve. A binary that wants it imports
+// `db/driver/sqlite` and pays for it deliberately.
+//
+// Postgres is a different case and the distinction is worth stating rather than
+// glossing: `postgres.go` in this same package already blank-imports pgx for
+// NewPostgresPool, so anything importing `shared/db` registers the pgx driver
+// whether it wants to or not. `db/driver/postgres` exists for symmetry and for
+// the day that import moves; today it is a no-op, and claiming this package
+// imports neither driver would be false.
 //
 // # Why this exists
 //
@@ -62,8 +68,9 @@ type Dialect interface {
 	// This is the method the whole package exists for. See chainlock.go.
 	LockChain(ctx context.Context, tx *sql.Tx, name string) error
 
-	// EnsureChainLock creates whatever LockChain needs. Called once at startup.
-	EnsureChainLock(ctx context.Context, db *sql.DB) error
+	// EnsureChainLock creates whatever LockChain needs, for the audit chain and
+	// any additional chains named. Called once at startup.
+	EnsureChainLock(ctx context.Context, db *sql.DB, chains ...string) error
 }
 
 // Open connects by URL scheme and returns the matching dialect.
@@ -152,8 +159,14 @@ func parseDSN(dsn string) (Kind, string, error) {
 // them by default — a schema whose constraints are silently not enforced is
 // worse than one that never had them.
 func sqliteDSN(path string) string {
+	const pragmas = "_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+	// Merged, not skipped. Returning the path unchanged when it already carries
+	// a query string drops all three pragmas — including busy_timeout, which
+	// this function's own comment calls the one that matters, and journal_mode,
+	// which the chain lock's behaviour depends on. An operator adding
+	// `?_pragma=cache_size(2000)` would have silently disabled them.
 	if strings.Contains(path, "?") {
-		return path
+		return path + "&" + pragmas
 	}
-	return path + "?_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+	return path + "?" + pragmas
 }

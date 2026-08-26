@@ -31,31 +31,40 @@ var (
 	reBigSerialPK = regexp.MustCompile(`(?i)\b(big)?serial\b\s+primary\s+key`)
 	reBigSerial   = regexp.MustCompile(`(?i)\b(big)?serial\b`)
 
-	// JSONB has no SQLite equivalent; TEXT plus the JSON1 functions is the
-	// documented substitute and json_extract works over it.
-	reJSONB = regexp.MustCompile(`(?i)\bjsonb\b`)
-
-	// TIMESTAMPTZ / TIMESTAMP WITH TIME ZONE: SQLite has no date type at all.
-	// TEXT holding RFC3339 sorts and compares correctly, which is the property
-	// the queries rely on.
-	reTimestampTZ = regexp.MustCompile(`(?i)\btimestamptz\b|\btimestamp\s+with\s+time\s+zone\b`)
-	// No lookahead: Go's regexp is RE2. None is needed — `\b` cannot match
-	// inside CURRENT_TIMESTAMP, because `_` is a word character and there is
-	// therefore no boundary before `timestamp` there.
-	reTimestamp = regexp.MustCompile(`(?i)\btimestamp\b`)
+	// Type names are matched only in *type position* — that is, immediately
+	// after an identifier.
+	//
+	// # Why, and what the naive version did
+	//
+	// `\bjsonb\b` → TEXT cannot tell a type from a column called `jsonb`, and
+	// neither can `\btimestamp\b`. log-service's schema has a column *named*
+	// `timestamp`:
+	//
+	//     timestamp   TIMESTAMPTZ NOT NULL,      ->  TEXT   TEXT NOT NULL,
+	//     ON log_entries (timestamp DESC)        ->  ON log_entries (TEXT DESC)
+	//
+	// SQLite accepts both. The table gets a NOT NULL column literally named
+	// TEXT and no `timestamp` column at all — the migration applies, nothing
+	// errors, and every query naming `timestamp` fails at runtime against a
+	// schema that looks fine. That is the exact failure segments.go was written
+	// to prevent for literals, reappearing for identifiers.
+	//
+	// A type in DDL always follows something: the column name, or a cast's AS.
+	// A column *name* follows `(` or `,` or `ADD COLUMN`. Requiring a preceding
+	// identifier distinguishes them without a parser, and errs toward leaving a
+	// type untranslated (a loud failure) rather than renaming a column (a
+	// silent one).
+	reTypeInPosition = regexp.MustCompile(`(?i)(\b[A-Za-z_][A-Za-z0-9_]*\s+)\b(jsonb|timestamptz|timestamp\s+with(?:out)?\s+time\s+zone|timestamp|uuid|text\s*\[\s*\])\b`)
 
 	reNow           = regexp.MustCompile(`(?i)\bnow\s*\(\s*\)`)
 	reCurrentTSFunc = regexp.MustCompile(`(?i)\bcurrent_timestamp\s*\(\s*\)`)
 
 	// Postgres-only column and type spellings with direct SQLite equivalents.
-	// Likewise safe without lookahead: gen_random_uuid and uuid_generate_v4
-	// have a word character before `uuid`, so `\b` does not match there.
-	reUUIDType   = regexp.MustCompile(`(?i)\buuid\b`)
-	reBoolDefT   = regexp.MustCompile(`(?i)\bdefault\s+true\b`)
-	reBoolDefF   = regexp.MustCompile(`(?i)\bdefault\s+false\b`)
-	reGenRandom  = regexp.MustCompile(`(?i)\bgen_random_uuid\s*\(\s*\)`)
-	reTextArray  = regexp.MustCompile(`(?i)\btext\s*\[\s*\]`)
-	reIfNotExist = regexp.MustCompile(`(?i)\bcreate\s+index\s+concurrently\b`)
+	reBoolDefT        = regexp.MustCompile(`(?i)\bdefault\s+true\b`)
+	reBoolDefF        = regexp.MustCompile(`(?i)\bdefault\s+false\b`)
+	reGenRandom       = regexp.MustCompile(`(?i)\bgen_random_uuid\s*\(\s*\)`)
+	reIfNotExist      = regexp.MustCompile(`(?i)\bcreate\s+(unique\s+)?index\s+concurrently\b`)
+	reCreateExtension = regexp.MustCompile(`(?is)\bCREATE\s+EXTENSION\b[^;]*`)
 
 	// $1, $2 … → ?. Applied only to statements, never to string literals, so
 	// the caller must not pass user text through here.
@@ -99,9 +108,12 @@ func rewriteForSQLite(stmt string) string {
 	_, body := splitLeadingComments(stmt)
 	isIndex := reCreateIndex.MatchString(body)
 
-	return mapCode(stmt, func(out string) string {
-		return rewriteCodeForSQLite(out, isIndex)
+	out := mapCode(stmt, func(code string) string {
+		return rewriteCodeForSQLite(code, isIndex)
 	})
+	// Statement-spanning, so applied after the segment-wise pass and against
+	// the code mask rather than a single run.
+	return fixInsertSelectUpsert(out)
 }
 
 // rewriteCodeForSQLite applies the translation rules to one code segment.
@@ -115,12 +127,11 @@ func rewriteCodeForSQLite(code string, isIndex bool) string {
 	out = reBigSerialPK.ReplaceAllString(out, "INTEGER PRIMARY KEY AUTOINCREMENT")
 	out = reBigSerial.ReplaceAllString(out, "INTEGER")
 
-	out = reJSONB.ReplaceAllString(out, "TEXT")
-	out = reTimestampTZ.ReplaceAllString(out, "TEXT")
-	out = reTimestamp.ReplaceAllString(out, "TEXT")
 	out = reGenRandom.ReplaceAllString(out, "(lower(hex(randomblob(16))))")
-	out = reUUIDType.ReplaceAllString(out, "TEXT")
-	out = reTextArray.ReplaceAllString(out, "TEXT")
+	// Types only where a type can be: see reTypeInPosition.
+	out = replaceTypesInPosition(out)
+	// Postgres extensions have no SQLite counterpart and no effect there.
+	out = reCreateExtension.ReplaceAllString(out, "SELECT 1")
 
 	out = reCurrentTSFunc.ReplaceAllString(out, "CURRENT_TIMESTAMP")
 	out = reNow.ReplaceAllString(out, "CURRENT_TIMESTAMP")
@@ -130,7 +141,7 @@ func rewriteCodeForSQLite(code string, isIndex bool) string {
 
 	// CONCURRENTLY is a Postgres locking refinement with no meaning where there
 	// is one writer.
-	out = reIfNotExist.ReplaceAllString(out, "CREATE INDEX")
+	out = reIfNotExist.ReplaceAllString(out, "CREATE ${1}INDEX")
 
 	out = reCast.ReplaceAllString(out, "")
 	// Statement-aware: see reNullsOrder. The decision was made by the caller,
@@ -139,7 +150,6 @@ func rewriteCodeForSQLite(code string, isIndex bool) string {
 		out = reNullsOrder.ReplaceAllString(out, "")
 	}
 	out = reAddColumnIfNotExists.ReplaceAllString(out, "ADD COLUMN")
-	out = fixInsertSelectUpsert(out)
 
 	return out
 }
@@ -147,21 +157,28 @@ func rewriteCodeForSQLite(code string, isIndex bool) string {
 // fixInsertSelectUpsert inserts the WHERE that SQLite's parser requires between
 // a SELECT source and an ON CONFLICT clause.
 //
-// Only when the SELECT does not already have one: adding a second WHERE would
-// be a syntax error, and adding `WHERE true` to a filtered SELECT would change
-// which rows it inserts.
+// # Why this runs on the whole statement and not per segment
+//
+// The pattern spans an entire statement, and mapCode hands out one code run at
+// a time. A literal anywhere between INSERT and ON CONFLICT splits that run, so
+// the pattern stops matching and the fix silently does not happen —
+// `SELECT 'viewer', perms FROM seed ON CONFLICT …` was left unrepaired purely
+// because of the `'viewer'`, failing at migration time with a syntax error.
+//
+// So it matches against the code mask (literals blanked, offsets preserved) and
+// splices into the original. Same protection from literals, whole-statement
+// reach.
 func fixInsertSelectUpsert(stmt string) string {
-	return reInsertSelectUpsert.ReplaceAllStringFunc(stmt, func(m string) string {
-		loc := reInsertSelectUpsert.FindStringSubmatchIndex(m)
-		if loc == nil {
-			return m
-		}
-		body, upsert := m[loc[2]:loc[3]], m[loc[4]:loc[5]]
-		if reHasWhere.MatchString(body) {
-			return m
-		}
-		return body + " WHERE true" + upsert
-	})
+	mask := codeMask(stmt)
+	loc := reInsertSelectUpsert.FindStringSubmatchIndex(mask)
+	if loc == nil {
+		return stmt
+	}
+	bodyStart, bodyEnd, upsertStart := loc[2], loc[3], loc[4]
+	if reHasWhere.MatchString(mask[bodyStart:bodyEnd]) {
+		return stmt // already filtered; a second WHERE is a syntax error
+	}
+	return stmt[:upsertStart] + " WHERE true" + stmt[upsertStart:]
 }
 
 // RewritePlaceholders converts $1-style parameters to ?.
@@ -393,4 +410,35 @@ func splitLeadingComments(stmt string) (lead, body string) {
 		return strings.Join(lines[:i], "\n"), strings.Join(lines[i:], "\n")
 	}
 	return stmt, ""
+}
+
+// nonTypeContext are words that may precede an identifier but never a type
+// declaration. Without this, `SELECT timestamp` reads as "identifier then type"
+// and becomes `SELECT TEXT` — the same corruption in a different clause.
+//
+// `AS` is deliberately absent: it precedes a genuine type in `CAST(x AS uuid)`.
+var nonTypeContext = map[string]bool{
+	"select": true, "by": true, "order": true, "group": true, "where": true,
+	"and": true, "or": true, "not": true, "on": true, "from": true,
+	"into": true, "values": true, "set": true, "distinct": true, "having": true,
+	"using": true, "returning": true, "exists": true, "in": true, "is": true,
+	"then": true, "else": true, "when": true, "case": true, "join": true,
+	"asc": true, "desc": true, "all": true, "any": true, "between": true,
+	"like": true, "limit": true, "offset": true, "update": true, "delete": true,
+}
+
+// replaceTypesInPosition translates a Postgres type only where a type can
+// legally appear: immediately after an identifier that is not a keyword.
+func replaceTypesInPosition(sql string) string {
+	return reTypeInPosition.ReplaceAllStringFunc(sql, func(m string) string {
+		g := reTypeInPosition.FindStringSubmatch(m)
+		if g == nil {
+			return m
+		}
+		prev := strings.ToLower(strings.TrimSpace(g[1]))
+		if nonTypeContext[prev] {
+			return m // an identifier in an expression, not a type declaration
+		}
+		return g[1] + "TEXT"
+	})
 }

@@ -179,13 +179,20 @@ func TestSchemaMatchesPostgres(t *testing.T) {
 	}
 	applyMigrations(t, lite, sd)
 
+	// DATABASE_URL set but Postgres unreachable is a failure, not a skip.
+	//
+	// Skipping there produces a green tick for a comparison that never
+	// happened — the same shape as the Kafka half of the bus conformance suite
+	// silently not running. If the environment says a database is available,
+	// this test's job is to use it or say loudly that it could not. Absence of
+	// the variable is still a skip, which is the developer-machine case.
 	pg, err := sql.Open("pgx", dsn)
 	if err != nil {
-		t.Skipf("postgres unavailable: %v", err)
+		t.Fatalf("DATABASE_URL is set but the driver rejected it: %v", err)
 	}
 	defer pg.Close()
 	if err := pg.Ping(); err != nil {
-		t.Skipf("postgres unavailable: %v", err)
+		t.Fatalf("DATABASE_URL is set but Postgres is unreachable: %v", err)
 	}
 	// One connection, because `SET search_path` is connection-scoped.
 	//

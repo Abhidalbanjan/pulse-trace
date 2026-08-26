@@ -245,7 +245,7 @@ func TestChainLockPreventsForksPostgres(t *testing.T) {
 	}
 	conn, d, err := Open(context.Background(), dsn)
 	if err != nil {
-		t.Skipf("postgres unavailable: %v", err)
+		t.Fatalf("DATABASE_URL is set but Postgres is unreachable: %v", err)
 	}
 	defer conn.Close()
 
@@ -343,7 +343,7 @@ func TestNaiveAppendForksTheChainPostgres(t *testing.T) {
 	}
 	conn, d, err := Open(context.Background(), dsn)
 	if err != nil {
-		t.Skipf("postgres unavailable: %v", err)
+		t.Fatalf("DATABASE_URL is set but Postgres is unreachable: %v", err)
 	}
 	defer conn.Close()
 

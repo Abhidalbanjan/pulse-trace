@@ -68,9 +68,26 @@ func Run(ctx context.Context, db *sql.DB, service string, files fs.FS) error {
 	}
 	var names []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
-			names = append(names, e.Name())
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
 		}
+		// Engine-specific siblings are not migrations of their own.
+		//
+		// `015_x.sqlite.sql` is an alternative rendering of `015_x.sql` for a
+		// backend whose SQL differs too much to translate mechanically (see
+		// shared/db). It matches `*.sql`, so without this it is picked up as an
+		// extra version and applied *to Postgres* — which is exactly what
+		// happened: the SQLite sibling ran against Postgres and failed with
+		// `function json_each(jsonb) does not exist`, taking out every test
+		// that migrates a throwaway schema.
+		//
+		// Selecting the right sibling for a non-Postgres backend belongs with
+		// the code that knows which backend it is (P1.6); here they are simply
+		// never versions.
+		if isEngineSibling(e.Name()) {
+			continue
+		}
+		names = append(names, e.Name())
 	}
 	sort.Strings(names)
 
@@ -133,4 +150,20 @@ func sanitizeIdent(s string) string {
 		return "service"
 	}
 	return b.String()
+}
+
+// engineSiblingSuffixes are the recognised per-engine renderings of a
+// migration. Listed explicitly rather than matched as "two dots" so an
+// ordinary filename containing a dot is not silently skipped as a sibling.
+var engineSiblingSuffixes = []string{".sqlite.sql"}
+
+// isEngineSibling reports whether name is an engine-specific rendering of
+// another migration rather than a migration in its own right.
+func isEngineSibling(name string) bool {
+	for _, suffix := range engineSiblingSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
 }

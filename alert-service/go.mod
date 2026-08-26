@@ -3,7 +3,6 @@ module github.com/pulsetrace/alert-service
 go 1.25.0
 
 require (
-	github.com/IBM/sarama v1.43.2
 	github.com/google/uuid v1.6.0
 	github.com/grafana/pyroscope-go v1.4.1
 	github.com/jackc/pgx/v5 v5.9.2
@@ -13,6 +12,7 @@ require (
 )
 
 require (
+	github.com/IBM/sarama v1.43.2 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
@@ -49,7 +49,7 @@ require (
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect

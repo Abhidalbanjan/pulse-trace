@@ -276,7 +276,7 @@ resulting schema diffed against Postgres (names, types, nullability, indexes). A
 untranslatable migration gets a `NNN_name.sqlite.sql` sibling — never degrade the
 Postgres path to fit SQLite.
 
-### P1.4 — `GraphStore` port + SQL adapter · M
+### P1.4 — `GraphStore` port + SQL adapter · M ✅ *shipped*
 Neo4j appears in only four files and the Cypher is shallow.
 ```go
 type GraphStore interface {
@@ -294,6 +294,42 @@ port so tenant deletion keeps working in lite.
 **Equivalence test:** the same fixture graph through both implementations yields
 identical path sets — cycles and diamond dependencies included.
 
+> **Status: delivered, with three corrections to this slice as originally
+> written.** The port is `shared/graph`, the adapters are
+> `shared/graph/sqlstore` and `shared/graph/neo4jstore`, and the gate is a
+> twelve-assertion conformance suite run against both backends — confirmed able
+> to fail before being trusted, by breaking each implementation in turn and
+> checking that only its own subtests went red.
+>
+> **1. The interface above has six methods; the Cypher has ten.**
+> `UpsertServiceCatalog`, `UpsertServiceMetadata`, `UpdateCausalPath` and
+> `GetServiceState` are all graph-backed and all had to come across. The sketch
+> was a design; the port is the surface that exists.
+>
+> **2. `Walk` was not built, and the equivalence test as specified cannot be
+> met.** There is nothing to be equivalent *to*: every Cypher statement in the
+> service is depth-1 or a whole-tenant scan, and no traversal, depth cap or
+> cycle handling exists to compare against. Building one would mean writing a
+> Cypher walk purely so the SQL walk could be measured against it. The
+> conformance suite replaces the equivalence test — same purpose, two
+> implementations forced to agree, but over behaviour that exists. When
+> something needs multi-hop it gets its own slice; `sqlstore` documents where
+> the recursive CTE goes.
+>
+> **3. `tenantdata/purge.go` did not need to move.** It never talked to Neo4j —
+> it issues an HTTP `DELETE` to topology-service's `/api/v1/topology/tenant`,
+> which is already the right seam and works whatever backend is behind it. Only
+> a result label naming the wrong backend was wrong. (Relatedly: Neo4j appears
+> in eight files, not four, though four are trivial wiring.)
+>
+> **This slice does not remove a container, and the text above reads as though
+> it does.** `Neo4jRepository` was two stores wearing one name: the graph, and a
+> Redis half doing read-through caching, span buffering and edge metrics. Only
+> the graph moved, so lite still requires Redis — that decision belongs to P1.5
+> and is not made here. The SQL path is also Postgres-only until `migrate.Run`
+> learns to select `.sqlite.sql` siblings, which is **P1.6's outstanding
+> piece** and currently blocks lite from running the topology on SQLite.
+
 ### P1.5 — `shared/blob` + `shared/analytics` ports · M
 `blob`: Put/Get/List/Delete/Stat over S3, Azure, GCS, local FS; credential
 resolution centralised. Consumers: bus spill, compactor output, report PDFs,
@@ -310,6 +346,15 @@ already do. `shared/runtime.ResolveMode(env)` resolves `lite|cluster` **once** a
 startup; contradictory config (lite + `KAFKA_BROKERS`) is a **startup error** with
 a specific message, never a silent preference. Tested across every valid role
 combination and every contradictory env pairing.
+
+> **Carried in from P1.3 and P1.4, and blocking lite until it is done.**
+> `shared/migrate.Run` skips `*.sqlite.sql` siblings but nothing selects them,
+> so the hand-written SQLite rendering of a migration is currently unreachable
+> outside the golden schema test. Choosing the right sibling needs the code that
+> knows which backend it is, which is this slice. Until then every SQL path
+> added by P1.4 onwards is Postgres-only, and P1.4's own
+> `TOPOLOGY_STORE` switch is a local stand-in for `ResolveMode` that should be
+> deleted here rather than left as a second way to decide the same thing.
 
 ### P1.7 — Lite image, first run, and the 60-second proof · M
 `Dockerfile.lite`: binary + bundled Quickwit + built frontend, `$DATA_DIR` the

@@ -47,7 +47,14 @@ import (
 // shares one database, and correlation's 004 alters `alerts` — a table owned by
 // alert-service. In the cluster that ordering is incidental; in a single binary
 // it is a dependency, and this is where it gets pinned.
-var migrationDirs = []string{"gateway-service", "alert-service", "correlation-service"}
+//
+// log-service is in this list because leaving it out is what let the
+// type-position bug ship. Its schema has a column *named* `timestamp`, and it
+// is the only directory that does — so the one file capable of disproving the
+// rewrite rules was the one file this test did not read. A golden test whose
+// premise is "the evidence cannot be a reading of the rules" has to read
+// everything.
+var migrationDirs = []string{"gateway-service", "log-service", "alert-service", "correlation-service"}
 
 // applyMigrations runs every migration for every service against db.
 func applyMigrations(t *testing.T, conn *sql.DB, d Dialect) {
@@ -172,14 +179,30 @@ func TestSchemaMatchesPostgres(t *testing.T) {
 	}
 	applyMigrations(t, lite, sd)
 
+	// DATABASE_URL set but Postgres unreachable is a failure, not a skip.
+	//
+	// Skipping there produces a green tick for a comparison that never
+	// happened — the same shape as the Kafka half of the bus conformance suite
+	// silently not running. If the environment says a database is available,
+	// this test's job is to use it or say loudly that it could not. Absence of
+	// the variable is still a skip, which is the developer-machine case.
 	pg, err := sql.Open("pgx", dsn)
 	if err != nil {
-		t.Skipf("postgres unavailable: %v", err)
+		t.Fatalf("DATABASE_URL is set but the driver rejected it: %v", err)
 	}
 	defer pg.Close()
 	if err := pg.Ping(); err != nil {
-		t.Skipf("postgres unavailable: %v", err)
+		t.Fatalf("DATABASE_URL is set but Postgres is unreachable: %v", err)
 	}
+	// One connection, because `SET search_path` is connection-scoped.
+	//
+	// Issued on a pool it binds to whichever connection served that Exec; the
+	// thirty-odd DDL statements that follow may land on a different one, which
+	// starts at the default search_path. Those tables are then created in
+	// `public` of whatever DATABASE_URL points at — a test writing into a real
+	// database — and `DROP SCHEMA … CASCADE` does not clean them up. The
+	// column-count guard below only notices afterwards.
+	pg.SetMaxOpenConns(1)
 
 	// A throwaway schema so this never touches a real database's tables.
 	schema := "golden_schema_probe"
@@ -192,6 +215,16 @@ func TestSchemaMatchesPostgres(t *testing.T) {
 	t.Cleanup(func() { _, _ = pg.Exec(`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`) })
 	if _, err := pg.Exec(`SET search_path TO ` + schema); err != nil {
 		t.Fatalf("search_path: %v", err)
+	}
+	// Confirm it took on the connection the migrations will actually use,
+	// rather than trusting that the pool handed back the same one.
+	var active string
+	if err := pg.QueryRow(`SHOW search_path`).Scan(&active); err != nil {
+		t.Fatalf("read search_path: %v", err)
+	}
+	if !strings.Contains(active, schema) {
+		t.Fatalf("search_path is %q, not %q — the migrations would be written to "+
+			"the default schema of a real database", active, schema)
 	}
 	applyMigrations(t, pg, postgresDialect{})
 
@@ -312,4 +345,40 @@ func postgresColumns(t *testing.T, db *sql.DB, schema string) map[string]bool {
 		out[strings.ToLower(tbl+"."+col)] = true
 	}
 	return out
+}
+
+// The schema must contain the columns the migrations named, not the types they
+// were declared with.
+//
+// This is the assertion that would have caught the type-position bug. Before
+// the fix, `timestamp TIMESTAMPTZ NOT NULL` produced a NOT NULL column named
+// `TEXT` and no `timestamp` column — and the migration applied cleanly, so
+// counting tables reported success.
+func TestColumnsKeepTheirNamesOnSQLite(t *testing.T) {
+	conn, err := sql.Open("sqlite", sqliteDSN(filepath.Join(t.TempDir(), "lite.db")))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer conn.Close()
+	d := sqliteDialect{}
+	if err := d.EnsureChainLock(context.Background(), conn); err != nil {
+		t.Fatalf("chain lock: %v", err)
+	}
+	applyMigrations(t, conn, d)
+
+	cols := sqliteColumns(t, conn)
+
+	// The column that exposed the bug.
+	if !cols["log_entries.timestamp"] {
+		t.Error("log_entries has no `timestamp` column — a type name was substituted for the identifier")
+	}
+	// And no table anywhere may have a column named after a type, which is what
+	// the substitution produces.
+	for k := range cols {
+		switch strings.ToLower(k[strings.Index(k, ".")+1:]) {
+		case "text", "jsonb", "timestamptz", "integer":
+			t.Errorf("%s: a column is named after a type, which is what the "+
+				"identifier-blind rewrite produced", k)
+		}
+	}
 }

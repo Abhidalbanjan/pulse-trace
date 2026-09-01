@@ -187,12 +187,28 @@ func fixInsertSelectUpsert(stmt string) string {
 // them would mean running a dozen DDL regexes over every query the process ever
 // executes.
 func RewritePlaceholders(query string) string {
-	// Literals are skipped for the same reason as in rewriteForSQLite, and the
-	// consequence here is worse: `'costs $5 and $10'` became `'costs ? and ?'`,
-	// which corrupts the string *and* shifts every bind parameter after it, so
-	// the arguments land in the wrong columns.
+	// `$n` becomes `?n`, not `?`.
+	//
+	// # Why the numbered form
+	//
+	// Postgres lets one argument be referenced several times — `WHERE a = $1 OR
+	// b = $1` takes a single argument. A bare `?` is positional *by occurrence*,
+	// so that becomes two placeholders for one argument and the driver reports
+	// `missing argument with index 2`. Six statements in this repository already
+	// reuse a placeholder, including `$3 = '' OR kind = $3`, so this is not
+	// hypothetical — it is what would have happened the first time P1.6 routed
+	// real query traffic through here.
+	//
+	// SQLite's `?NNN` form is explicitly positional and preserves reuse, so the
+	// translation is exact rather than merely usually-right. It fails loudly
+	// when wrong, which is the lesser danger, but loud failure on every reused
+	// parameter is not a working dialect layer.
+	//
+	// Literals are skipped for the same reason as in rewriteForSQLite: `'costs
+	// $5 and $10'` would otherwise be rewritten too, corrupting the string and
+	// shifting every parameter after it.
 	return mapCode(query, func(code string) string {
-		return rePlaceholder.ReplaceAllString(code, "?")
+		return rePlaceholder.ReplaceAllString(code, "?$1")
 	})
 }
 

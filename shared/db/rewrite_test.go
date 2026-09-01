@@ -1,6 +1,9 @@
 package db
 
 import (
+	"context"
+	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -49,7 +52,7 @@ func TestRewriteStillTranslatesCodeBesideLiterals(t *testing.T) {
 // wrong columns.
 func TestPlaceholderRewriteLeavesLiteralsAlone(t *testing.T) {
 	in := `SELECT * FROM t WHERE note = 'costs $5 and $10' AND id = $1 AND b = $2`
-	want := `SELECT * FROM t WHERE note = 'costs $5 and $10' AND id = ? AND b = ?`
+	want := `SELECT * FROM t WHERE note = 'costs $5 and $10' AND id = ?1 AND b = ?2`
 	if got := RewritePlaceholders(in); got != want {
 		t.Errorf("\n got: %s\nwant: %s", got, want)
 	}
@@ -199,5 +202,50 @@ func TestCreateExtensionIsReplacedWholly(t *testing.T) {
 	if got := rewriteForSQLite(withComment); !strings.HasSuffix(got, "SELECT 1") ||
 		!strings.Contains(got, "-- for gen_random_uuid") {
 		t.Errorf("comment or replacement lost: %q", got)
+	}
+}
+
+// A reused parameter must stay one parameter.
+//
+// Postgres allows `WHERE a = $1 OR b = $1` with a single argument. Rewriting
+// both to a bare `?` makes them two positional placeholders, and the driver
+// reports `missing argument with index 2`. Six statements in this repository
+// already reuse a placeholder — `$3 = ” OR kind = $3` among them — so this
+// would have broken the first time P1.6 sent real queries through Rebind.
+func TestRewrittenPlaceholdersPreserveReuse(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{`SELECT * FROM t WHERE a = $1 OR b = $1`, `SELECT * FROM t WHERE a = ?1 OR b = ?1`},
+		{`SELECT $2, $1`, `SELECT ?2, ?1`},
+		{`UPDATE t SET a = $1 WHERE id = $2 AND owner = $1`, `UPDATE t SET a = ?1 WHERE id = ?2 AND owner = ?1`},
+	} {
+		if got := RewritePlaceholders(c.in); got != c.want {
+			t.Errorf("\n  in:   %s\n  got:  %s\n  want: %s", c.in, got, c.want)
+		}
+	}
+}
+
+// And the rewritten form must actually execute with the Postgres argument count.
+func TestReusedPlaceholderExecutesOnSQLite(t *testing.T) {
+	conn, err := sql.Open("sqlite", sqliteDSN(filepath.Join(t.TempDir(), "p.db")))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer conn.Close()
+	ctx := context.Background()
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE t (a TEXT, b TEXT)`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO t VALUES ('x','y')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	q := RewritePlaceholders(`SELECT a FROM t WHERE a = $1 OR b = $1`)
+	var got string
+	// One argument, as Postgres would take.
+	if err := conn.QueryRowContext(ctx, q, "x").Scan(&got); err != nil {
+		t.Fatalf("reused placeholder failed with a single argument: %v (query: %s)", err, q)
+	}
+	if got != "x" {
+		t.Errorf("got %q, want x", got)
 	}
 }

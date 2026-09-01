@@ -54,7 +54,11 @@ import (
 // rewrite rules was the one file this test did not read. A golden test whose
 // premise is "the evidence cannot be a reading of the rules" has to read
 // everything.
-var migrationDirs = []string{"gateway-service", "log-service", "alert-service", "correlation-service"}
+//
+// topology-service joins for the same reason, from the other direction: P1.4
+// gave it a schema, and a schema nothing diffs against Postgres is a schema
+// that drifts.
+var migrationDirs = []string{"gateway-service", "log-service", "alert-service", "correlation-service", "topology-service"}
 
 // applyMigrations runs every migration for every service against db.
 func applyMigrations(t *testing.T, conn *sql.DB, d Dialect) {

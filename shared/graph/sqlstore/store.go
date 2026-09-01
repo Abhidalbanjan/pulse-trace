@@ -411,11 +411,17 @@ func (s *Store) clearIncident(ctx context.Context, tx *sql.Tx, tenant, incidentI
 func (s *Store) addEntry(ctx context.Context, tx *sql.Tx, tenant, incidentID string, link graph.CausalLink) error {
 	entry := incidentID + "::" + link.Reason
 
-	// Each endpoint is bound twice rather than reusing $2/$3, because a repeated
-	// placeholder does not survive Rebind: `?` is positional by occurrence, so
-	// `$3` appearing twice becomes two separate `?` and the statement's arity no
-	// longer matches its arguments. It fails loudly here — "missing argument
-	// with index 4" — but the shape is worth avoiding rather than remembering.
+	// Each endpoint is bound twice rather than reusing $2/$3.
+	//
+	// This is written to be correct on either side of a fix in flight. On main
+	// today, Rebind emits a bare `?`, which is positional *by occurrence*: `$3`
+	// appearing twice becomes two placeholders for one argument, and the arity
+	// stops matching. The conformance suite found that on its first run, which
+	// is how the dialect layer came to be changed to SQLite's numbered `?n`
+	// form, where reuse survives exactly.
+	//
+	// Binding both endpoints explicitly needs neither behaviour, so this does
+	// not have to be revisited when the two branches meet.
 	q, err := tx.QueryContext(ctx, s.q(`
 		SELECT source, target, causal_entries FROM graph_edges
 		WHERE tenant_id = $1 AND ((source = $2 AND target = $3) OR (source = $4 AND target = $5))`),

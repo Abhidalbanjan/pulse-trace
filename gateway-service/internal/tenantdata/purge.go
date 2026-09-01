@@ -19,8 +19,8 @@ import (
 )
 
 // Purger deletes a tenant's data from ClickHouse (telemetry), Postgres
-// (incidents/usage/config), Quickwit (log index) and Neo4j (topology, via the
-// topology service).
+// (incidents/usage/config), Quickwit (log index) and the service topology (via the
+// topology service, whichever backend it runs).
 type Purger struct {
 	db            *sql.DB
 	clickhouseURL string
@@ -154,7 +154,7 @@ func (p *Purger) purgeQuickwit(ctx context.Context, tenantID string, res *Result
 	res.ok("quickwit logs")
 }
 
-// ── Neo4j topology (via topology service) ─────────────────────────────────────
+// ── Topology (via topology service) ───────────────────────────────────────────
 
 func (p *Purger) purgeTopology(ctx context.Context, tenantID string, res *Result) {
 	if p.topologyURL == "" {
@@ -177,7 +177,7 @@ func (p *Purger) purgeTopology(ctx context.Context, tenantID string, res *Result
 		res.fail("topology delete", fmt.Errorf("status %d", resp.StatusCode))
 		return
 	}
-	res.ok("neo4j topology")
+	res.ok("topology")
 }
 
 // ── Postgres ──────────────────────────────────────────────────────────────────

@@ -49,7 +49,7 @@ const (
 )
 
 type API struct {
-	repo         *repository.Neo4jRepository
+	repo         *repository.Repository
 	sharedSecret []byte
 	runCmd       commandRunner
 
@@ -58,7 +58,7 @@ type API struct {
 	policy remediation.Policy
 }
 
-func NewAPI(repo *repository.Neo4jRepository, secret string) *API {
+func NewAPI(repo *repository.Repository, secret string) *API {
 	policy, err := remediation.PolicyFromEnv()
 	if err != nil {
 		// PolicyFromEnv returns the restrictive default alongside its error,
@@ -69,7 +69,7 @@ func NewAPI(repo *repository.Neo4jRepository, secret string) *API {
 	return NewAPIWithPolicy(repo, secret, policy)
 }
 
-func NewAPIWithPolicy(repo *repository.Neo4jRepository, secret string, policy remediation.Policy) *API {
+func NewAPIWithPolicy(repo *repository.Repository, secret string, policy remediation.Policy) *API {
 	if secret == "" {
 		secret = "pulsetrace_secure_playbook_hmac_secret"
 	}

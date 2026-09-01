@@ -150,12 +150,23 @@ func (r *Repository) UpsertServiceMetadata(ctx context.Context, tenant, serviceN
 
 // UpdateCausalPath records an incident's causal edges.
 //
-// Note it does not invalidate the cached graph, which is the behaviour this
-// always had: a freshly highlighted path can take up to the cache TTL to show.
-// Preserved rather than fixed here so this slice stays a refactor; it is a real
-// staleness bug and deserves its own change.
+// The cached graph is dropped afterwards. Without that, a freshly highlighted
+// path stayed invisible for up to the cache TTL — and the incident view is the
+// one place someone is waiting for this exact answer, where a blank causal path
+// reads as "the analysis found nothing" rather than "the cache has not caught
+// up". The withdrawal case is worse: a conclusion the engine has already
+// retracted stays on screen.
+//
+// Only the graph key, because causal entries are an edge property and change
+// neither the upstream nor the downstream name lists.
 func (r *Repository) UpdateCausalPath(ctx context.Context, tenant, incidentID string, links []CausalLink) error {
-	return r.store.UpdateCausalPath(ctx, tenant, incidentID, links)
+	err := r.store.UpdateCausalPath(ctx, tenant, incidentID, links)
+	if err == nil && r.rdb != nil {
+		if e := r.rdb.Del(ctx, "topo:graph:"+tenant).Err(); e != nil {
+			log.Printf("failed to invalidate cached graph for tenant %s: %v", tenant, e)
+		}
+	}
+	return err
 }
 
 func (r *Repository) DeleteTenant(ctx context.Context, tenant string) error {

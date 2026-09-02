@@ -122,7 +122,12 @@ func main() {
 	// admins can add/edit/disable a rule from Settings with no redeploy.
 	rateLimiter := middleware.NewRateLimiter(getEnv("REDIS_ADDR", "redis:6379"), []middleware.RateLimitRule{
 		{Name: "auth-login", PathPrefixes: []string{"/api/v1/auth/login", "/api/v1/auth/register"}, Limit: 10, Window: time.Minute},
-		{Name: "telemetry-ingest", PathPrefixes: []string{"/v1/traces", "/v1/metrics", "/v1/logs", "/api/v1/logs"}, Limit: 6000, Window: time.Minute},
+		// Every ingestion path, including the Datadog (/api/v2/logs) and Splunk
+		// (/services/collector) compatibility endpoints. Leaving those two out
+		// dropped them onto the `default` rule at 10 req/s, a tenth of the
+		// native path, which made the vendor-migration story unusable for the
+		// migration it exists to enable. See migration 028.
+		{Name: "telemetry-ingest", PathPrefixes: []string{"/v1/traces", "/v1/metrics", "/v1/logs", "/api/v1/logs", "/api/v2/logs", "/services/collector"}, Limit: 6000, Window: time.Minute},
 		{Name: "default", PathPrefixes: []string{"/"}, Limit: 600, Window: time.Minute},
 	})
 	rateLimitRuleHandler := handler.NewRateLimitRuleHandler(authHandler.GetDB(), rateLimiter)

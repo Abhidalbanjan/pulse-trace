@@ -30,11 +30,21 @@
 //   SUMMARY_OUT path to write the JSON summary         (default scripts/load/summary.json)
 //
 // RATE is the *aggregate* arrival rate; it is split evenly across the enabled
-// protocols. The gateway's `telemetry-ingest` limiter caps /api/v1/logs + /v1/logs
-// at 100 req/s per tenant (6000/60s), so keep (logs + otlp_logs) share under that
-// on the default (keyless → 'default' tenant) stack. dd_logs and splunk are on
-// separate paths and not covered by that rule. CI's fast gate runs PROTOCOLS=logs
-// only (unchanged behaviour); the scheduled scale job runs the full profile.
+// protocols. The gateway's `telemetry-ingest` limiter caps every ingestion path
+// at 100 req/s per tenant (6000/60s), so keep the aggregate under that on the
+// default (keyless → 'default' tenant) stack.
+//
+// This comment used to say dd_logs and splunk were "on separate paths and not
+// covered by that rule", which was true and the wrong conclusion: uncovered
+// meant they fell through to the `default` rule at 600/60s — 10 req/s, a tenth
+// of the native path — not that they were unlimited. The scheduled job drives
+// each protocol at 30 req/s, so both vendor paths were rejected at roughly two
+// thirds and the run failed its threshold every week from the day it was added.
+// Fixed in gateway migration 028; the paths are now on the ingest limiter where
+// they always belonged.
+//
+// CI's fast gate runs PROTOCOLS=logs only (unchanged behaviour); the scheduled
+// scale job runs the full profile.
 import http from 'k6/http';
 import { check } from 'k6';
 import { Counter } from 'k6/metrics';

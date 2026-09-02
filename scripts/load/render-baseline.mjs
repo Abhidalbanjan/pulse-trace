@@ -34,15 +34,24 @@ lines.push(`_Last run: **${s.generatedAt}** · target \`${s.baseUrl}\` · ${s.du
 lines.push('');
 lines.push('### Gateway ingest latency (per protocol)');
 lines.push('');
-lines.push('| Protocol | requests | p50 ms | p95 ms | p99 ms | max ms |');
-lines.push('| --- | ---: | ---: | ---: | ---: | ---: |');
+// Accepted and failure rate sit beside latency on purpose. A protocol being
+// refused outright still posts a healthy p99 — every rejection is a fast
+// rejection — so a latency-only table shows four green columns while a quarter
+// of the corpus never lands. Reading left to right, "fast" and "working" are now
+// different columns.
+lines.push('| Protocol | requests | accepted | fail rate | p50 ms | p95 ms | p99 ms | max ms |');
+lines.push('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
 for (const p of s.protocols) {
   const l = s.latencyMs[p];
+  const acc = s.acceptedByProtocol ? s.acceptedByProtocol[p] : undefined;
+  const fail = s.failureRateByProtocol ? s.failureRateByProtocol[p] : undefined;
   if (!l) {
-    lines.push(`| \`${p}\` | — | — | — | — | — |`);
+    lines.push(`| \`${p}\` | — | — | — | — | — | — | — |`);
     continue;
   }
-  lines.push(`| \`${p}\` | ${n(l.count)} | ${n(l.p50)} | ${n(l.p95)} | ${n(l.p99)} | ${n(l.max)} |`);
+  lines.push(
+    `| \`${p}\` | ${n(l.count)} | ${n(acc)} | ${n(fail)} | ${n(l.p50)} | ${n(l.p95)} | ${n(l.p99)} | ${n(l.max)} |`,
+  );
 }
 lines.push('');
 lines.push(`**Records accepted:** ${n(s.recordsAccepted)} · **HTTP failure rate:** ${n(s.httpReqFailedRate)}`);

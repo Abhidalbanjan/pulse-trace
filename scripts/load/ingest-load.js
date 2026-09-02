@@ -242,6 +242,22 @@ for (const p of SELECTED) {
   // Per-protocol latency budgets. Declaring the threshold also materialises the
   // per-endpoint sub-metric so handleSummary can report p50/p95/p99 per protocol.
   thresholds[`http_req_duration{endpoint:${p}}`] = ['p(95)<800', 'p(99)<1500'];
+
+  // Per-protocol failure budgets, same rate as the aggregate.
+  //
+  // These exist to make a breach *legible*, not to tighten it. The aggregate
+  // `http_req_failed` says 37% of requests failed and nothing about which of
+  // four protocols did it — that number stood in a weekly job for three runs
+  // while two vendor paths were being rejected at two thirds and the other two
+  // were fine. A per-protocol threshold names the culprit in the failure line
+  // itself.
+  thresholds[`http_req_failed{endpoint:${p}}`] = ['rate<0.02'];
+
+  // No budget, purely to materialise the sub-metric: k6 only surfaces a tagged
+  // sub-metric in handleSummary when a threshold references it, and `count>=0`
+  // is always true. Without this the accepted-record count is aggregate-only,
+  // so a protocol accepting nothing is invisible next to three that are fine.
+  thresholds[`ingest_records_accepted{endpoint:${p}}`] = ['count>=0'];
 }
 
 export const options = {
@@ -300,6 +316,25 @@ export function handleSummary(data) {
   const perProtocol = {};
   for (const p of SELECTED) perProtocol[p] = dur(p);
 
+  // Accepted records and failure rate per protocol. `dur` above reports latency
+  // for every request, successful or not, so a protocol being refused outright
+  // still shows a healthy p99 — these two are what distinguish "fast" from
+  // "working".
+  const accepted = (endpoint) => {
+    const m = data.metrics[`ingest_records_accepted{endpoint:${endpoint}}`];
+    return m && m.values ? m.values.count : 0;
+  };
+  const failedRate = (endpoint) => {
+    const m = data.metrics[`http_req_failed{endpoint:${endpoint}}`];
+    return m && m.values ? round4(m.values.rate) : null;
+  };
+  const perProtocolAccepted = {};
+  const perProtocolFailed = {};
+  for (const p of SELECTED) {
+    perProtocolAccepted[p] = accepted(p);
+    perProtocolFailed[p] = failedRate(p);
+  }
+
   const summary = {
     generatedAt: new Date().toISOString(),
     baseUrl: BASE_URL,
@@ -315,6 +350,8 @@ export function handleSummary(data) {
       ? round4(data.metrics.http_req_failed.values.rate)
       : null,
     latencyMs: perProtocol,
+    acceptedByProtocol: perProtocolAccepted,
+    failureRateByProtocol: perProtocolFailed,
   };
 
   const out = {};

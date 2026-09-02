@@ -9,7 +9,7 @@ import (
 
 func main() {
 	log.Println("Connecting to Neo4j to seed data...")
-	repo, err := repository.NewNeo4jRepository("bolt://localhost:7687", "neo4j", "pulsetrace_secret", "")
+	repo, err := repository.NewNeo4j("bolt://localhost:7687", "neo4j", "pulsetrace_secret", "")
 	if err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}
@@ -39,9 +39,9 @@ func main() {
 
 	// Update states
 	states := map[string]string{
-		"payment-service": "DEGRADED",
+		"payment-service":   "DEGRADED",
 		"inventory-service": "HEALTHY",
-		"postgres-db": "HEALTHY",
+		"postgres-db":       "HEALTHY",
 	}
 
 	for svc, state := range states {

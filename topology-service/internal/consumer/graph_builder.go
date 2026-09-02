@@ -14,10 +14,10 @@ import (
 )
 
 type GraphBuilder struct {
-	repo *repository.Neo4jRepository
+	repo *repository.Repository
 }
 
-func NewGraphBuilder(repo *repository.Neo4jRepository) *GraphBuilder {
+func NewGraphBuilder(repo *repository.Repository) *GraphBuilder {
 	return &GraphBuilder{repo: repo}
 }
 
